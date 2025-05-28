@@ -104,9 +104,9 @@ class DiffusionConfig(PreTrainedConfig):
     """
 
     # Inputs / output structure.
-    n_obs_steps: int = 2
-    horizon: int = 16
-    n_action_steps: int = 8
+    n_obs_steps: int = 4
+    horizon: int = 128
+    n_action_steps: int = 64
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
@@ -118,12 +118,12 @@ class DiffusionConfig(PreTrainedConfig):
 
     # The original implementation doesn't sample frames for the last 7 steps,
     # which avoids excessive padding and leads to improved training results.
-    drop_n_last_frames: int = 7  # horizon - n_action_steps - n_obs_steps + 1
+    drop_n_last_frames: int = 61  # horizon - n_action_steps - n_obs_steps + 1
 
     # Architecture / modeling.
     # Vision backbone.
     vision_backbone: str = "resnet18"
-    crop_shape: tuple[int, int] | None = (84, 84)
+    crop_shape: tuple[int, int] | None = None
     crop_is_random: bool = True
     pretrained_backbone_weights: str | None = None
     use_group_norm: bool = True
@@ -145,8 +145,12 @@ class DiffusionConfig(PreTrainedConfig):
     clip_sample: bool = True
     clip_sample_range: float = 1.0
 
+    action_space: str = "right_eef"
+
     # Inference
     num_inference_steps: int | None = None
+    # num_inference_steps: int | None = 10
+    # inference_noise_scheduler_type: str = "DDIM"
 
     # Loss computation
     do_mask_loss_for_padding: bool = False
