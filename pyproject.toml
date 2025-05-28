@@ -136,3 +136,34 @@ default.extend-ignore-identifiers-re = [
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.system-requirements]
+libc = { family = "glibc", version = "2.31" }  # Need this for rerun
+
+[tool.pixi.dependencies]
+python = "<=3.11"  # Pyrealsense needs this, wheels aren't released for Python 3.12
+
+[tool.pixi.pypi-dependencies]
+lerobot = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+aloha = { features = ["aloha"], solve-group = "default" }
+# dev = { features = ["dev"], solve-group = "default" }
+# docs = { features = ["docs"], solve-group = "default" }
+# dora = { features = ["dora"], solve-group = "default" }
+# dynamixel = { features = ["dynamixel"], solve-group = "default" }
+# feetech = { features = ["feetech"], solve-group = "default" }
+# intelrealsense = { features = ["intelrealsense"], solve-group = "default" }
+# pi0 = { features = ["pi0"], solve-group = "default" }
+# pusht = { features = ["pusht"], solve-group = "default" }
+# stretch = { features = ["stretch"], solve-group = "default" }
+# test = { features = ["test"], solve-group = "default" }
+# umi = { features = ["umi"], solve-group = "default" }
+# video-benchmark = { features = ["video_benchmark"], solve-group = "default" }
+# xarm = { features = ["xarm"], solve-group = "default" }
+
+[tool.pixi.tasks]
