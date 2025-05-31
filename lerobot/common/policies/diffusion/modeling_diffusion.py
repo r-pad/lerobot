@@ -43,145 +43,7 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-import mink
-from robot_descriptions.loaders.mujoco import load_robot_description
-import numpy as np
-import pytorch3d.transforms as transforms
-from tqdm import tqdm
-from torch import pi
-
-def map_real2sim(Q):
-    """
-    The real robot joints and the sim robot don't map exactly to each other.
-    Some joints are offset, some joints rotate the opposite direction.
-    This mapping converts real robot joint angles (in radians) to the sim version.
-
-    sim = real*sign + offset
-    """
-    # Set gripper fingers to 0, we don't care about them for IK
-    sign = torch.tensor([-1, -1, 1, 1, 1, 1, 0, 0,    
-                      -1, -1, 1, 1, 1, 1, 0, 0])
-    offset = torch.tensor([pi/2, 0, -pi/2, 0, 0, 0, 0, 0,
-                       pi/2, 0, -pi/2, 0, 0, 0, 0, 0])
-    Q = sign*Q + offset
-
-    # We handle the shoulder joint separately, x*-1 + np.pi/2 brings it close but just outside joint limits for some reason....
-    # Remap this joint range using real observed min/max and sim min/max
-    real_min, real_max = -3.59, -0.23
-    sim_min, sim_max = -1.85, 1.26 
-    Q[1] = (Q[1] - real_min)*((sim_max-sim_min)/(real_max-real_min)) + sim_min
-    Q[9] = (Q[9] - real_min)*((sim_max-sim_min)/(real_max-real_min)) + sim_min
-
-    return Q
-
-def forward_kinematics(ALOHA_CONFIGURATION, real_joints):
-    # Mapping from LeRobot (real) to robot_descriptions (sim)
-    # Check LeRobot joint names in lerobot/common/robot_devices/robots/configs.py
-    # Check robot_descriptions joint names with `print([model.joint(i).name for i in range(model.njnt)])`
-    Q = torch.deg2rad(torch.tensor(
-        [
-            real_joints[0],
-            real_joints[1],
-            real_joints[3],
-            real_joints[5],
-            real_joints[6],
-            real_joints[7],
-            0,
-            0,
-
-            real_joints[9],
-            real_joints[10],
-            real_joints[12],
-            real_joints[14],
-            real_joints[15],
-            real_joints[16],
-            0,
-            0,
-        ]
-    ))
-    Q = map_real2sim(Q)
-    ALOHA_CONFIGURATION.update(Q)
-    eef_pose_se3 = ALOHA_CONFIGURATION.get_transform_frame_to_world("right/gripper", "site")
-    rot_6d, trans = transforms.matrix_to_rotation_6d(torch.from_numpy(eef_pose_se3.as_matrix()[None, :3, :3])).squeeze(), torch.from_numpy(eef_pose_se3.as_matrix()[:3,3])
-    eef_pose = torch.cat([rot_6d, trans], axis=0)
-    return eef_pose, eef_pose_se3
-
-
-def map_sim2real(vec):
-    """
-    inverse of map_real2sim
-    sim = real*sign + offset
-    real = (sim - offset)*sign
-    """
-    # Set gripper fingers to 0, we don't care about them for IK
-    sign = torch.tensor([-1, -1, -1, 1, 1, 1, 1, 1, 0,    
-                      -1, -1, -1, 1, 1, 1, 1, 1, 0])
-    offset = torch.tensor([pi/2, 0, 0, -pi/2, -pi/2, 0, 0, 0, 0,
-                       pi/2, 0, 0, -pi/2, -pi/2, 0, 0, 0, 0])
-    vec = (vec - offset)*sign
-
-    # Inverted from real2sim
-    real_min, real_max = 0.23, 3.59 
-    sim_min, sim_max = -1.26, 1.85 
-
-    vec[1] = (vec[1] - sim_min)*((real_max-real_min)/(sim_max-sim_min)) + real_min
-    vec[2] = (vec[2] - sim_min)*((real_max-real_min)/(sim_max-sim_min)) + real_min
-    vec[10] = (vec[10] - sim_min)*((real_max-real_min)/(sim_max-sim_min)) + real_min
-    vec[11] = (vec[11] - sim_min)*((real_max-real_min)/(sim_max-sim_min)) + real_min
-    return vec
-
-
-def inverse_kinematics(configuration, ee_pose):
-    rot_6d, trans, articulation = ee_pose[:6], ee_pose[6:9], ee_pose[9]
-    pose_matrix = torch.eye(4, device=ee_pose.device)
-    pose_matrix[:3,3] = trans
-    pose_matrix[:3,:3] = transforms.rotation_6d_to_matrix(torch.tensor(rot_6d)[None]).squeeze()
-    ee_pose_se3 = mink.lie.se3.SE3.from_matrix(pose_matrix.cpu().numpy())
-    
-    ee_task = mink.FrameTask(frame_name="right/gripper", frame_type="site", position_cost=1., orientation_cost=1.)
-    ee_task.set_target(ee_pose_se3)
-    n_iter = 200
-    dt = 0.01
-    thresh = 1e-3
-    for i in range(n_iter):
-        vel = mink.solve_ik(configuration, [ee_task], dt=dt, solver='daqp')
-        configuration.integrate_inplace(vel, dt)
-
-        err = ee_task.compute_error(configuration)
-        print(i, np.linalg.norm(err))
-        if np.linalg.norm(err) < thresh: break
-    
-    Q = configuration.q
-    vec = torch.tensor(
-        [
-            Q[0],
-            Q[1],
-            Q[1],
-            Q[2],
-            Q[2],
-            Q[3],
-            Q[4],
-            Q[5],
-            0,
-
-            Q[8],
-            Q[9],
-            Q[9],
-            Q[10],
-            Q[10],
-            Q[11],
-            Q[12],
-            Q[13],
-            0,
-        ]
-    )
-    vec = torch.rad2deg(map_sim2real(vec))
-    vec[-1] = articulation
-    return vec
-
-ALOHA_MODEL = load_robot_description("aloha_mj_description")
-ALOHA_CONFIGURATION = mink.Configuration(ALOHA_MODEL)
-
+from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics
 
 class DiffusionPolicy(PreTrainedPolicy):
     """
@@ -210,11 +72,11 @@ class DiffusionPolicy(PreTrainedPolicy):
 
         self.action_space = config.action_space
         if self.config.action_space == "right_eef":
-            self.OBS_KEY = "observation.right_eef_pose"
-            self.ACT_KEY = "action.right_eef_pose"
+            self.obs_key = "observation.right_eef_pose"
+            self.act_key = "action.right_eef_pose"
         elif self.config.action_space == "joint":
-            self.OBS_KEY = "observation.state"
-            self.ACT_KEY = "action"
+            self.obs_key = "observation.state"
+            self.act_key = "action"
         else:
             raise NotImplementedError
 
@@ -239,8 +101,8 @@ class DiffusionPolicy(PreTrainedPolicy):
     def reset(self):
         """Clear observation and action queues. Should be called on `env.reset()`"""
         self._queues = {
-            self.OBS_KEY: deque(maxlen=self.config.n_obs_steps),
-            self.ACT_KEY: deque(maxlen=self.config.n_action_steps),
+            self.obs_key: deque(maxlen=self.config.n_obs_steps),
+            self.act_key: deque(maxlen=self.config.n_action_steps),
         }
         if self.config.image_features:
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
@@ -281,24 +143,24 @@ class DiffusionPolicy(PreTrainedPolicy):
         # Note: It's important that this happens after stacking the images into a single key.
         self._queues = populate_queues(self._queues, batch)
 
-        if len(self._queues[self.ACT_KEY]) == 0:
+        if len(self._queues[self.act_key]) == 0:
             # stack n latest observations from the queue
             batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
             actions = self.diffusion.generate_actions(batch)
 
             # TODO(rcadene): make above methods return output dictionary?
-            actions = self.unnormalize_outputs({self.ACT_KEY: actions})[self.ACT_KEY]
+            actions = self.unnormalize_outputs({self.act_key: actions})[self.act_key]
 
-            self._queues[self.ACT_KEY].extend(actions.transpose(0, 1))
+            self._queues[self.act_key].extend(actions.transpose(0, 1))
 
         if self.config.action_space == "right_eef":
-            action_eef = self._queues[self.ACT_KEY].popleft()
+            action_eef = self._queues[self.act_key].popleft()
             action = inverse_kinematics(ALOHA_CONFIGURATION, action_eef.squeeze())[None].float()
 
-            self.OBS_KEY = "observation.right_eef_pose"
-            self.ACT_KEY = "action.right_eef_pose"
+            self.obs_key = "observation.right_eef_pose"
+            self.act_key = "action.right_eef_pose"
         elif self.config.action_space == "joint":
-            action = self._queues[self.ACT_KEY].popleft()
+            action = self._queues[self.act_key].popleft()
             action_eef = torch.zeros(10, device=action.device, dtype=action.dtype) # not used 
         else:
             raise NotImplementedError
@@ -312,7 +174,6 @@ class DiffusionPolicy(PreTrainedPolicy):
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
-            if len(batch['observation.images'].shape) == 5: batch["observation.images"] = batch["observation.images"].unsqueeze(1)
         batch = self.normalize_targets(batch)
         loss = self.diffusion.compute_loss(batch)
         # no output_dict so returning None
@@ -338,16 +199,16 @@ class DiffusionModel(nn.Module):
         self.config = config
         self.action_space = config.action_space
         if self.config.action_space == "right_eef":
-            self.OBS_KEY = "observation.right_eef_pose"
-            self.ACT_KEY = "action.right_eef_pose"
+            self.obs_key = "observation.right_eef_pose"
+            self.act_key = "action.right_eef_pose"
         elif self.config.action_space == "joint":
-            self.OBS_KEY = "observation.state"
-            self.ACT_KEY = "action"
+            self.obs_key = "observation.state"
+            self.act_key = "action"
         else:
             raise NotImplementedError
 
         # Build observation encoders (depending on which observations are provided).
-        global_cond_dim = self.config.robot_state_feature[self.OBS_KEY].shape[0]
+        global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -378,18 +239,6 @@ class DiffusionModel(nn.Module):
         else:
             self.num_inference_steps = config.num_inference_steps
 
-        # self.inference_noise_scheduler = _make_noise_scheduler(
-        #     config.inference_noise_scheduler_type,
-        #     num_train_timesteps=config.num_train_timesteps,
-        #     beta_start=config.beta_start,
-        #     beta_end=config.beta_end,
-        #     beta_schedule=config.beta_schedule,
-        #     clip_sample=config.clip_sample,
-        #     clip_sample_range=config.clip_sample_range,
-        #     prediction_type=config.prediction_type,
-        # )
-
-
     # ========= inference  ============
     def conditional_sample(
         self, batch_size: int, global_cond: Tensor | None = None, generator: torch.Generator | None = None
@@ -399,15 +248,12 @@ class DiffusionModel(nn.Module):
 
         # Sample prior.
         sample = torch.randn(
-            size=(batch_size, self.config.horizon, self.config.action_feature[self.ACT_KEY].shape[0]),
+            size=(batch_size, self.config.horizon, self.config.action_feature[self.act_key].shape[0]),
             dtype=dtype,
             device=device,
             generator=generator,
         )
 
-        # self.inference_noise_scheduler.set_timesteps(self.num_inference_steps)
-
-        # for t in self.inference_noise_scheduler.timesteps:
         for t in self.noise_scheduler.timesteps:
             # Predict model output.
             model_output = self.unet(
@@ -416,15 +262,14 @@ class DiffusionModel(nn.Module):
                 global_cond=global_cond,
             )
             # Compute previous image: x_t -> x_t-1
-            # sample = self.inference_noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
             sample = self.noise_scheduler.step(model_output, t, sample, generator=generator).prev_sample
 
         return sample
 
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
         """Encode image features and concatenate them all together along with the state vector."""
-        batch_size, n_obs_steps = batch[self.OBS_KEY].shape[:2]
-        global_cond_feats = [batch[self.OBS_KEY]]
+        batch_size, n_obs_steps = batch[self.obs_key].shape[:2]
+        global_cond_feats = [batch[self.obs_key]]
         # Extract image features.
         if self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -470,7 +315,7 @@ class DiffusionModel(nn.Module):
             "observation.environment_state": (B, environment_dim)
         }
         """
-        batch_size, n_obs_steps = batch[self.OBS_KEY].shape[:2]
+        batch_size, n_obs_steps = batch[self.obs_key].shape[:2]
         assert n_obs_steps == self.config.n_obs_steps
 
         # Encode image features and concatenate them all together along with the state vector.
@@ -503,8 +348,8 @@ class DiffusionModel(nn.Module):
         # Input validation.
         assert set(batch).issuperset({"observation.state", "action", "action_is_pad"})
         assert "observation.images" in batch or "observation.environment_state" in batch
-        n_obs_steps = batch[self.OBS_KEY].shape[1]
-        horizon = batch[self.ACT_KEY].shape[1]
+        n_obs_steps = batch[self.obs_key].shape[1]
+        horizon = batch[self.act_key].shape[1]
         assert horizon == self.config.horizon
         assert n_obs_steps == self.config.n_obs_steps
 
@@ -512,7 +357,7 @@ class DiffusionModel(nn.Module):
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
         # Forward diffusion.
-        trajectory = batch[self.ACT_KEY]
+        trajectory = batch[self.act_key]
         # Sample noise to add to the trajectory.
         eps = torch.randn(trajectory.shape, device=trajectory.device)
         # Sample a random noising timestep for each item in the batch.
@@ -533,7 +378,7 @@ class DiffusionModel(nn.Module):
         if self.config.prediction_type == "epsilon":
             target = eps
         elif self.config.prediction_type == "sample":
-            target = batch[self.ACT_KEY]
+            target = batch[self.act_key]
         else:
             raise ValueError(f"Unsupported prediction type {self.config.prediction_type}")
 
@@ -777,11 +622,11 @@ class DiffusionConditionalUnet1d(nn.Module):
         self.config = config
 
         if self.config.action_space == "right_eef":
-            self.OBS_KEY = "observation.right_eef_pose"
-            self.ACT_KEY = "action.right_eef_pose"
+            self.obs_key = "observation.right_eef_pose"
+            self.act_key = "action.right_eef_pose"
         elif self.config.action_space == "joint":
-            self.OBS_KEY = "observation.state"
-            self.ACT_KEY = "action"
+            self.obs_key = "observation.state"
+            self.act_key = "action"
         else:
             raise NotImplementedError
 
@@ -798,7 +643,7 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         # In channels / out channels for each downsampling block in the Unet's encoder. For the decoder, we
         # just reverse these.
-        in_out = [(config.action_feature[self.ACT_KEY].shape[0], config.down_dims[0])] + list(
+        in_out = [(config.action_feature[self.act_key].shape[0], config.down_dims[0])] + list(
             zip(config.down_dims[:-1], config.down_dims[1:], strict=True)
         )
 
@@ -853,7 +698,7 @@ class DiffusionConditionalUnet1d(nn.Module):
 
         self.final_conv = nn.Sequential(
             DiffusionConv1dBlock(config.down_dims[0], config.down_dims[0], kernel_size=config.kernel_size),
-            nn.Conv1d(config.down_dims[0], config.action_feature[self.ACT_KEY].shape[0], 1),
+            nn.Conv1d(config.down_dims[0], config.action_feature[self.act_key].shape[0], 1),
         )
 
     def forward(self, x: Tensor, timestep: Tensor | int, global_cond=None) -> Tensor:
