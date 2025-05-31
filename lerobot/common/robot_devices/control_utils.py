@@ -259,11 +259,13 @@ def control_loop(
 
         if teleoperate:
             observation, action = robot.teleop_step(record_data=True)
-            observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
-            action["action.right_eef_pose"] = add_eef_pose(action['action'])
+            if robot.use_eef:
+                observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
+                action["action.right_eef_pose"] = add_eef_pose(action['action'])
         else:
             observation = robot.capture_observation()
-            observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
+            if robot.use_eef:
+                observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
             action = None
 
             if policy is not None:
@@ -273,7 +275,9 @@ def control_loop(
                 # Action can eventually be clipped using `max_relative_target`,
                 # so action actually sent is saved in the dataset.
                 action = robot.send_action(pred_action)
-                action = {"action": action, "action.right_eef_pose": pred_action_eef}
+                action = {"action": action}
+                if robot.use_eef:
+                    action["action.right_eef_pose"] = pred_action_eef
 
         if dataset is not None:
             frame = {**observation, **action, "task": single_task}

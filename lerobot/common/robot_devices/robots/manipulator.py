@@ -160,6 +160,7 @@ class ManipulatorRobot:
     ):
         self.config = config
         self.robot_type = self.config.type
+        self.use_eef = self.config.use_eef
         self.calibration_dir = Path(self.config.calibration_dir)
         self.leader_arms = make_motors_buses_from_configs(self.config.leader_arms)
         self.follower_arms = make_motors_buses_from_configs(self.config.follower_arms)
@@ -199,8 +200,7 @@ class ManipulatorRobot:
             },
         }
 
-        USE_EEF = True
-        if USE_EEF:
+        if self.use_eef:
             eef_names = ["rot_6d_0", "rot_6d_1", "rot_6d_2", "rot_6d_3", "rot_6d_4", "rot_6d_5", "trans_0", "trans_1", "trans_2", "gripper_articulation"] 
             motor_features["observation.right_eef_pose"] = {
                 "dtype": "float32",
