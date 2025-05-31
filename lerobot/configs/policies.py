@@ -103,7 +103,7 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
         raise NotImplementedError
 
     @property
-    def robot_state_feature(self) -> PolicyFeature | None:
+    def robot_state_feature(self) -> dict[str, PolicyFeature]:
         robot_state_feature = {name: ft for name, ft in self.input_features.items() if ft.type is FeatureType.STATE}
         return robot_state_feature
 
@@ -119,7 +119,7 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
         return {key: ft for key, ft in self.input_features.items() if ft.type is FeatureType.VISUAL}
 
     @property
-    def action_feature(self) -> PolicyFeature | None:
+    def action_feature(self) -> dict[str, PolicyFeature]:
         action_feature = {name: ft for name, ft in self.output_features.items() if ft.type is FeatureType.ACTION}
         return action_feature
 
