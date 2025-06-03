@@ -57,6 +57,9 @@ class ManipulatorRobotConfig(RobotConfig):
 
     mock: bool = False
 
+    # save end-effector pose info (enabled for aloha)
+    use_eef: bool = False
+
     def __post_init__(self):
         if self.mock:
             for arm in self.leader_arms.values():

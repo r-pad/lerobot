@@ -72,11 +72,12 @@ dependencies = [
     "torchcodec==0.2.1; sys_platform != 'win32' and (sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')) and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
     "torchvision>=0.21.0",
     "wandb>=0.16.3",
-    "zarr>=2.17.0",
+    "zarr>=2.17.0", 
+    "mink>=0.0.11,<0.0.12", 
+    "robot-descriptions>=1.17.0,<2", "setuptools", "wheel",
 ]
 
 [project.optional-dependencies]
-aloha = ["gym-aloha>=0.1.1 ; python_version < '4.0'"]
 docs = ["hf-doc-builder @ git+https://github.com/huggingface/doc-builder.git@main", "watchdog >= 6.0.0"]
 dev = ["pre-commit>=3.7.0", "debugpy>=1.8.1"]
 dora = [
@@ -145,13 +146,14 @@ libc = { family = "glibc", version = "2.31" }  # Need this for rerun
 
 [tool.pixi.dependencies]
 python = "<=3.11"  # Pyrealsense needs this, wheels aren't released for Python 3.12
+pip = ">=25.1.1,<26"
 
 [tool.pixi.pypi-dependencies]
 lerobot = { path = ".", editable = true }
 
 [tool.pixi.environments]
-default = { solve-group = "default" }
-aloha = { features = ["aloha"], solve-group = "default" }
+default = { features = ["dynamixel"], solve-group = "default" }
+# aloha = { features = ["aloha"], solve-group = "default" }
 # dev = { features = ["dev"], solve-group = "default" }
 # docs = { features = ["docs"], solve-group = "default" }
 # dora = { features = ["dora"], solve-group = "default" }
@@ -167,3 +169,6 @@ aloha = { features = ["aloha"], solve-group = "default" }
 # xarm = { features = ["xarm"], solve-group = "default" }
 
 [tool.pixi.tasks]
+install-pytorch3d = """
+pip install git+https://github.com/facebookresearch/pytorch3d.git@stable --no-build-isolation
+"""

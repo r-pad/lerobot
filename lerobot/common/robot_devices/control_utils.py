@@ -36,7 +36,12 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
+from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics
 
+def add_eef_pose(real_joints):
+    eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
+    eef_pose = torch.cat([eef_pose, real_joints[-1][None]], axis=0).float()
+    return eef_pose
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
     log_items = []
@@ -117,15 +122,16 @@ def predict_action(observation, policy, device, use_amp):
 
         # Compute the next action with the policy
         # based on the current observation
-        action = policy.select_action(observation)
+        action, action_eef = policy.select_action(observation)
 
         # Remove batch dimension
-        action = action.squeeze(0)
+        action, action_eef = action.squeeze(0), action_eef.squeeze(0)
 
         # Move to cpu, if not already the case
         action = action.to("cpu")
+        action_eef = action_eef.to("cpu")
 
-    return action
+    return action, action_eef
 
 
 def init_keyboard_listener():
@@ -253,18 +259,25 @@ def control_loop(
 
         if teleoperate:
             observation, action = robot.teleop_step(record_data=True)
+            if robot.use_eef:
+                observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
+                action["action.right_eef_pose"] = add_eef_pose(action['action'])
         else:
             observation = robot.capture_observation()
+            if robot.use_eef:
+                observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
             action = None
 
             if policy is not None:
-                pred_action = predict_action(
+                pred_action, pred_action_eef = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
                 )
                 # Action can eventually be clipped using `max_relative_target`,
                 # so action actually sent is saved in the dataset.
                 action = robot.send_action(pred_action)
                 action = {"action": action}
+                if robot.use_eef:
+                    action["action.right_eef_pose"] = pred_action_eef
 
         if dataset is not None:
             frame = {**observation, **action, "task": single_task}
