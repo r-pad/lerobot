@@ -146,7 +146,11 @@ def save_images_from_cameras(
                 now = time.perf_counter()
 
                 for camera in cameras:
-                    result = camera.read()
+                    # If we use async_read when fps is None, the loop will go full speed
+                    if fps is None:
+                        result = camera.read()
+                    else:
+                        result = camera.async_read()
                     
                     if result is not None:
                         # Handle both dict and single array returns
@@ -363,8 +367,7 @@ class AzureKinectCamera:
             )
 
         try:
-            # self.camera = PyK4A(config=k4a_config, device_id=self.device_id)
-            self.camera = PyK4A(device_id=self.device_id)
+            self.camera = PyK4A(config=k4a_config, device_id=self.device_id)
             self.camera.open()
             self.camera.start()
             is_camera_open = True
@@ -566,6 +569,46 @@ class AzureKinectCamera:
                     self.color_image = result
             except Exception as e:
                 logging.error(f"Error reading in thread: {e}")
+
+    def async_read(self):
+        """Access the latest captured data"""
+        if not self.is_connected:
+            raise RobotDeviceNotConnectedError(
+                f"AzureKinectCamera({self.device_id}) is not connected. Try running `camera.connect()` first."
+            )
+
+        if self.thread is None:
+            self.stop_event = threading.Event()
+            self.thread = Thread(target=self.read_loop, args=())
+            self.thread.daemon = True
+            self.thread.start()
+
+        num_tries = 0
+        while True:
+            if self.color_image is not None:
+                # Build result dict based on what was requested
+                result = {'color': self.color_image}
+                
+                if self.use_depth and self.depth_map is not None:
+                    result['depth'] = self.depth_map
+                if self.use_ir and self.ir_image is not None:
+                    result['ir'] = self.ir_image
+                if self.use_transformed_depth and self.transformed_depth is not None:
+                    result['transformed_depth'] = self.transformed_depth
+                if self.use_point_cloud and self.point_cloud is not None:
+                    result['point_cloud'] = self.point_cloud
+                if self.use_transformed_color and self.transformed_color is not None:
+                    result['transformed_color'] = self.transformed_color
+                
+                # Return single array if only color requested, otherwise return dict
+                if len(result) == 1 and 'color' in result:
+                    return result['color']
+                return result
+
+            time.sleep(1 / self.fps)
+            num_tries += 1
+            if num_tries > self.fps * 2:
+                raise TimeoutError("Timed out waiting for async_read() to start.")
 
     def disconnect(self):
         if not self.is_connected:
