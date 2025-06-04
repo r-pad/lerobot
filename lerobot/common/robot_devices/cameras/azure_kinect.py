@@ -632,7 +632,6 @@ class AzureKinectCamera:
 
         if not self.mock and self.camera is not None:
             self.camera.stop()
-            self.camera.close()
             self.camera = None
 
         self.is_connected = False

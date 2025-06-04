@@ -27,6 +27,7 @@ import torch
 import torchvision
 from datasets.features.features import register_feature
 from PIL import Image
+import numpy as np
 
 
 def get_safe_default_codec():
@@ -256,8 +257,8 @@ def encode_video_frames(
 ) -> None:
     """More info on ffmpeg arguments tuning on `benchmark/video/README.md`"""
     # Check encoder availability
-    if vcodec not in ["h264", "hevc", "libsvtav1"]:
-        raise ValueError(f"Unsupported video codec: {vcodec}. Supported codecs are: h264, hevc, libsvtav1.")
+    if vcodec not in ["h264", "hevc", "libsvtav1", "ffv1"]:
+        raise ValueError(f"Unsupported video codec: {vcodec}. Supported codecs are: h264, hevc, libsvtav1, ffv1.")
 
     video_path = Path(video_path)
     imgs_dir = Path(imgs_dir)
@@ -311,8 +312,16 @@ def encode_video_frames(
 
         # Loop through input frames and encode them
         for input_data in input_list:
-            input_image = Image.open(input_data).convert("RGB")
-            input_frame = av.VideoFrame.from_image(input_image)
+            if pix_fmt in ["gray16le", "gray16be"]:
+                input_image = Image.open(input_data)
+                if input_image.mode == 'I;16':
+                    img_array = np.array(input_image)
+                else:
+                    img_array = np.array(input_image.convert('I'), dtype=np.uint16)
+                input_frame = av.VideoFrame.from_ndarray(img_array, format=pix_fmt)
+            else:
+                input_image = Image.open(input_data).convert("RGB")
+                input_frame = av.VideoFrame.from_image(input_image)
             packet = output_stream.encode(input_frame)
             if packet:
                 output.mux(packet)

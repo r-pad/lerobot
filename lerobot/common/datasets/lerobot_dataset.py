@@ -18,6 +18,7 @@ import logging
 import shutil
 from pathlib import Path
 from typing import Callable
+import glob
 
 import datasets
 import numpy as np
@@ -893,7 +894,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.tolerance_s,
         )
 
-        video_files = list(self.root.rglob("*.mp4"))
+        video_files = list(self.root.rglob("*.mp4")) + list(self.root.rglob("*.mkv"))
         assert len(video_files) == self.num_episodes * len(self.meta.video_keys)
 
         parquet_files = list(self.root.rglob("*.parquet"))
@@ -980,7 +981,27 @@ class LeRobotDataset(torch.utils.data.Dataset):
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
             ).parent
-            encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+            
+            # Get input frames
+            template = "frame_" + ("[0-9]" * 6) + ".png"
+            input_list = sorted(
+                glob.glob(str(img_dir / template)), key=lambda x: int(x.split("_")[-1].split(".")[0])
+            )
+            if len(input_list) == 0:
+                raise FileNotFoundError(f"No images found in {img_dir}.")
+            dummy_image = PIL.Image.open(input_list[0])
+
+            if dummy_image.mode == "I;16":
+                vcodec = "ffv1"
+                pix_fmt = "gray16le"
+                video_path = video_path.with_suffix(".mkv")
+            elif dummy_image.mode == "RGB":
+                vcodec = "libsvtav1"
+                pix_fmt = "yuv420p"
+            else:
+                raise NotImplementedError
+
+            encode_video_frames(img_dir, video_path, self.fps, overwrite=True, vcodec=vcodec, pix_fmt=pix_fmt)
 
         return video_paths
 
