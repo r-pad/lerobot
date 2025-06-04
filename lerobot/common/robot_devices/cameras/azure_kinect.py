@@ -594,15 +594,15 @@ class AzureKinectCamera:
 
             if self.use_depth:
                 if self.depth_map is None: ready = False
-                else: result['depth'] = self.depth_map
+                else: result['depth'] = self.depth_map[..., None]
                 
             if self.use_ir:
                 if self.ir_image is None: ready = False
-                else: result['ir'] = self.ir_image
+                else: result['ir'] = self.ir_image[..., None]
             
             if self.use_transformed_depth: 
                 if self.transformed_depth is None: ready = False
-                else: result['transformed_depth'] = self.transformed_depth
+                else: result['transformed_depth'] = self.transformed_depth[..., None]
             
             if self.use_point_cloud: 
                 if self.point_cloud is None: ready = False
@@ -612,10 +612,7 @@ class AzureKinectCamera:
                 if self.transformed_color is None: ready = False
                 else: result['transformed_color'] = self.transformed_color
                 
-            if ready:
-                if len(result) == 1 and 'color' in result:
-                    return result['color']
-                return result
+            if ready: return result
 
             time.sleep(1 / self.fps)
             num_tries += 1

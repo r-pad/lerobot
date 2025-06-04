@@ -175,12 +175,7 @@ class ManipulatorRobot:
     def camera_features(self) -> dict:
         cam_ft = {}
         for cam_key, cam in self.cameras.items():
-            key = f"observation.images.{cam_key}"
-            cam_ft[key] = {
-                "shape": (cam.height, cam.width, cam.channels),
-                "names": ["height", "width", "channels"],
-                "info": None,
-            }
+            cam_ft.update(cam.config.get_feature_specs(cam_key))
         return cam_ft
 
     @property

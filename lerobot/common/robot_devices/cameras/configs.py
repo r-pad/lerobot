@@ -23,6 +23,12 @@ class CameraConfig(draccus.ChoiceRegistry, abc.ABC):
     @property
     def type(self) -> str:
         return self.get_choice_name(self.__class__)
+    
+    def get_feature_specs(self, cam_key: str) -> dict[str, dict]:
+        """
+        Returns a dictionary of {feature_key: feature_spec}.
+        """
+        raise NotImplementedError
 
 
 @CameraConfig.register_subclass("opencv")
@@ -59,6 +65,15 @@ class OpenCVCameraConfig(CameraConfig):
         if self.rotation not in [-90, None, 90, 180]:
             raise ValueError(f"`rotation` must be in [-90, None, 90, 180] (got {self.rotation})")
 
+    def get_feature_specs(self, cam_key: str) -> dict[str, dict]:
+        base = f"observation.images.{cam_key}"
+        return {
+            base: {
+                "shape": (self.height, self.width, self.channels),
+                "names": ["height", "width", "channels"],
+                "info": f"{self.color_mode.upper()} color image",
+            }
+        }
 
 @CameraConfig.register_subclass("intelrealsense")
 @dataclass
@@ -112,6 +127,27 @@ class IntelRealSenseCameraConfig(CameraConfig):
 
         if self.rotation not in [-90, None, 90, 180]:
             raise ValueError(f"`rotation` must be in [-90, None, 90, 180] (got {self.rotation})")
+
+    def get_feature_specs(self, cam_key: str) -> dict[str, dict]:
+        feature_specs = {}
+        base = f"observation.images.{cam_key}"
+
+        # Color image
+        feature_specs[f"{base}.color"] = {
+            "shape": (self.height, self.width, self.channels),
+            "names": ["height", "width", "channels"],
+            "info": f"{self.color_mode.upper()} color image",
+        }
+
+        # Depth image (optional)
+        if self.use_depth:
+            feature_specs[f"{base}.depth"] = {
+                "shape": (self.height, self.width, 1),
+                "names": ["height", "width"],
+                "info": "Depth image",
+            }
+
+        return feature_specs
 
 @CameraConfig.register_subclass("azurekinect")
 @dataclass
@@ -188,3 +224,36 @@ class AzureKinectCameraConfig(CameraConfig):
             raise ValueError(
                 "use_point_cloud requires depth data. Enable use_depth."
             )
+        
+    def get_feature_specs(self, cam_key: str) -> dict[str, dict]:
+        feature_specs = {}
+        base = f"observation.images.{cam_key}"
+
+        if self.use_depth or self.use_transformed_depth:
+            if self.use_transformed_depth:
+                feature_specs[f"{base}.transformed_depth"] = {
+                    "shape": (self.height, self.width, 1),
+                    "names": ["height", "width"],
+                    "info": "Transformed depth image aligned to color",
+                }
+            else:
+                feature_specs[f"{base}.depth"] = {
+                    "shape": (self.height, self.width),
+                    "names": ["height", "width", 1],
+                    "info": "Raw depth image",
+                }
+
+        if self.use_transformed_color:
+            feature_specs[f"{base}.transformed_color"] = {
+                "shape": (self.height, self.width, self.channels),
+                "names": ["height", "width", "channels"],
+                "info": "Transformed color aligned to depth",
+            }
+        else:
+            feature_specs[f"{base}.color"] = {
+                "shape": (self.height, self.width, self.channels),
+                "names": ["height", "width", "channels"],
+                "info": "Raw color image",
+            }
+
+        return feature_specs
