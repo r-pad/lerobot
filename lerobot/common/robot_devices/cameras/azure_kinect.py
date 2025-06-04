@@ -367,7 +367,7 @@ class AzureKinectCamera:
             )
 
         try:
-            self.camera = PyK4A(config=k4a_config, device_id=self.device_id)
+            self.camera = PyK4A(config=k4a_config, device_id=self.device_id, thread_safe=False)
             self.camera.open()
             self.camera.start()
             is_camera_open = True
@@ -584,31 +584,42 @@ class AzureKinectCamera:
             self.thread.start()
 
         num_tries = 0
-        while True:
-            if self.color_image is not None:
-                # Build result dict based on what was requested
-                result = {'color': self.color_image}
+        max_tries = self.fps * 2
+        while num_tries < max_tries:
+            ready = True
+            result = {}
+
+            if self.color_image is None: ready = False
+            else: result['color'] = self.color_image
+
+            if self.use_depth:
+                if self.depth_map is None: ready = False
+                else: result['depth'] = self.depth_map
                 
-                if self.use_depth and self.depth_map is not None:
-                    result['depth'] = self.depth_map
-                if self.use_ir and self.ir_image is not None:
-                    result['ir'] = self.ir_image
-                if self.use_transformed_depth and self.transformed_depth is not None:
-                    result['transformed_depth'] = self.transformed_depth
-                if self.use_point_cloud and self.point_cloud is not None:
-                    result['point_cloud'] = self.point_cloud
-                if self.use_transformed_color and self.transformed_color is not None:
-                    result['transformed_color'] = self.transformed_color
+            if self.use_ir:
+                if self.ir_image is None: ready = False
+                else: result['ir'] = self.ir_image
+            
+            if self.use_transformed_depth: 
+                if self.transformed_depth is None: ready = False
+                else: result['transformed_depth'] = self.transformed_depth
+            
+            if self.use_point_cloud: 
+                if self.point_cloud is None: ready = False
+                else: result['point_cloud'] = self.point_cloud
+            
+            if self.use_transformed_color: 
+                if self.transformed_color is None: ready = False
+                else: result['transformed_color'] = self.transformed_color
                 
-                # Return single array if only color requested, otherwise return dict
+            if ready:
                 if len(result) == 1 and 'color' in result:
                     return result['color']
                 return result
 
             time.sleep(1 / self.fps)
             num_tries += 1
-            if num_tries > self.fps * 2:
-                raise TimeoutError("Timed out waiting for async_read() to start.")
+        raise TimeoutError("Timed out waiting for async_read() to start.")
 
     def disconnect(self):
         if not self.is_connected:
