@@ -140,8 +140,17 @@ class LeRobotDatasetMetadata:
 
     def get_video_file_path(self, ep_index: int, vid_key: str) -> Path:
         ep_chunk = self.get_episode_chunk(ep_index)
-        fpath = self.video_path.format(episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index)
-        return Path(fpath)
+        base_path = self.video_path.format(
+            episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index
+        )
+        # When searching if files exist, check for both .mp4 and .mkv
+        for ext in [".mp4", ".mkv"]:
+            candidate = Path(base_path).with_suffix(ext)
+            full_path = self.root / candidate
+            if full_path.is_file():
+                return candidate
+        # If file doesn't exist and we're creating a video, return .mp4
+        return base_path
 
     def get_episode_chunk(self, ep_index: int) -> int:
         return ep_index // self.chunks_size

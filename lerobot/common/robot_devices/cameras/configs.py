@@ -143,7 +143,7 @@ class IntelRealSenseCameraConfig(CameraConfig):
         if self.use_depth:
             feature_specs[f"{base}.depth"] = {
                 "shape": (self.height, self.width, 1),
-                "names": ["height", "width"],
+                "names": ["height", "width", "channels"],
                 "info": "Depth image",
             }
 
@@ -233,13 +233,13 @@ class AzureKinectCameraConfig(CameraConfig):
             if self.use_transformed_depth:
                 feature_specs[f"{base}.transformed_depth"] = {
                     "shape": (self.height, self.width, 1),
-                    "names": ["height", "width"],
+                    "names": ["height", "width", "channels"],
                     "info": "Transformed depth image aligned to color",
                 }
             else:
                 feature_specs[f"{base}.depth"] = {
-                    "shape": (self.height, self.width),
-                    "names": ["height", "width", 1],
+                    "shape": (self.height, self.width, 1),
+                    "names": ["height", "width", "channels"],
                     "info": "Raw depth image",
                 }
 
