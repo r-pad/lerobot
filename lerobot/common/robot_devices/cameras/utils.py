@@ -44,6 +44,12 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> list[C
             from lerobot.common.robot_devices.cameras.intelrealsense import IntelRealSenseCamera
 
             cameras[key] = IntelRealSenseCamera(cfg)
+        
+        elif cfg.type == "azurekinect":
+            from lerobot.common.robot_devices.cameras.azure_kinect import AzureKinectCamera
+
+            cameras[key] = AzureKinectCamera(cfg)
+        
         else:
             raise ValueError(f"The camera type '{cfg.type}' is not valid.")
 

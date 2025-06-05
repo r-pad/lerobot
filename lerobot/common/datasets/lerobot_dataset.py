@@ -18,6 +18,7 @@ import logging
 import shutil
 from pathlib import Path
 from typing import Callable
+import glob
 
 import datasets
 import numpy as np
@@ -139,8 +140,17 @@ class LeRobotDatasetMetadata:
 
     def get_video_file_path(self, ep_index: int, vid_key: str) -> Path:
         ep_chunk = self.get_episode_chunk(ep_index)
-        fpath = self.video_path.format(episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index)
-        return Path(fpath)
+        base_path = self.video_path.format(
+            episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index
+        )
+        # When searching if files exist, check for both .mp4 and .mkv
+        for ext in [".mp4", ".mkv"]:
+            candidate = Path(base_path).with_suffix(ext)
+            full_path = self.root / candidate
+            if full_path.is_file():
+                return candidate
+        # If file doesn't exist and we're creating a video, return .mp4
+        return base_path
 
     def get_episode_chunk(self, ep_index: int) -> int:
         return ep_index // self.chunks_size
@@ -893,7 +903,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.tolerance_s,
         )
 
-        video_files = list(self.root.rglob("*.mp4"))
+        video_files = list(self.root.rglob("*.mp4")) + list(self.root.rglob("*.mkv"))
         assert len(video_files) == self.num_episodes * len(self.meta.video_keys)
 
         parquet_files = list(self.root.rglob("*.parquet"))
@@ -980,7 +990,27 @@ class LeRobotDataset(torch.utils.data.Dataset):
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
             ).parent
-            encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+            
+            # Get input frames
+            template = "frame_" + ("[0-9]" * 6) + ".png"
+            input_list = sorted(
+                glob.glob(str(img_dir / template)), key=lambda x: int(x.split("_")[-1].split(".")[0])
+            )
+            if len(input_list) == 0:
+                raise FileNotFoundError(f"No images found in {img_dir}.")
+            dummy_image = PIL.Image.open(input_list[0])
+
+            if dummy_image.mode == "I;16":
+                vcodec = "ffv1"
+                pix_fmt = "gray16le"
+                video_path = video_path.with_suffix(".mkv")
+            elif dummy_image.mode == "RGB":
+                vcodec = "libsvtav1"
+                pix_fmt = "yuv420p"
+            else:
+                raise NotImplementedError
+
+            encode_video_frames(img_dir, video_path, self.fps, overwrite=True, vcodec=vcodec, pix_fmt=pix_fmt)
 
         return video_paths
 

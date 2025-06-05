@@ -27,6 +27,7 @@ import torch
 import torchvision
 from datasets.features.features import register_feature
 from PIL import Image
+import numpy as np
 
 
 def get_safe_default_codec():
@@ -59,15 +60,92 @@ def decode_video_frames(
 
     Currently supports torchcodec on cpu and pyav.
     """
+    if video_path.suffix == ".mkv": backend = "pyav_pure" # Override as torchcodec doesn't support 16-bit mkv files
+
     if backend is None:
         backend = get_safe_default_codec()
     if backend == "torchcodec":
         return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
     elif backend in ["pyav", "video_reader"]:
         return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
+    elif backend == "pyav_pure":
+        return decode_video_frames_pyav_pure(video_path, timestamps, tolerance_s)
     else:
         raise ValueError(f"Unsupported video backend: {backend}")
 
+
+def decode_video_frames_pyav_pure(
+    video_path: Path | str,
+    timestamps: list[float],
+    tolerance_s: float,
+) -> torch.Tensor:
+    """
+    Decode video frames preserving 16-bit depth data using PyAV directly.
+    
+    Args:
+        video_path: Path to video file
+        timestamps: List of timestamps to extract
+        tolerance_s: Tolerance for timestamp matching
+    
+    Returns:
+        torch.Tensor: Frames with preserved bit depth
+    """
+    video_path = str(video_path)
+    
+    # Open video with PyAV directly
+    container = av.open(video_path)
+    video_stream = container.streams.video[0]
+    
+    # Set timestamps
+    first_ts = min(timestamps)
+    last_ts = max(timestamps)
+    
+    # Seek to first timestamp
+    seek_target = int(first_ts * video_stream.time_base.denominator)
+    container.seek(seek_target, stream=video_stream)
+    
+    loaded_frames = []
+    loaded_ts = []
+    
+    # Decode frames
+    for frame in container.decode(video_stream):
+        current_ts = float(frame.pts * frame.time_base)
+        
+        # Convert frame to numpy array preserving bit depth
+        if frame.format.name in ['gray16le', 'gray16be']:
+            # 16-bit grayscale
+            frame_array = frame.to_ndarray(format='gray16le')
+            frame_tensor = torch.from_numpy(frame_array)
+        else:
+            raise NotImplementedError("Not supporting other formats right now.")
+        loaded_frames.append(frame_tensor)
+        loaded_ts.append(current_ts)
+        
+        if current_ts >= last_ts:
+            break
+    
+    container.close()
+    
+    # Find closest frames to requested timestamps
+    query_ts = torch.tensor(timestamps)
+    loaded_ts = torch.tensor(loaded_ts)
+    
+    dist = torch.cdist(query_ts[:, None], loaded_ts[:, None], p=1)
+    min_, argmin_ = dist.min(1)
+    
+    is_within_tol = min_ < tolerance_s
+    assert is_within_tol.all(), (
+        f"Timestamps outside tolerance: {min_[~is_within_tol]} > {tolerance_s}"
+        f"\nqueried: {query_ts}"
+        f"\nloaded: {loaded_ts}"
+    )
+    
+    closest_frames = torch.stack([loaded_frames[idx] for idx in argmin_])
+    # convert to the pytorch format which is float32 in [0,1] range (and channel first)
+    # NOTE: Assumes depth in mm and converts to meters
+    closest_frames = (closest_frames.type(torch.float32) / 1000).unsqueeze(1)
+
+    return closest_frames
 
 def decode_video_frames_torchvision(
     video_path: Path | str,
@@ -256,8 +334,8 @@ def encode_video_frames(
 ) -> None:
     """More info on ffmpeg arguments tuning on `benchmark/video/README.md`"""
     # Check encoder availability
-    if vcodec not in ["h264", "hevc", "libsvtav1"]:
-        raise ValueError(f"Unsupported video codec: {vcodec}. Supported codecs are: h264, hevc, libsvtav1.")
+    if vcodec not in ["h264", "hevc", "libsvtav1", "ffv1"]:
+        raise ValueError(f"Unsupported video codec: {vcodec}. Supported codecs are: h264, hevc, libsvtav1, ffv1.")
 
     video_path = Path(video_path)
     imgs_dir = Path(imgs_dir)
@@ -311,8 +389,16 @@ def encode_video_frames(
 
         # Loop through input frames and encode them
         for input_data in input_list:
-            input_image = Image.open(input_data).convert("RGB")
-            input_frame = av.VideoFrame.from_image(input_image)
+            if pix_fmt in ["gray16le", "gray16be"]:
+                input_image = Image.open(input_data)
+                if input_image.mode == 'I;16':
+                    img_array = np.array(input_image)
+                else:
+                    img_array = np.array(input_image.convert('I'), dtype=np.uint16)
+                input_frame = av.VideoFrame.from_ndarray(img_array, format=pix_fmt)
+            else:
+                input_image = Image.open(input_data).convert("RGB")
+                input_frame = av.VideoFrame.from_image(input_image)
             packet = output_stream.encode(input_frame)
             if packet:
                 output.mux(packet)

@@ -39,33 +39,47 @@ def safe_stop_image_writer(func):
 
 
 def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) -> PIL.Image.Image:
-    # TODO(aliberts): handle 1 channel and 4 for depth images
-    if image_array.ndim != 3:
-        raise ValueError(f"The array has {image_array.ndim} dimensions, but 3 is expected for an image.")
+    """
+    Converts a numpy image array to a PIL image. Supports:
+    - 3-channel RGB/BGR images (H, W, 3) or (3, H, W)
+    - Grayscale/depth images (H, W), or (H, W, 1)
+    - Handles uint8, uint16, float32 inputs
+    """
 
-    if image_array.shape[0] == 3:
-        # Transpose from pytorch convention (C, H, W) to (H, W, C)
+    # Handle (C, H, W) → (H, W, C)
+    if image_array.ndim == 3 and image_array.shape[0] in [1, 3] and image_array.shape[2] not in [1, 3]:
         image_array = image_array.transpose(1, 2, 0)
 
-    elif image_array.shape[-1] != 3:
-        raise NotImplementedError(
-            f"The image has {image_array.shape[-1]} channels, but 3 is required for now."
-        )
+    # Remove singleton channel at the end, if present (e.g., (H, W, 1))
+    if image_array.ndim == 3 and image_array.shape[2] == 1:
+        image_array = image_array[:, :, 0]
 
-    if image_array.dtype != np.uint8:
-        if range_check:
-            max_ = image_array.max().item()
-            min_ = image_array.min().item()
-            if max_ > 1.0 or min_ < 0.0:
-                raise ValueError(
-                    "The image data type is float, which requires values in the range [0.0, 1.0]. "
-                    f"However, the provided range is [{min_}, {max_}]. Please adjust the range or "
-                    "provide a uint8 image with values in the range [0, 255]."
-                )
+    # Handle depth or grayscale image (H, W)
+    if image_array.ndim == 2:
+        if image_array.dtype == np.float32 or image_array.dtype == np.float64:
+            raise NotImplementedError("float32 grayscale/depth images are not supported yet.")
 
-        image_array = (image_array * 255).astype(np.uint8)
+        elif image_array.dtype == np.uint8:
+            return PIL.Image.fromarray(image_array, mode="L")
 
-    return PIL.Image.fromarray(image_array)
+        elif image_array.dtype == np.uint16:
+            return PIL.Image.fromarray(image_array, mode="I;16")
+
+        else:
+            raise TypeError(f"Unsupported grayscale/depth dtype: {image_array.dtype}")
+
+    # Handle RGB image (H, W, 3)
+    elif image_array.ndim == 3 and image_array.shape[2] == 3:
+        if image_array.dtype != np.uint8:
+            if range_check:
+                min_, max_ = image_array.min(), image_array.max()
+                if min_ < 0.0 or max_ > 1.0:
+                    raise ValueError(f"Float RGB image must be in range [0.0, 1.0], but got [{min_}, {max_}]")
+            image_array = (image_array * 255).astype(np.uint8)
+        return PIL.Image.fromarray(image_array, mode="RGB")
+
+    else:
+        raise ValueError(f"Unsupported image shape: {image_array.shape}")
 
 
 def write_image(image: np.ndarray | PIL.Image.Image, fpath: Path):

@@ -1,7 +1,13 @@
+# Notes
+
+- `pyk4a` needs to be installed from source to build it with numpy 2. Run `pixi run install-k4a`. This will take a long time to build. However, if the environment is deactivated/reactivated, it doesn't work anymore. In that case, run `pip uninstall pyk4a && pip install pyk4a` to get it working with the new env (should probably fix or automate this).
+
 # Commands
 
 ### Teleop
 `python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_kinect": {"type": "opencv", "camera_index": 0, "fps": 30, "width": 1280, "height": 720}}' --control.type=teleoperate --control.display_data=true`
+
+`python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --control.type=teleoperate --control.display_data=true`
 
 ### Record episodes
 `python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/aloha_mug_eef --control.num_episodes=100 --robot.cameras='{"cam_kinect": {"type": "opencv", "camera_index": 0, "fps": 30, "width": 1280, "height": 720}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=60 --control.reset_time_s=5 --control.warmup_time_s=3 --control.resume=true`
