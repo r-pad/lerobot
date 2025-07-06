@@ -37,6 +37,9 @@ from lerobot.common.policies.act.configuration_act import ACTConfig
 from lerobot.common.policies.normalize import Normalize, Unnormalize
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 
+OBS_KEY = "observation.state"
+ACT_KEY = "action"
+
 
 class ACTPolicy(PreTrainedPolicy):
     """
@@ -311,11 +314,11 @@ class ACT(nn.Module):
             # Projection layer for joint-space configuration to hidden dimension.
             if self.config.robot_state_feature:
                 self.vae_encoder_robot_state_input_proj = nn.Linear(
-                    self.config.robot_state_feature.shape[0], config.dim_model
+                    self.config.robot_state_feature[OBS_KEY].shape[0], config.dim_model
                 )
             # Projection layer for action (joint-space target) to hidden dimension.
             self.vae_encoder_action_input_proj = nn.Linear(
-                self.config.action_feature.shape[0],
+                self.config.action_feature[ACT_KEY].shape[0],
                 config.dim_model,
             )
             # Projection layer from the VAE encoder's output to the latent distribution's parameter space.
@@ -350,7 +353,7 @@ class ACT(nn.Module):
         # [latent, (robot_state), (env_state), (image_feature_map_pixels)].
         if self.config.robot_state_feature:
             self.encoder_robot_state_input_proj = nn.Linear(
-                self.config.robot_state_feature.shape[0], config.dim_model
+                self.config.robot_state_feature[OBS_KEY].shape[0], config.dim_model
             )
         if self.config.env_state_feature:
             self.encoder_env_state_input_proj = nn.Linear(
@@ -376,7 +379,8 @@ class ACT(nn.Module):
         self.decoder_pos_embed = nn.Embedding(config.chunk_size, config.dim_model)
 
         # Final action regression head on the output of the transformer's decoder.
-        self.action_head = nn.Linear(config.dim_model, self.config.action_feature.shape[0])
+        self.action_head = nn.Linear(config.dim_model, self.config.action_feature[ACT_KEY].shape[0])
+        self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
 
         self._reset_parameters()
 
@@ -488,6 +492,7 @@ class ACT(nn.Module):
 
             # For a list of images, the H and W may vary but H*W is constant.
             for img in batch["observation.images"]:
+                img = self.center_crop(img)
                 cam_features = self.backbone(img)["feature_map"]
                 cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
                 cam_features = self.encoder_img_feat_input_proj(cam_features)
