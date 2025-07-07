@@ -147,6 +147,19 @@ class DiffusionConfig(PreTrainedConfig):
 
     action_space: str = "right_eef"
 
+    # Use high-level for goal-conditioning
+    enable_goal_conditioning: bool = False
+    hl_run_id: str | None = "ticsnohr"
+    hl_max_depth: float = 1.5
+    hl_num_points: int = 4096
+    hl_is_gmm: bool = True
+    hl_use_text_embedding: bool = True
+    hl_use_gripper_pcd: bool = True
+    hl_text: str = "Grasp mug and place mug on table"
+    hl_in_channels: int = 4
+    hl_intrinsics_txt: str = "lerobot/scripts/intrinsics.txt"
+    hl_extrinsics_txt: str = "lerobot/scripts/T_world_from_camera_est.txt"
+
     # Inference
     num_inference_steps: int | None = None
 

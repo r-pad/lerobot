@@ -74,7 +74,7 @@ dependencies = [
     "wandb>=0.16.3",
     "zarr>=2.17.0", 
     "mink>=0.0.11,<0.0.12", 
-    "robot-descriptions>=1.17.0,<2", "setuptools", "wheel", "pyk4a>=1.5.0,<2", "pybind11>=2.13.6,<3", "open3d>=0.19.0,<0.20", "trimesh>=4.6.13,<5",
+    "robot-descriptions>=1.17.0,<2", "setuptools", "wheel", "pyk4a>=1.5.0,<2", "pybind11>=2.13.6,<3", "open3d>=0.19.0,<0.20", "trimesh>=4.6.13,<5", "transformers==4.45.2", "sentencepiece>=0.2.0,<0.3",
 ]
 
 [project.optional-dependencies]

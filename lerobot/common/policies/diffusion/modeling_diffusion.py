@@ -44,6 +44,8 @@ from lerobot.common.policies.utils import (
     populate_queues,
 )
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics, ALOHA_REST_STATE
+from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper
+
 
 class DiffusionPolicy(PreTrainedPolicy):
     """
@@ -92,6 +94,19 @@ class DiffusionPolicy(PreTrainedPolicy):
         self._queues = None
 
         self.diffusion = DiffusionModel(config)
+
+        if self.config.enable_goal_conditioning:
+            self.high_level = HighLevelWrapper(
+                run_id=self.config.hl_run_id,
+                max_depth=self.config.hl_max_depth,
+                num_points=self.config.hl_num_points,
+                in_channels=self.config.hl_in_channels,
+                use_gripper_pcd=self.config.hl_use_gripper_pcd,
+                use_text_embedding=self.config.hl_use_text_embedding,
+                text=self.config.hl_text,
+                is_gmm=self.config.hl_is_gmm,
+                intrinsics_txt=self.config.hl_intrinsics_txt,
+            )
 
         self.reset()
 
