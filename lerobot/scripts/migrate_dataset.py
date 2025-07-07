@@ -99,7 +99,7 @@ def migrate_dataset_with_new_keys(
     
     for episode_idx in range(source_meta.info["total_episodes"]):
         print(f"Processing episode {episode_idx + 1}/{source_meta.info['total_episodes']}")
-        
+
         # Get episode bounds
         episode_start = source_dataset.episode_data_index["from"][episode_idx].item()
         episode_end = source_dataset.episode_data_index["to"][episode_idx].item()
@@ -108,7 +108,7 @@ def migrate_dataset_with_new_keys(
         # Process each frame in the episode
         for frame_idx in tqdm(range(episode_length)):
             # Get original frame data
-            original_frame = source_dataset[frame_idx]
+            original_frame = source_dataset[episode_start + frame_idx]
             
             # Create new frame data with additional keys
             frame_data = {}
