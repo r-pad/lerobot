@@ -1770,7 +1770,7 @@ packages:
 - pypi: .
   name: lerobot
   version: 0.1.0
-  sha256: 6342622ddd8ee86dc541aaf7fc26dba1cd2fc9fbda5c758e60855ae47d0c60d8
+  sha256: cfc15b7e41d002aa4a51781ad1870037891fa2a9769f56645d84f3279c579efd
   requires_dist:
   - cmake>=3.29.0.1
   - datasets>=2.19.0
@@ -1806,8 +1806,8 @@ packages:
   - wheel
   - pyk4a>=1.5.0,<2
   - pybind11>=2.13.6,<3
-  - open3d
-  - trimesh
+  - open3d>=0.19.0,<0.20
+  - trimesh>=4.6.13,<5
   - hf-doc-builder @ git+https://github.com/huggingface/doc-builder.git@main ; extra == 'docs'
   - watchdog>=6.0.0 ; extra == 'docs'
   - pre-commit>=3.7.0 ; extra == 'dev'

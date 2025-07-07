@@ -43,7 +43,7 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics
+from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics, ALOHA_REST_STATE
 
 class DiffusionPolicy(PreTrainedPolicy):
     """
@@ -156,6 +156,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         if self.config.action_space == "right_eef":
             action_eef = self._queues[self.act_key].popleft()
             action = inverse_kinematics(ALOHA_CONFIGURATION, action_eef.squeeze())[None].float()
+            # Force the left arm to stay at a predefined rest state
+            action[:,:9] = ALOHA_REST_STATE[:, :9]
 
             self.obs_key = "observation.right_eef_pose"
             self.act_key = "action.right_eef_pose"

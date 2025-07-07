@@ -4,9 +4,10 @@ from tqdm import tqdm
 import numpy as np
 from lerobot.common.utils.aloha_utils import render_gripper_pcd
 from PIL import Image
+from typing import List
 
 def extract_events_with_gripper_pos(
-    joint_states, close_thresh=5, open_thresh=10
+    joint_states, close_thresh=15, open_thresh=25
 ):
     """
     First event ends when gripper closes,
@@ -47,6 +48,7 @@ def migrate_dataset_with_new_keys(
     new_features: dict,
     intrinsics_txt: str,
     extrinsics_txt: str,
+    discard_episodes: List[int],
 ):
     """
     Migrate an existing LeRobot dataset to a new one with additional features.
@@ -55,8 +57,9 @@ def migrate_dataset_with_new_keys(
         source_repo_id: Repository ID of the source dataset
         target_repo_id: Repository ID for the new dataset
         new_features: Dictionary of new features to add to the schema
-        root_dir: Root directory for datasets
-        source_root: Root directory for source dataset (if different)
+        intrinsics_txt: Path to intrinsics txt
+        extrinsics_txt: Path to extrinsics txt
+        discard_episodes: Episodes to be discarded when migrating
     """
     tolerance_s = 0.0004
     cam_to_world = np.loadtxt(extrinsics_txt)
@@ -99,6 +102,8 @@ def migrate_dataset_with_new_keys(
     
     for episode_idx in range(source_meta.info["total_episodes"]):
         print(f"Processing episode {episode_idx + 1}/{source_meta.info['total_episodes']}")
+        if episode_idx in discard_episodes:
+            continue
 
         # Get episode bounds
         episode_start = source_dataset.episode_data_index["from"][episode_idx].item()
@@ -165,6 +170,7 @@ if __name__ == "__main__":
         new_features=new_features,
         intrinsics_txt="/home/sriram/Desktop/lerobot/lerobot/scripts/intrinsics.txt",
         extrinsics_txt="/home/sriram/Desktop/lerobot/lerobot/scripts/T_world_from_camera_est_v5.txt",
+        discard_episodes=[61, 89]
     )
     
     print("Dataset migration completed successfully!")
