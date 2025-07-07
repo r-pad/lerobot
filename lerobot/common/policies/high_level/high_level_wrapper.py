@@ -7,6 +7,8 @@ from pytorch3d.ops import sample_farthest_points
 from lerobot.common.policies.high_level.articubot import PointNet2_super, get_weighted_displacement, sample_from_gmm
 import wandb
 from transformers import AutoModel, AutoProcessor
+from lerobot.common.utils.aloha_utils import render_gripper_pcd
+
 
 TARGET_SHAPE = 224
 rgb_preprocess = transforms.Compose(
@@ -38,7 +40,8 @@ class HighLevelWrapper:
                  use_text_embedding=False,
                  text=None,
                  is_gmm=False,
-                 intrinsics_txt=None):
+                 intrinsics_txt=None,
+                 extrinsics_txt=None):
         super().__init__()
 
         #############################################
@@ -52,30 +55,44 @@ class HighLevelWrapper:
             self.text_embedding = get_siglip_text_embedding(text)
         else:
             self.text_embedding = None
-        self.K_ = np.loadtxt(intrinsics_txt) # not scaled
-        self.K = None
+
+        self.original_K = np.loadtxt(intrinsics_txt) # not scaled
+        self.scaled_K = None
+        self.cam_to_world = np.loadtxt(extrinsics_txt)
         #############################################
 
         self.model = initialize_model(run_id, use_text_embedding, in_channels, self.device)
         self.rng = np.random.default_rng()
 
-    def predict(self, rgb, depth, gripper_pcd=None):
-        if self.use_gripper_pcd and gripper_pcd is None: raise ValueError("Missing gripper_pcd")
+    def predict(self, rgb, depth, joint_state):
+        if self.scaled_K is None:
+            self.scaled_K = get_scaled_intrinsics(self.original_K, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
 
-        if self.K is None:
-            self.K = get_scaled_intrinsics(self.K_, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
-
-        pcd = compute_pcd(rgb, depth, self.K, rgb_preprocess,
+        pcd = compute_pcd(rgb, depth, self.scaled_K, rgb_preprocess,
                             depth_preprocess, self.device, self.rng,
                             self.num_points, self.max_depth)
         pcd_xyz = pcd[:,:3]
         if self.use_gripper_pcd:
+            gripper_pcd = render_gripper_pcd(self.cam_to_world, joint_state)
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
 
         #### Run inference
         goal_prediction = inference(self.model, pcd_xyz, self.text_embedding, self.is_gmm, self.device)
 
         return goal_prediction
+
+    def project(self, goal_prediction, img_shape):
+        urdf_proj_hom = (self.original_K @ goal_prediction.T).T
+        urdf_proj = (urdf_proj_hom / urdf_proj_hom[:, 2:])[:, :2]
+        urdf_proj = np.clip(urdf_proj, [0, 0], [img_shape[1] - 1, img_shape[0] - 1]).astype(int)
+        goal_gripper_proj = np.zeros((img_shape[0], img_shape[1], 3)).astype(np.uint8)
+        goal_gripper_proj[urdf_proj[:, 1], urdf_proj[:, 0]] = 255
+        return goal_gripper_proj
+
+    def predict_and_project(self, rgb, depth, joint_state):
+        goal_prediction = self.predict(rgb, depth, joint_state)
+        goal_gripper_proj = self.project(goal_prediction, rgb.shape)
+        return goal_gripper_proj
 
 
 def initialize_model(run_id, use_text_embedding, in_channels, device):

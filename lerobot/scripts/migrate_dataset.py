@@ -108,7 +108,7 @@ def migrate_dataset_with_new_keys(
         # Get episode bounds
         episode_start = source_dataset.episode_data_index["from"][episode_idx].item()
         episode_end = source_dataset.episode_data_index["to"][episode_idx].item()
-        episode_length = episode_end + 1 - episode_start
+        episode_length = episode_end - episode_start
 
         # Process each frame in the episode
         for frame_idx in tqdm(range(episode_length)):
@@ -169,7 +169,7 @@ if __name__ == "__main__":
         target_repo_id="sriramsk/aloha_mug_eef_depth_v3", 
         new_features=new_features,
         intrinsics_txt="/home/sriram/Desktop/lerobot/lerobot/scripts/intrinsics.txt",
-        extrinsics_txt="/home/sriram/Desktop/lerobot/lerobot/scripts/T_world_from_camera_est_v5.txt",
+        extrinsics_txt="/home/sriram/Desktop/lerobot/lerobot/scripts/T_world_from_camera_est_v6_0709.txt",
         discard_episodes=[61, 89]
     )
     

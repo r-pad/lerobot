@@ -158,7 +158,7 @@ class DiffusionConfig(PreTrainedConfig):
     hl_text: str = "Grasp mug and place mug on table"
     hl_in_channels: int = 4
     hl_intrinsics_txt: str = "lerobot/scripts/intrinsics.txt"
-    hl_extrinsics_txt: str = "lerobot/scripts/T_world_from_camera_est.txt"
+    hl_extrinsics_txt: str = "lerobot/scripts/T_world_from_camera_est_v6_0709.txt"
 
     # Inference
     num_inference_steps: int | None = None

@@ -22,19 +22,26 @@ def map_real2sim(Q):
 
     sim = real*sign + offset
     """
-    # Set gripper fingers to 0, we don't care about them for IK
-    sign = torch.tensor([-1, -1, 1, 1, 1, 1, 0, 0,    
-                      -1, -1, 1, 1, 1, 1, 0, 0])
+    sign = torch.tensor([-1, -1, 1, 1, 1, 1, 1, 1,    
+                      -1, -1, 1, 1, 1, 1, 1, 1])
     offset = torch.tensor([pi/2, 0, -pi/2, 0, 0, 0, 0, 0,
                        pi/2, 0, -pi/2, 0, 0, 0, 0, 0])
     Q = sign*Q + offset
 
     # We handle the shoulder joint separately, x*-1 + np.pi/2 brings it close but just outside joint limits for some reason....
     # Remap this joint range using real observed min/max and sim min/max
-    real_min, real_max = -3.59, -0.23
-    sim_min, sim_max = -1.85, 1.26 
-    Q[1] = (Q[1] - real_min)*((sim_max-sim_min)/(real_max-real_min)) + sim_min
-    Q[9] = (Q[9] - real_min)*((sim_max-sim_min)/(real_max-real_min)) + sim_min
+    real_shoulder_min, real_shoulder_max = -3.59, -0.23
+    sim_shoulder_min, sim_shoulder_max = -1.85, 1.26 
+    Q[1] = (Q[1] - real_shoulder_min)*((sim_shoulder_max-sim_shoulder_min)/(real_shoulder_max-real_shoulder_min)) + sim_shoulder_min
+    Q[9] = (Q[9] - real_shoulder_min)*((sim_shoulder_max-sim_shoulder_min)/(real_shoulder_max-real_shoulder_min)) + sim_shoulder_min
+
+    # same for gripper
+    real_gripper_min, real_gripper_max = -0.11, 1.7262
+    sim_gripper_min, sim_gripper_max = 0, 0.04
+    Q[6] = (Q[6] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
+    Q[7] = (Q[7] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
+    Q[14] = (Q[14] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
+    Q[15] = (Q[15] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
 
     return Q
 
@@ -50,8 +57,8 @@ def convert_real_joints(real_joints):
             real_joints[5],
             real_joints[6],
             real_joints[7],
-            0,
-            0,
+            real_joints[8],
+            real_joints[8],
 
             real_joints[9],
             real_joints[10],
@@ -59,8 +66,8 @@ def convert_real_joints(real_joints):
             real_joints[14],
             real_joints[15],
             real_joints[16],
-            0,
-            0,
+            real_joints[17],
+            real_joints[17],
         ]
     ))
     Q = map_real2sim(Q)
@@ -81,21 +88,25 @@ def map_sim2real(vec):
     sim = real*sign + offset
     real = (sim - offset)*sign
     """
-    # Set gripper fingers to 0, we don't care about them for IK
-    sign = torch.tensor([-1, -1, -1, 1, 1, 1, 1, 1, 0,    
-                      -1, -1, -1, 1, 1, 1, 1, 1, 0])
+    sign = torch.tensor([-1, -1, -1, 1, 1, 1, 1, 1, 1,    
+                      -1, -1, -1, 1, 1, 1, 1, 1, 1])
     offset = torch.tensor([pi/2, 0, 0, -pi/2, -pi/2, 0, 0, 0, 0,
                        pi/2, 0, 0, -pi/2, -pi/2, 0, 0, 0, 0])
     vec = (vec - offset)*sign
 
     # Inverted from real2sim
-    real_min, real_max = 0.23, 3.59 
-    sim_min, sim_max = -1.26, 1.85 
+    real_shoulder_min, real_shoulder_max = 0.23, 3.59 
+    sim_shoulder_min, sim_shoulder_max = -1.26, 1.85 
 
-    vec[1] = (vec[1] - sim_min)*((real_max-real_min)/(sim_max-sim_min)) + real_min
-    vec[2] = (vec[2] - sim_min)*((real_max-real_min)/(sim_max-sim_min)) + real_min
-    vec[10] = (vec[10] - sim_min)*((real_max-real_min)/(sim_max-sim_min)) + real_min
-    vec[11] = (vec[11] - sim_min)*((real_max-real_min)/(sim_max-sim_min)) + real_min
+    vec[1] = (vec[1] - sim_shoulder_min)*((real_shoulder_max-real_shoulder_min)/(sim_shoulder_max-sim_shoulder_min)) + real_shoulder_min
+    vec[2] = (vec[2] - sim_shoulder_min)*((real_shoulder_max-real_shoulder_min)/(sim_shoulder_max-sim_shoulder_min)) + real_shoulder_min
+    vec[10] = (vec[10] - sim_shoulder_min)*((real_shoulder_max-real_shoulder_min)/(sim_shoulder_max-sim_shoulder_min)) + real_shoulder_min
+    vec[11] = (vec[11] - sim_shoulder_min)*((real_shoulder_max-real_shoulder_min)/(sim_shoulder_max-sim_shoulder_min)) + real_shoulder_min
+
+    real_gripper_min, real_gripper_max = -1.7262, 0.11
+    sim_gripper_min, sim_gripper_max = -0.04, 0
+    vec[8] = (vec[8] - sim_gripper_min)*((real_gripper_max-real_gripper_min)/(sim_gripper_max-sim_gripper_min)) + real_gripper_min
+    vec[17] = (vec[17] - sim_gripper_min)*((real_gripper_max-real_gripper_min)/(sim_gripper_max-sim_gripper_min)) + real_gripper_min
     return vec
 
 

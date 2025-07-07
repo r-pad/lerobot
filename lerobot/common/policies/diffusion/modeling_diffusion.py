@@ -46,7 +46,6 @@ from lerobot.common.policies.utils import (
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics, ALOHA_REST_STATE
 from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper
 
-
 class DiffusionPolicy(PreTrainedPolicy):
     """
     Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
@@ -93,6 +92,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
         self._queues = None
 
+        self.latest_gripper_proj = None
+
         self.diffusion = DiffusionModel(config)
 
         if self.config.enable_goal_conditioning:
@@ -106,6 +107,7 @@ class DiffusionPolicy(PreTrainedPolicy):
                 text=self.config.hl_text,
                 is_gmm=self.config.hl_is_gmm,
                 intrinsics_txt=self.config.hl_intrinsics_txt,
+                extrinsics_txt=self.config.hl_extrinsics_txt,
             )
 
         self.reset()
@@ -148,6 +150,15 @@ class DiffusionPolicy(PreTrainedPolicy):
         """
         state = batch['observation.state']
         forward_kinematics(ALOHA_CONFIGURATION, state[0])
+
+        if self.config.enable_goal_conditioning:
+            # Generate new goal prediction when queue is empty
+            if len(self._queues[self.act_key]) == 0:
+                rgb = (batch["observation.images.cam_azure_kinect.color"][0].permute(1,2,0).cpu().numpy() * 255).astype(np.uint8)
+                depth = (batch["observation.images.cam_azure_kinect.transformed_depth"][0].permute(1,2,0).cpu().numpy() * 1000).astype(np.uint16)
+                gripper_proj = self.high_level.predict_and_project(rgb, depth, state[0])
+                self.latest_gripper_proj = (torch.from_numpy(gripper_proj).permute(2,0,1)[None] / 255.).float().to(batch["observation.images.cam_azure_kinect.color"].device)
+            batch["observation.images.cam_azure_kinect.goal_gripper_proj"] = self.latest_gripper_proj
 
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
