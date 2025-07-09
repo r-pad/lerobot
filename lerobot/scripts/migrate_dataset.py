@@ -5,6 +5,7 @@ import numpy as np
 from lerobot.common.utils.aloha_utils import render_gripper_pcd
 from PIL import Image
 from typing import List
+import argparse
 
 def extract_events_with_gripper_pos(
     joint_states, close_thresh=15, open_thresh=25
@@ -155,6 +156,23 @@ def migrate_dataset_with_new_keys(
 
 # Example usage
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Migrate dataset with new keys and optional intrinsics/extrinsics transformation.")
+    parser.add_argument("--source_repo_id", type=str, default="sriramsk/aloha_mug_eef_depth",
+                        help="Source dataset repository ID")
+    parser.add_argument("--target_repo_id", type=str, default="sriramsk/aloha_mug_eef_depth_v3",
+                        help="Target dataset repository ID")
+    parser.add_argument("--intrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/intrinsics.txt",
+                        help="Path to the intrinsics.txt file")
+    parser.add_argument("--extrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/T_world_from_camera_est_v6_0709.txt",
+                        help="Path to the extrinsics.txt file")
+    parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
+                        help="List of episode indices to discard")
+    
+    # Optional argument to handle new_features; update this if more structured input is needed
+    parser.add_argument("--new_features", type=str, default=None,
+                        help="Serialized or path to new features definition")
+    args = parser.parse_args()
+
     new_features = {
         "observation.images.cam_azure_kinect.goal_gripper_proj": {
             'dtype': 'video', 
@@ -165,12 +183,12 @@ if __name__ == "__main__":
 
     # Migrate the dataset
     migrated_dataset = migrate_dataset_with_new_keys(
-        source_repo_id="sriramsk/aloha_mug_eef_depth",
-        target_repo_id="sriramsk/aloha_mug_eef_depth_v3", 
+        source_repo_id=args.source_repo_id,
+        target_repo_id=args.target_repo_id, 
         new_features=new_features,
-        intrinsics_txt="/home/sriram/Desktop/lerobot/lerobot/scripts/intrinsics.txt",
-        extrinsics_txt="/home/sriram/Desktop/lerobot/lerobot/scripts/T_world_from_camera_est_v6_0709.txt",
-        discard_episodes=[61, 89]
+        intrinsics_txt=args.intrinsics_txt,
+        extrinsics_txt=args.extrinsics_txt,
+        discard_episodes=args.discard_episodes
     )
     
     print("Dataset migration completed successfully!")
