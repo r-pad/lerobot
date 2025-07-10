@@ -139,8 +139,6 @@ def make_policy(
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
     cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
     
-    if hasattr(cfg, "enable_goal_conditioning") and cfg.enable_goal_conditioning:
-        cfg.input_features["observation.images.cam_azure_kinect.goal_gripper_proj"] = cfg.input_features["observation.images.cam_azure_kinect.color"]
     kwargs["config"] = cfg
 
     if cfg.pretrained_path:

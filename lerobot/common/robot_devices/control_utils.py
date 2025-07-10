@@ -274,6 +274,18 @@ def control_loop(
             action = None
 
             if policy is not None:
+                # Pretty ugly, but moving this code inside the policy makes it uglier to visualize
+                # the goal_gripper_proj key.
+                if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
+                    # Generate new goal prediction when queue is empty
+                    # This code is specific to diffusion policy / kinect :(
+                    if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
+                        rgb = observation["observation.images.cam_azure_kinect.color"].numpy()
+                        depth = observation["observation.images.cam_azure_kinect.transformed_depth"].numpy().squeeze()
+                        gripper_proj = policy.high_level.predict_and_project(rgb, depth, observation["observation.state"])
+                        policy.latest_gripper_proj = torch.from_numpy(gripper_proj)
+                    observation["observation.images.cam_azure_kinect.goal_gripper_proj"] = policy.latest_gripper_proj
+
                 pred_action, pred_action_eef = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
                 )

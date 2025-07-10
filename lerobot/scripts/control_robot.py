@@ -261,6 +261,15 @@ def record(
     else:
         # Create empty dataset or load existing saved episodes
         sanity_check_dataset_name(cfg.repo_id, cfg.policy)
+
+        if cfg.policy.enable_goal_conditioning:
+            extra_features = {"observation.images.cam_azure_kinect.goal_gripper_proj": 
+                              {'dtype': 'video', 'shape': (720, 1280, 3), 
+                               'names': ['height', 'width', 'channels'], 
+                               'info': 'Projection of gripper pcd at goal position onto image'}}
+        else:
+            extra_features = {}
+
         dataset = LeRobotDataset.create(
             cfg.repo_id,
             cfg.fps,
@@ -269,6 +278,7 @@ def record(
             use_videos=cfg.video,
             image_writer_processes=cfg.num_image_writer_processes,
             image_writer_threads=cfg.num_image_writer_threads_per_camera * len(robot.cameras),
+            extra_features=extra_features,
         )
 
     # Load pretrained policy
