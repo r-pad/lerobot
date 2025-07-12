@@ -81,13 +81,27 @@ class HighLevelWrapper:
 
         return goal_prediction
 
-    def project(self, goal_prediction, img_shape):
+    def project(self, goal_prediction, img_shape, goal_repr="heatmap"):
+        assert goal_repr in ["mask", "heatmap"]
         urdf_proj_hom = (self.original_K @ goal_prediction.T).T
         urdf_proj = (urdf_proj_hom / urdf_proj_hom[:, 2:])[:, :2]
         urdf_proj = np.clip(urdf_proj, [0, 0], [img_shape[1] - 1, img_shape[0] - 1]).astype(int)
-        goal_gripper_proj = np.zeros((img_shape[0], img_shape[1], 3)).astype(np.uint8)
-        goal_gripper_proj[urdf_proj[:, 1], urdf_proj[:, 0]] = 255
-        return goal_gripper_proj
+        goal_gripper_proj = np.zeros((img_shape[0], img_shape[1], 3))
+        if goal_repr == "mask":
+            goal_gripper_proj[urdf_proj[:, 1], urdf_proj[:, 0]] = 255
+        elif goal_repr == "heatmap":
+            max_distance = np.sqrt(img_shape[1]**2 + img_shape[0]**2)
+            y_coords, x_coords = np.mgrid[0:img_shape[0], 0:img_shape[1]]
+            pixel_coords = np.stack([x_coords, y_coords], axis=-1)
+            for i in range(3):
+                target_point = urdf_proj[i]  # (2,)
+                distances = np.linalg.norm(pixel_coords - target_point, axis=-1)  # (height, width)
+                goal_gripper_proj[:, :, i] = distances
+
+            # Apply square root transformation for steeper near-target gradients
+            goal_gripper_proj = (np.sqrt(goal_gripper_proj / max_distance) * 255)
+            goal_gripper_proj = np.clip(goal_gripper_proj, 0, 255)
+        return goal_gripper_proj.astype(np.uint8)
 
     def predict_and_project(self, rgb, depth, joint_state):
         goal_prediction = self.predict(rgb, depth, joint_state)

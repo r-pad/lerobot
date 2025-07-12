@@ -21,11 +21,12 @@ def extract_events_with_gripper_pos(
 
     return close_gripper_idx, open_gripper_idx
 
-def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True):
+def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True, goal_repr="heatmap"):
     """
     Render gripper pcd in camera frame, project the full point cloud or 4 handpicked points to a mask 
     """
     mesh = render_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
+    assert goal_repr in ["mask", "heatmap"]
 
     if four_points:
         gripper_idx = np.array([6, 197, 174])
@@ -39,8 +40,22 @@ def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True
     urdf_proj_hom = (K @ mesh.T).T
     urdf_proj = (urdf_proj_hom / urdf_proj_hom[:, 2:])[:, :2]
     urdf_proj = np.clip(urdf_proj, [0, 0], [width - 1, height - 1]).astype(int)
-    goal_image = np.zeros((height, width, 3)).astype(np.uint8)
-    goal_image[urdf_proj[:, 1], urdf_proj[:, 0]] = 255
+
+    goal_image = np.zeros((height, width, 3))
+    if goal_repr == "mask":
+        goal_image[urdf_proj[:, 1], urdf_proj[:, 0]] = 255
+    elif goal_repr == "heatmap":
+        max_distance = np.sqrt(width**2 + height**2)
+        y_coords, x_coords = np.mgrid[0:height, 0:width]
+        pixel_coords = np.stack([x_coords, y_coords], axis=-1)
+        for i in range(3):
+            target_point = urdf_proj[i]  # (2,)
+            distances = np.linalg.norm(pixel_coords - target_point, axis=-1)  # (height, width)
+            goal_image[:, :, i] = distances
+
+        # Apply square root transformation for steeper near-target gradients
+        goal_image = (np.sqrt(goal_image / max_distance) * 255)
+        goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
     return goal_image
     
 def migrate_dataset_with_new_keys(
