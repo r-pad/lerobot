@@ -15,6 +15,7 @@ from threading import Thread
 from typing import Optional, Tuple, Union, Dict, Any
 
 import numpy as np
+import cv2
 from PIL import Image
 
 from lerobot.common.robot_devices.cameras.configs import AzureKinectCameraConfig
@@ -445,8 +446,6 @@ class AzureKinectCamera:
             if len(result) == 1 and 'color' in result:
                 return result['color']
             return result
-
-        import cv2
 
         start_time = time.perf_counter()
 
