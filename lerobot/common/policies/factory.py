@@ -138,6 +138,7 @@ def make_policy(
 
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
     cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
+    
     kwargs["config"] = cfg
 
     if cfg.pretrained_path:

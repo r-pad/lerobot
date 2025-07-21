@@ -43,7 +43,8 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics
+from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics, ALOHA_REST_STATE
+from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper
 
 class DiffusionPolicy(PreTrainedPolicy):
     """
@@ -91,7 +92,23 @@ class DiffusionPolicy(PreTrainedPolicy):
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
         self._queues = None
 
+        self.latest_gripper_proj = None
+
         self.diffusion = DiffusionModel(config)
+
+        if self.config.enable_goal_conditioning:
+            self.high_level = HighLevelWrapper(
+                run_id=self.config.hl_run_id,
+                max_depth=self.config.hl_max_depth,
+                num_points=self.config.hl_num_points,
+                in_channels=self.config.hl_in_channels,
+                use_gripper_pcd=self.config.hl_use_gripper_pcd,
+                use_text_embedding=self.config.hl_use_text_embedding,
+                text=self.config.hl_text,
+                is_gmm=self.config.hl_is_gmm,
+                intrinsics_txt=self.config.hl_intrinsics_txt,
+                extrinsics_txt=self.config.hl_extrinsics_txt,
+            )
 
         self.reset()
 
@@ -156,6 +173,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         if self.config.action_space == "right_eef":
             action_eef = self._queues[self.act_key].popleft()
             action = inverse_kinematics(ALOHA_CONFIGURATION, action_eef.squeeze())[None].float()
+            # Force the left arm to stay at a predefined rest state
+            action[:,:9] = ALOHA_REST_STATE[:, :9]
 
             self.obs_key = "observation.right_eef_pose"
             self.act_key = "action.right_eef_pose"

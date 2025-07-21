@@ -319,6 +319,7 @@ class LeRobotDatasetMetadata:
         robot_type: str | None = None,
         features: dict | None = None,
         use_videos: bool = True,
+        extra_features: dict | None = None,
     ) -> "LeRobotDatasetMetadata":
         """Creates metadata for a LeRobotDataset."""
         obj = cls.__new__(cls)
@@ -350,6 +351,9 @@ class LeRobotDatasetMetadata:
                     raise ValueError(f"Feature names should not contain '/'. Found '/' in feature '{key}'.")
 
             features = {**features, **DEFAULT_FEATURES}
+
+        if extra_features is not None:
+            features.update(extra_features)
 
         obj.tasks, obj.task_to_task_index = {}, {}
         obj.episodes_stats, obj.stats, obj.episodes = {}, {}, {}
@@ -1028,6 +1032,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         image_writer_processes: int = 0,
         image_writer_threads: int = 0,
         video_backend: str | None = None,
+        extra_features: dict | None = None,
     ) -> "LeRobotDataset":
         """Create a LeRobot Dataset from scratch in order to record data."""
         obj = cls.__new__(cls)
@@ -1039,6 +1044,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             robot_type=robot_type,
             features=features,
             use_videos=use_videos,
+            extra_features=extra_features,
         )
         obj.repo_id = obj.meta.repo_id
         obj.root = obj.meta.root
