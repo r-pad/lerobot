@@ -262,7 +262,7 @@ def record(
         # Create empty dataset or load existing saved episodes
         sanity_check_dataset_name(cfg.repo_id, cfg.policy)
 
-        if cfg.policy.enable_goal_conditioning:
+        if cfg.policy is not None and cfg.policy.enable_goal_conditioning:
             extra_features = {"observation.images.cam_azure_kinect.goal_gripper_proj": 
                               {'dtype': 'video', 'shape': (720, 1280, 3), 
                                'names': ['height', 'width', 'channels'], 

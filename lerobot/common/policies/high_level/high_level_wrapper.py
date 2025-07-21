@@ -8,6 +8,9 @@ from lerobot.common.policies.high_level.articubot import PointNet2_super, get_we
 import wandb
 from transformers import AutoModel, AutoProcessor
 from lerobot.common.utils.aloha_utils import render_gripper_pcd
+import os
+from google import genai
+from lerobot.common.policies.high_level.classify_utils import setup_client, generate_prompt_for_current_subtask, call_gemini_with_retry, TASK_SPEC, EXAMPLES
 
 
 TARGET_SHAPE = 224
@@ -39,6 +42,7 @@ class HighLevelWrapper:
                  use_gripper_pcd=False,
                  use_text_embedding=False,
                  text=None,
+                 use_gemini=False,
                  is_gmm=False,
                  intrinsics_txt=None,
                  extrinsics_txt=None):
@@ -51,10 +55,20 @@ class HighLevelWrapper:
         self.is_gmm = is_gmm
         self.use_text_embedding = use_text_embedding
         self.use_gripper_pcd = use_gripper_pcd
-        if self.use_text_embedding:
-            self.text_embedding = get_siglip_text_embedding(text)
+        self.text_embedding = {}
+        self.text = text
+
+        self.use_gemini = use_gemini
+        if self.use_gemini:
+            self.client = setup_client(os.environ.get("RPAD_GEMINI_API_KEY"))
+            self.gemini_config = genai.types.GenerateContentConfig(temperature=0.0, candidate_count=1)
+            self.model_name = "gemini-2.5-pro"
+            self.subgoals = TASK_SPEC[text]
+            for subgoal in self.subgoals:
+                self.text_embedding[subgoal] = get_siglip_text_embedding(subgoal)
         else:
-            self.text_embedding = None
+            self.text_embedding[self.text] = get_siglip_text_embedding(self.text)
+
 
         self.original_K = np.loadtxt(intrinsics_txt) # not scaled
         self.scaled_K = None
@@ -76,10 +90,27 @@ class HighLevelWrapper:
             gripper_pcd = render_gripper_pcd(self.cam_to_world, joint_state)
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
 
+        infer_text = self.get_goal_text(rgb, joint_state)
         #### Run inference
-        goal_prediction = inference(self.model, pcd_xyz, self.text_embedding, self.is_gmm, self.device)
+        goal_prediction = inference(self.model, pcd_xyz, self.text_embedding[infer_text], self.is_gmm, self.device)
 
         return goal_prediction
+
+    def get_goal_text(self, rgb, joint_state):
+        if not self.use_gemini:
+            return self.text
+
+        pil_image = PIL.Image.fromarray(rgb)
+
+        GRIPPER_MIN, GRIPPER_MAX = 0.01, 0.048
+        gripper_state = joint_state[7]
+        gripper_state_scaled = (gripper_state - GRIPPER_MIN) / GRIPPER_MAX
+        
+        prompt = generate_prompt_for_current_subtask(
+                self.text, self.subgoals, pil_image, gripper_state_scaled, EXAMPLES
+        )
+        goal_text = call_gemini_with_retry(self.client, self.model_name, prompt, self.gemini_config)
+        return goal_text
 
     def project(self, goal_prediction, img_shape, goal_repr="heatmap"):
         assert goal_repr in ["mask", "heatmap"]

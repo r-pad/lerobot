@@ -105,6 +105,7 @@ class DiffusionPolicy(PreTrainedPolicy):
                 use_gripper_pcd=self.config.hl_use_gripper_pcd,
                 use_text_embedding=self.config.hl_use_text_embedding,
                 text=self.config.hl_text,
+                use_gemini=self.config.hl_use_gemini,
                 is_gmm=self.config.hl_is_gmm,
                 intrinsics_txt=self.config.hl_intrinsics_txt,
                 extrinsics_txt=self.config.hl_extrinsics_txt,
