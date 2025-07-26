@@ -13,6 +13,8 @@ from lerobot.common.utils.aloha_utils import render_gripper_pcd
 from PIL import Image
 from typing import List
 import argparse
+import os
+import imageio.v3 as iio
 
 def extract_events_with_gripper_pos(
     joint_states, close_thresh=15, open_thresh=25
@@ -27,6 +29,9 @@ def extract_events_with_gripper_pos(
     open_gripper_idx = close_gripper_idx + np.where(gripper_pos[close_gripper_idx:] > open_thresh)[0][0]
 
     return close_gripper_idx, open_gripper_idx
+
+def prep_eef_pose(eef_pos, eef_rot, eef_artic):
+    return np.zeros((eef_pos.shape[0], 10), dtype=np.float32)
 
 def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True, goal_repr="heatmap"):
     """
@@ -65,14 +70,15 @@ def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True
         goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
     return goal_image
     
-def upgrade_dataset_with_new_keys(
+def upgrade_dataset(
     source_repo_id: str,
     target_repo_id: str,
     new_features: dict,
     intrinsics_txt: str,
     extrinsics_txt: str,
     discard_episodes: List[int],
-    lerobot_extradata: str,
+    phantomize: bool,
+    phantom_extradata: str,
 ):
     """
     Upgrade an existing LeRobot dataset with additional features.
@@ -84,6 +90,8 @@ def upgrade_dataset_with_new_keys(
         intrinsics_txt: Path to intrinsics txt
         extrinsics_txt: Path to extrinsics txt
         discard_episodes: Episodes to be discarded when upgrading
+        phantomize: Source data is from human demos, upgrade to robot using output from Phantom
+        phantom_extradata: Auxiliary data after retargeting using Phantom
     """
     tolerance_s = 0.0004
     cam_to_world = np.loadtxt(extrinsics_txt)
@@ -123,11 +131,24 @@ def upgrade_dataset_with_new_keys(
 
     # 4. Upgrade data episode by episode
     print(f"Upgrading {source_meta.info['total_episodes']} episodes...")
-    
+
+    PHANTOM_VID_DIR = f"{phantom_extradata}/phantom_retarget"
+
     for episode_idx in range(source_meta.info["total_episodes"]):
         print(f"Processing episode {episode_idx + 1}/{source_meta.info['total_episodes']}")
         if episode_idx in discard_episodes:
             continue
+
+        if phantomize:
+            vid_dir = f"{PHANTOM_VID_DIR}/episode_{episode_idx:06d}.mp4/"
+            if not os.path.exists(vid_dir):
+                continue
+            else:
+                phantom_vid = torch.from_numpy(iio.imread(f"{vid_dir}/episode_{episode_idx:06d}.mp4"))
+                phantom_eef_pose = np.load(f"{vid_dir}/episode_{episode_idx:06d}.mp4_eef.npz")
+                phantom_eef_pose = torch.from_numpy(prep_eef_pose(phantom_eef_pose["eef_pos"],
+                                                 phantom_eef_pose["eef_rot"],
+                                                 phantom_eef_pose["eef_artic"]))
 
         # Get episode bounds
         episode_start = source_dataset.episode_data_index["from"][episode_idx].item()
@@ -147,9 +168,18 @@ def upgrade_dataset_with_new_keys(
                 if key not in AUTO_FIELDS and key in original_frame:
                     frame_data[key] = original_frame[key]
 
-            frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()] 
-            frame_data["observation.images.cam_azure_kinect.color"] = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
+            frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
+            if phantomize:
+                rgb_data = phantom_vid[frame_idx]
+                eef_data = phantom_eef_pose[frame_idx]
+            else:
+                rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
+                eef_data = frame_data["observation.right_eef_pose"]
+
+            frame_data["observation.images.cam_azure_kinect.color"] = rgb_data
+            # TODO: Phantom should process depth as well
             frame_data["observation.images.cam_azure_kinect.transformed_depth"] = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
+            frame_data["observation.right_eef_pose"] = eef_data
 
             # Dummy value
             frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
@@ -181,7 +211,7 @@ def upgrade_dataset_with_new_keys(
 if __name__ == "__main__":
     """
     python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718 --discard_episodes 3 10 11 13 21 --new_features goal_gripper_proj \
-    --phantomize --lerobot_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718
+    --phantomize --phantom_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718
     """
     parser = argparse.ArgumentParser(description="Upgrade dataset with new keys and optional intrinsics/extrinsics transformation.")
     parser.add_argument("--source_repo_id", type=str, default="sriramsk/human_mug_0718",
@@ -196,10 +226,12 @@ if __name__ == "__main__":
                         help="List of episode indices to discard")
     parser.add_argument("--new_features", type=str, nargs='*', default=[],
                         help="Names of new features")
-    parser.add_argument("--phantomize", type=bool, default=False, action="store_true",
-                        help="Enable transforminig features using Phantom.")
+    parser.add_argument("--phantomize", default=False, action="store_true",
+                        help="Prepare new data after retargeting using Phantom.")
     parser.add_argument("--phantom_extradata", type=str,
-                        help="Use auxiliary Phantom data to add to dataset.")
+                        help="Path to auxiliary Phantom data")
+    parser.add_argument("--push_to_hub", default=False, action="store_true",
+                        help="Push upgraded dataset to HF Hub.")
     args = parser.parse_args()
 
     new_features = {}
@@ -208,24 +240,24 @@ if __name__ == "__main__":
             'dtype': 'video',
             'shape': (720, 1280, 3),
             'names': ['height', 'width', 'channels'],
-            'info': 'Projection of gripper pcd at goal position onto image'}
+            'info': 'Projection of gripper pcd at goal position onto image'
         }
-    assert args.phantom_extradata is not None if args.phantomize
+    assert (args.phantom_extradata is not None) if args.phantomize else True
     phantom_extradata = args.phantom_extradata if args.phantomize else None
 
     # Upgrade the dataset
-    upgraded_dataset = upgrade_dataset_with_new_keys(
+    upgraded_dataset = upgrade_dataset(
         source_repo_id=args.source_repo_id,
         target_repo_id=args.target_repo_id, 
         new_features=new_features,
         intrinsics_txt=args.intrinsics_txt,
         extrinsics_txt=args.extrinsics_txt,
         discard_episodes=args.discard_episodes,
-        phantom_extradata=phantom_extradata
+        phantomize=args.phantomize,
+        phantom_extradata=args.phantom_extradata,
     )
 
-    breakpoint()
-    # push to hub here if necessary
+    if args.push_to_hub: upgraded_dataset.push_to_hub(repo_id=args.target_repo_id)
     
-    print("Dataset migration completed successfully!")
-    print(f"New dataset features: {list(migrated_dataset.features.keys())}")
+    print("Dataset upgrade completed successfully!")
+    print(f"New dataset features: {list(upgraded_dataset.features.keys())}")
