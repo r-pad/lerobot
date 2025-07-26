@@ -1,3 +1,10 @@
+"""
+LeRobotDataset doesn't provide any easy way to modify the dataset post-hoc with new keys.
+This script loads and iters through a dataset, does any extra processing as necessary,
+and creates a new dataset.
+
+Slow, but flexible.
+"""
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 import torch
 from tqdm import tqdm
@@ -58,16 +65,17 @@ def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True
         goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
     return goal_image
     
-def migrate_dataset_with_new_keys(
+def upgrade_dataset_with_new_keys(
     source_repo_id: str,
     target_repo_id: str,
     new_features: dict,
     intrinsics_txt: str,
     extrinsics_txt: str,
     discard_episodes: List[int],
+    lerobot_extradata: str,
 ):
     """
-    Migrate an existing LeRobot dataset to a new one with additional features.
+    Upgrade an existing LeRobot dataset with additional features.
     
     Args:
         source_repo_id: Repository ID of the source dataset
@@ -75,7 +83,7 @@ def migrate_dataset_with_new_keys(
         new_features: Dictionary of new features to add to the schema
         intrinsics_txt: Path to intrinsics txt
         extrinsics_txt: Path to extrinsics txt
-        discard_episodes: Episodes to be discarded when migrating
+        discard_episodes: Episodes to be discarded when upgrading
     """
     tolerance_s = 0.0004
     cam_to_world = np.loadtxt(extrinsics_txt)
@@ -113,8 +121,8 @@ def migrate_dataset_with_new_keys(
     # Define fields that LeRobot manages automatically
     AUTO_FIELDS = {"episode_index", "frame_index", "index", "task_index", "timestamp"}
 
-    # 4. Migrate data episode by episode
-    print(f"Migrating {source_meta.info['total_episodes']} episodes...")
+    # 4. Upgrade data episode by episode
+    print(f"Upgrading {source_meta.info['total_episodes']} episodes...")
     
     for episode_idx in range(source_meta.info["total_episodes"]):
         print(f"Processing episode {episode_idx + 1}/{source_meta.info['total_episodes']}")
@@ -165,16 +173,20 @@ def migrate_dataset_with_new_keys(
         # Save episode
         target_dataset.save_episode()
         
-    print(f"Migration complete! New dataset saved to: {target_dataset.root}")
+    print(f"Upgrade complete! New dataset saved to: {target_dataset.root}")
     return target_dataset
 
 
 # Example usage
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Migrate dataset with new keys and optional intrinsics/extrinsics transformation.")
-    parser.add_argument("--source_repo_id", type=str, default="sriramsk/aloha_mug_eef_depth",
+    """
+    python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718 --discard_episodes 3 10 11 13 21 --new_features goal_gripper_proj \
+    --phantomize --lerobot_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718
+    """
+    parser = argparse.ArgumentParser(description="Upgrade dataset with new keys and optional intrinsics/extrinsics transformation.")
+    parser.add_argument("--source_repo_id", type=str, default="sriramsk/human_mug_0718",
                         help="Source dataset repository ID")
-    parser.add_argument("--target_repo_id", type=str, default="sriramsk/aloha_mug_eef_depth_v3",
+    parser.add_argument("--target_repo_id", type=str, default="sriramsk/phantom_mug_0718",
                         help="Target dataset repository ID")
     parser.add_argument("--intrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/intrinsics.txt",
                         help="Path to the intrinsics.txt file")
@@ -182,29 +194,38 @@ if __name__ == "__main__":
                         help="Path to the extrinsics.txt file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")
-    
-    # Optional argument to handle new_features; update this if more structured input is needed
-    parser.add_argument("--new_features", type=str, default=None,
-                        help="Serialized or path to new features definition")
+    parser.add_argument("--new_features", type=str, nargs='*', default=[],
+                        help="Names of new features")
+    parser.add_argument("--phantomize", type=bool, default=False, action="store_true",
+                        help="Enable transforminig features using Phantom.")
+    parser.add_argument("--phantom_extradata", type=str,
+                        help="Use auxiliary Phantom data to add to dataset.")
     args = parser.parse_args()
 
-    new_features = {
-        "observation.images.cam_azure_kinect.goal_gripper_proj": {
-            'dtype': 'video', 
-            'shape': (720, 1280, 3), 
-            'names': ['height', 'width', 'channels'], 
+    new_features = {}
+    if "goal_gripper_proj" in args.new_features:
+        new_features["observation.images.cam_azure_kinect.goal_gripper_proj"] = {
+            'dtype': 'video',
+            'shape': (720, 1280, 3),
+            'names': ['height', 'width', 'channels'],
             'info': 'Projection of gripper pcd at goal position onto image'}
-    }
+        }
+    assert args.phantom_extradata is not None if args.phantomize
+    phantom_extradata = args.phantom_extradata if args.phantomize else None
 
-    # Migrate the dataset
-    migrated_dataset = migrate_dataset_with_new_keys(
+    # Upgrade the dataset
+    upgraded_dataset = upgrade_dataset_with_new_keys(
         source_repo_id=args.source_repo_id,
         target_repo_id=args.target_repo_id, 
         new_features=new_features,
         intrinsics_txt=args.intrinsics_txt,
         extrinsics_txt=args.extrinsics_txt,
-        discard_episodes=args.discard_episodes
+        discard_episodes=args.discard_episodes,
+        phantom_extradata=phantom_extradata
     )
+
+    breakpoint()
+    # push to hub here if necessary
     
     print("Dataset migration completed successfully!")
     print(f"New dataset features: {list(migrated_dataset.features.keys())}")
