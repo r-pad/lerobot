@@ -154,8 +154,8 @@ def inverse_kinematics(configuration, ee_pose):
             0,
         ]
     )
-    vec = torch.rad2deg(map_sim2real(vec))
-    vec[-1] = articulation
+    vec = torch.rad2deg(map_sim2real(vec)) # IK ignoring gripper
+    vec[-1] = articulation # overwrite with predicted gripper
     return vec
 
 

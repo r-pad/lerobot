@@ -15,6 +15,7 @@ from typing import List
 import argparse
 import os
 import imageio.v3 as iio
+import pytorch3d.transforms as transforms
 
 def extract_events_with_gripper_pos(
     joint_states, close_thresh=15, open_thresh=25
@@ -31,7 +32,9 @@ def extract_events_with_gripper_pos(
     return close_gripper_idx, open_gripper_idx
 
 def prep_eef_pose(eef_pos, eef_rot, eef_artic):
-    return np.zeros((eef_pos.shape[0], 10), dtype=np.float32)
+    rot_6d = transforms.matrix_to_rotation_6d(torch.from_numpy(eef_rot)).numpy()
+    eef_pose = np.concatenate([rot_6d, eef_pos, eef_artic[:, None]], axis=1).astype(np.float32)
+    return eef_pose
 
 def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True, goal_repr="heatmap"):
     """
@@ -145,10 +148,11 @@ def upgrade_dataset(
                 continue
             else:
                 phantom_vid = torch.from_numpy(iio.imread(f"{vid_dir}/episode_{episode_idx:06d}.mp4"))
-                phantom_eef_pose = np.load(f"{vid_dir}/episode_{episode_idx:06d}.mp4_eef.npz")
-                phantom_eef_pose = torch.from_numpy(prep_eef_pose(phantom_eef_pose["eef_pos"],
-                                                 phantom_eef_pose["eef_rot"],
-                                                 phantom_eef_pose["eef_artic"]))
+                phantom_proprio = np.load(f"{vid_dir}/episode_{episode_idx:06d}.mp4_eef.npz")
+                phantom_eef_pose = torch.from_numpy(prep_eef_pose(phantom_proprio["eef_pos"],
+                                                 phantom_proprio["eef_rot"],
+                                                 phantom_proprio["eef_artic"]))
+                phantom_joint_state = torch.from_numpy(phantom_proprio["joint_state"]).float()
 
         # Get episode bounds
         episode_start = source_dataset.episode_data_index["from"][episode_idx].item()
@@ -172,14 +176,17 @@ def upgrade_dataset(
             if phantomize:
                 rgb_data = phantom_vid[frame_idx]
                 eef_data = phantom_eef_pose[frame_idx]
+                joint_state = phantom_joint_state[frame_idx]
             else:
                 rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
                 eef_data = frame_data["observation.right_eef_pose"]
+                joint_state = frame_data["observation.state"]
 
             frame_data["observation.images.cam_azure_kinect.color"] = rgb_data
             # TODO: Phantom should process depth as well
             frame_data["observation.images.cam_azure_kinect.transformed_depth"] = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
             frame_data["observation.right_eef_pose"] = eef_data
+            frame_data["observation.state"] = joint_state
 
             # Dummy value
             frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
@@ -188,7 +195,10 @@ def upgrade_dataset(
             target_dataset.add_frame(frame_data)
 
         joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
-        close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states)
+        # Empirically chosen
+        if phantomize: close_thresh, open_thresh = 45, 55
+        else: close_thresh, open_thresh = 15, 25
+        close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
 
         goal1 = get_goal_image(cam_to_world, joint_states[close_gripper_idx], K, width, height, four_points=True)
         goal1_img = Image.fromarray(goal1).convert("RGB")

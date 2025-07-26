@@ -2018,7 +2018,7 @@ packages:
 - pypi: .
   name: lerobot
   version: 0.1.0
-  sha256: c6bf489c71286476b70fcb7dfa914a8fbfa9abb5e8f78e55691ef0561286d65c
+  sha256: 61533f0f7080ea5fd6974baacd50c489dc59b4cfabc2826816204be37d142ea7
   requires_dist:
   - cmake>=3.29.0.1
   - datasets>=2.19.0
@@ -2059,7 +2059,7 @@ packages:
   - transformers==4.45.2
   - sentencepiece>=0.2.0,<0.3
   - google-genai>=1.26.0,<2
-  - ipdb
+  - ipdb>=0.13.13,<0.14
   - hf-doc-builder @ git+https://github.com/huggingface/doc-builder.git@main ; extra == 'docs'
   - watchdog>=6.0.0 ; extra == 'docs'
   - pre-commit>=3.7.0 ; extra == 'dev'
