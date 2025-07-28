@@ -31,10 +31,20 @@
 
 `python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0709_with_goal --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha_eef_rgb_0709_gc --job_name=diffPo_aloha_eef_rgb_0709_gc --policy.device=cuda --wandb.enable=true --policy.n_obs_steps=4 --policy.horizon=128 --policy.n_action_steps 64 --policy.drop_n_last_frames=61 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true`
 
+
+nohup python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0709 --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha_eef_rgb_0709_aug --job_name=diffPo_aloha_eef_rgb_0709_aug --policy.device=cuda --wandb.enable=true --policy.n_obs_steps=4 --policy.horizon=128 --policy.n_action_steps 64 --policy.drop_n_last_frames=61 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --dataset.image_transforms.enable=true > train_diffPo_aug.out &
+
+CUDA_VISIBLE_DEVICES=1 nohup python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0709_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal --job_name=diffPo_aloha_eef_rgb_0709_heatmapGoal --policy.device=cuda --wandb.enable=true --policy.n_obs_steps=4 --policy.horizon=128 --policy.n_action_steps 64 --policy.drop_n_last_frames=61 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --dataset.image_transforms.enable=true > train_diffPo_heatmapGoal.out &
+
+
 # Rollout
 `python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=30 --control.single_task="Grasp mug and place it on the table." --control.repo_id=$USER/eval_aloha_mug --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_kinect": {"type": "opencv", "camera_index": 0, "fps": 30, "width": 1280, "height": 720}}' --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_aloha_mug/checkpoints/last/pretrained_model/`
 
 `python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=30 --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/eval_aloha_eef_rgb --control.num_episodes=1 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_aloha_eef_rgb/checkpoints/last/pretrained_model/`
+
+`python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=30 --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/eval_aloha_eef_rgb_0709 --control.num_episodes=1 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_aloha_eef_rgb_0709/checkpoints/last/pretrained_model/ --control.resume=true`
+
+`python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=30 --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/eval_aloha_eef_rgb_0709_heatmapGoal --control.num_episodes=1 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120`
 
 
 # Misc mapping stuff to align LeRobot Aloha and `robot_descriptions` Aloha
