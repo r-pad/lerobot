@@ -161,6 +161,9 @@ class DiffusionConfig(PreTrainedConfig):
     hl_intrinsics_txt: str = "lerobot/scripts/intrinsics.txt"
     hl_extrinsics_txt: str = "lerobot/scripts/T_world_from_camera_est_v6_0709.txt"
 
+    phantomize: bool = False # Overlay rendered robot at inference
+    phantom_downsample_factor: float = 0.25
+
     # Inference
     num_inference_steps: int | None = None
 
