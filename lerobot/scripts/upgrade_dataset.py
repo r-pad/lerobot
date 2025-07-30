@@ -32,6 +32,11 @@ def extract_events_with_gripper_pos(
     return close_gripper_idx, open_gripper_idx
 
 def prep_eef_pose(eef_pos, eef_rot, eef_artic):
+    REAL_GRIPPER_MIN, REAL_GRIPPER_MAX = 0., 99.
+    SIM_GRIPPER_MIN, SIM_GRIPPER_MAX = 0.01, 0.04
+    eef_artic = (eef_artic - SIM_GRIPPER_MIN)*(
+        (REAL_GRIPPER_MAX-REAL_GRIPPER_MIN)/(SIM_GRIPPER_MAX-SIM_GRIPPER_MIN)
+    ) + REAL_GRIPPER_MIN
     rot_6d = transforms.matrix_to_rotation_6d(torch.from_numpy(eef_rot)).numpy()
     eef_pose = np.concatenate([rot_6d, eef_pos, eef_artic[:, None]], axis=1).astype(np.float32)
     return eef_pose
@@ -163,7 +168,7 @@ def upgrade_dataset(
         for frame_idx in tqdm(range(episode_length)):
             # Get original frame data
             original_frame = source_dataset[episode_start + frame_idx]
-            
+
             # Create new frame data with additional keys
             frame_data = {}
             
@@ -177,38 +182,47 @@ def upgrade_dataset(
                 rgb_data = phantom_vid[frame_idx]
                 eef_data = phantom_eef_pose[frame_idx]
                 joint_state = phantom_joint_state[frame_idx]
+                next_idx = (frame_idx + 1) if (frame_idx + 1) < episode_length else frame_idx
+                action_eef = phantom_eef_pose[next_idx]
+                action = phantom_joint_state[next_idx]
             else:
                 rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
                 eef_data = frame_data["observation.right_eef_pose"]
                 joint_state = frame_data["observation.state"]
+                action_eef = frame_data["action.right_eef_pose"]
+                action = frame_data["action"]
 
             frame_data["observation.images.cam_azure_kinect.color"] = rgb_data
             # TODO: Phantom should process depth as well
             frame_data["observation.images.cam_azure_kinect.transformed_depth"] = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
             frame_data["observation.right_eef_pose"] = eef_data
             frame_data["observation.state"] = joint_state
+            frame_data["action.right_eef_pose"] = action_eef
+            frame_data["action"] = action
 
-            # Dummy value
-            frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
+            if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
+                # Dummy value
+                frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
 
             # Add frame to new dataset
             target_dataset.add_frame(frame_data)
 
-        joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
-        # Empirically chosen
-        if phantomize: close_thresh, open_thresh = 45, 55
-        else: close_thresh, open_thresh = 15, 25
-        close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
+        if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
+            joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
+            # Empirically chosen
+            if phantomize: close_thresh, open_thresh = 45, 55
+            else: close_thresh, open_thresh = 15, 25
+            close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
 
-        goal1 = get_goal_image(cam_to_world, joint_states[close_gripper_idx], K, width, height, four_points=True)
-        goal1_img = Image.fromarray(goal1).convert("RGB")
-        for i in range(close_gripper_idx):
-            goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+            goal1 = get_goal_image(cam_to_world, joint_states[close_gripper_idx], K, width, height, four_points=True)
+            goal1_img = Image.fromarray(goal1).convert("RGB")
+            for i in range(close_gripper_idx):
+                goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
 
-        goal2 = get_goal_image(cam_to_world, joint_states[open_gripper_idx], K, width, height)
-        goal2_img = Image.fromarray(goal2).convert("RGB")
-        for i in range(close_gripper_idx, episode_length):
-            goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+            goal2 = get_goal_image(cam_to_world, joint_states[open_gripper_idx], K, width, height)
+            goal2_img = Image.fromarray(goal2).convert("RGB")
+            for i in range(close_gripper_idx, episode_length):
+                goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
         
         # Save episode
         target_dataset.save_episode()
