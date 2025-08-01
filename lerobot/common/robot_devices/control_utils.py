@@ -36,7 +36,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
-from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics
+from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, forward_kinematics, render_and_overlay, setup_renderer
 
 def add_eef_pose(real_joints):
     eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
@@ -276,6 +276,7 @@ def control_loop(
             if policy is not None:
                 # Pretty ugly, but moving this code inside the policy makes it uglier to visualize
                 # the goal_gripper_proj key.
+
                 if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
                     # Generate new goal prediction when queue is empty
                     # This code is specific to diffusion policy / kinect :(
@@ -285,6 +286,17 @@ def control_loop(
                         gripper_proj = policy.high_level.predict_and_project(rgb, depth, observation["observation.state"])
                         policy.latest_gripper_proj = torch.from_numpy(gripper_proj)
                     observation["observation.images.cam_azure_kinect.goal_gripper_proj"] = policy.latest_gripper_proj
+
+                if hasattr(policy.config, "phantomize") and policy.config.phantomize:
+                    # Overlay RGB with rendered robot when phantomize is set
+                    # This code is specific to the Aloha
+                    rgb = observation["observation.images.cam_azure_kinect.color"].numpy()
+                    state = observation["observation.state"].numpy()
+                    if policy.renderer is None:
+                        height, width, _ = rgb.shape
+                        policy.renderer = setup_renderer(ALOHA_MODEL, policy.config.hl_intrinsics_txt, policy.config.hl_extrinsics_txt, policy.downsample_factor, width, height)
+                    phantomized_img = render_and_overlay(policy.renderer, ALOHA_MODEL, state, rgb, policy.downsample_factor)
+                    observation['observation.images.cam_azure_kinect.color'] = torch.from_numpy(phantomized_img)
 
                 pred_action, pred_action_eef = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp

@@ -254,6 +254,15 @@ def load_image_as_numpy(
         img_array /= 255.0
     return img_array
 
+def load_depth_image_as_numpy(
+    fpath: str | Path, channel_first: bool = True
+) -> np.ndarray:
+    img = PILImage.open(fpath)
+    img_array = np.array(img, dtype=np.uint16)[:, :, None]
+    if channel_first:  # (H, W, C) -> (C, H, W)
+        img_array = np.transpose(img_array, (2, 0, 1)).astype(np.float32)
+    img_array /= 1000.0 # convert to meters
+    return img_array
 
 def hf_transform_to_torch(items_dict: dict[torch.Tensor | None]):
     """Get a transform function that convert items from Hugging Face dataset (pyarrow)

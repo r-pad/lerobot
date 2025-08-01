@@ -111,6 +111,9 @@ class DiffusionPolicy(PreTrainedPolicy):
                 extrinsics_txt=self.config.hl_extrinsics_txt,
             )
 
+        self.renderer = None
+        self.phantomize = self.config.phantomize
+        self.downsample_factor = self.config.phantom_downsample_factor
         self.reset()
 
     def get_optim_params(self) -> dict:
