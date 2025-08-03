@@ -102,7 +102,7 @@ class HighLevelWrapper:
 
         pil_image = PIL.Image.fromarray(rgb)
 
-        GRIPPER_MIN, GRIPPER_MAX = 0.01, 0.048
+        GRIPPER_MIN, GRIPPER_MAX = 0.0, 0.041
         gripper_state = joint_state[7]
         gripper_state_scaled = (gripper_state - GRIPPER_MIN) / GRIPPER_MAX
         

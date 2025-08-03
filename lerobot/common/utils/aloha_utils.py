@@ -39,7 +39,7 @@ def map_real2sim(Q):
 
     # same for gripper
     real_gripper_min, real_gripper_max = -0.11, 1.7262
-    sim_gripper_min, sim_gripper_max = 0, 0.04
+    sim_gripper_min, sim_gripper_max = 0, 0.041
     Q[6] = (Q[6] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
     Q[7] = (Q[7] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
     Q[14] = (Q[14] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
@@ -106,7 +106,7 @@ def map_sim2real(vec):
     vec[11] = (vec[11] - sim_shoulder_min)*((real_shoulder_max-real_shoulder_min)/(sim_shoulder_max-sim_shoulder_min)) + real_shoulder_min
 
     real_gripper_min, real_gripper_max = -1.7262, 0.11
-    sim_gripper_min, sim_gripper_max = -0.04, 0
+    sim_gripper_min, sim_gripper_max = -0.041, 0
     vec[8] = (vec[8] - sim_gripper_min)*((real_gripper_max-real_gripper_min)/(sim_gripper_max-sim_gripper_min)) + real_gripper_min
     vec[17] = (vec[17] - sim_gripper_min)*((real_gripper_max-real_gripper_min)/(sim_gripper_max-sim_gripper_min)) + real_gripper_min
     return vec

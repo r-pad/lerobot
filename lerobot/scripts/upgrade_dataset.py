@@ -33,7 +33,7 @@ def extract_events_with_gripper_pos(
 
 def prep_eef_pose(eef_pos, eef_rot, eef_artic):
     REAL_GRIPPER_MIN, REAL_GRIPPER_MAX = 0., 99.
-    SIM_GRIPPER_MIN, SIM_GRIPPER_MAX = 0.01, 0.04
+    SIM_GRIPPER_MIN, SIM_GRIPPER_MAX = 0., 0.041
     eef_artic = (eef_artic - SIM_GRIPPER_MIN)*(
         (REAL_GRIPPER_MAX-REAL_GRIPPER_MIN)/(SIM_GRIPPER_MAX-SIM_GRIPPER_MIN)
     ) + REAL_GRIPPER_MIN
