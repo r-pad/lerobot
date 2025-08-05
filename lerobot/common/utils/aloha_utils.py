@@ -7,6 +7,8 @@ import torch
 import mujoco
 import open3d as o3d
 import trimesh
+from scipy.spatial.transform import Rotation as R
+import cv2
 
 
 ALOHA_MODEL = load_robot_description("aloha_mj_description")
@@ -37,7 +39,7 @@ def map_real2sim(Q):
 
     # same for gripper
     real_gripper_min, real_gripper_max = -0.11, 1.7262
-    sim_gripper_min, sim_gripper_max = 0, 0.04
+    sim_gripper_min, sim_gripper_max = 0, 0.041
     Q[6] = (Q[6] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
     Q[7] = (Q[7] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
     Q[14] = (Q[14] - real_gripper_min)*((sim_gripper_max-sim_gripper_min)/(real_gripper_max-real_gripper_min)) + sim_gripper_min
@@ -104,7 +106,7 @@ def map_sim2real(vec):
     vec[11] = (vec[11] - sim_shoulder_min)*((real_shoulder_max-real_shoulder_min)/(sim_shoulder_max-sim_shoulder_min)) + real_shoulder_min
 
     real_gripper_min, real_gripper_max = -1.7262, 0.11
-    sim_gripper_min, sim_gripper_max = -0.04, 0
+    sim_gripper_min, sim_gripper_max = -0.041, 0
     vec[8] = (vec[8] - sim_gripper_min)*((real_gripper_max-real_gripper_min)/(sim_gripper_max-sim_gripper_min)) + real_gripper_min
     vec[17] = (vec[17] - sim_gripper_min)*((real_gripper_max-real_gripper_min)/(sim_gripper_max-sim_gripper_min)) + real_gripper_min
     return vec
@@ -154,8 +156,8 @@ def inverse_kinematics(configuration, ee_pose):
             0,
         ]
     )
-    vec = torch.rad2deg(map_sim2real(vec))
-    vec[-1] = articulation
+    vec = torch.rad2deg(map_sim2real(vec)) # IK ignoring gripper
+    vec[-1] = articulation # overwrite with predicted gripper
     return vec
 
 
@@ -306,3 +308,95 @@ def combine_meshes(meshes):
     combined_mesh.remove_degenerate_triangles()
 
     return combined_mesh
+
+
+def setup_renderer(model, intrinsics_txt, extrinsics_txt, downsample_factor, width, height):
+    """
+    Setup mujoco renderer for Aloha.
+    Re-use the teleoperator_pov camera and configure as required
+    Downsample the rendered image because we run into opengl framebuffer issues otherwise
+    """
+    cam_to_world = np.loadtxt(extrinsics_txt)
+    cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "teleoperator_pov")
+    K = np.loadtxt(intrinsics_txt)
+    width, height = int(width * downsample_factor), int(height * downsample_factor)
+    K[0,0] *= downsample_factor
+    K[0,2] *= downsample_factor
+    K[1,1] *= downsample_factor
+    K[1,2] *= downsample_factor
+    setup_camera(model, cam_id, cam_to_world, width, height, K)
+    renderer = mujoco.Renderer(model, width=width, height=height)
+    return renderer
+
+def setup_camera(model, cam_id, cam_to_world, width, height, K):
+    """
+    Configure camera to match real world setup. """
+    model.cam_pos[cam_id] = cam_to_world[:3, 3]
+    R_flip = np.diag([1, -1, -1])
+    R_cam = R.from_matrix(cam_to_world[:3, :3] @ R_flip)
+    cam_quat = R_cam.as_quat()  # [x, y, z, w]
+    cam_quat = cam_quat[[3, 0, 1, 2]]  # Reorder to [w, x, y, z] for MuJoCo
+    model.cam_quat[cam_id] = cam_quat
+    fovy = np.degrees(2 * np.arctan((height / 2) / K[1, 1]))
+    model.cam_fovy[cam_id] = fovy
+
+
+def render_rightArm_images(renderer, data, camera="teleoperator_pov", use_seg=False):
+    """
+    Render RGB, depth, and segmentation images with right arm masking from MuJoCo simulation.
+    Args:
+        renderer (mujoco.Renderer): MuJoCo renderer instance configured for the scene
+        data (mujoco.MjData): MuJoCo data object containing current simulation state
+        camera (str, optional): Name of the camera to render from.
+
+    Returns:
+        tuple: A tuple containing:
+            - rgb (np.ndarray): Masked RGB image of shape (H, W, 3), dtype uint8.
+                               Right arm pixels retain original colors, background pixels are black.
+            - depth (np.ndarray): Masked depth image of shape (H, W), dtype float32.
+                                 Right arm pixels contain depth values, background pixels are zero.
+            - seg (np.ndarray): Binary segmentation mask of shape (H, W), dtype bool.
+                               True for right arm pixels, False for background.
+    """
+    renderer.update_scene(data, camera=camera)
+    rgb = renderer.render()
+
+    # Depth rendering
+    renderer.enable_depth_rendering()
+    depth = renderer.render()
+    renderer.disable_depth_rendering()
+
+    # Segmentation rendering
+    renderer.enable_segmentation_rendering()
+    seg = renderer.render()
+    renderer.disable_segmentation_rendering()
+
+    seg = seg[:, :, 0]  # channel 1 is foreground/background
+    # NOTE: Classes for the right arm excluding the camera mount. Handpicked
+    target_classes = set(range(65, 91)) - {81, 82, 83}
+
+    seg = np.isin(seg, list(target_classes)).astype(bool)
+    if use_seg:
+        rgb[~seg] = 0
+        depth[~seg] = 0
+
+    return rgb, depth, seg
+
+
+def render_and_overlay(renderer, ALOHA_MODEL, joint_state, real_rgb, downsample_factor):
+    """
+    Place sim-aloha in the same location as the real one
+    Render rgb/depth/seg and then overlay the rendered robot on the real one
+    """
+    upsample_factor = 1/downsample_factor
+    Q = convert_real_joints(joint_state)
+    data = mujoco.MjData(ALOHA_MODEL)
+    data.qpos = Q
+    mujoco.mj_forward(ALOHA_MODEL, data)
+
+    rgb, depth, seg = render_rightArm_images(renderer, data)
+    rgb_ = cv2.resize(rgb, (0,0), fx=upsample_factor, fy=upsample_factor)
+    seg_ = cv2.resize(seg.astype(np.uint8), (0,0), fx=upsample_factor, fy=upsample_factor).astype(bool)
+    
+    real_rgb[seg_] = rgb_[seg_]
+    return real_rgb

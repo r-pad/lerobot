@@ -1,40 +1,84 @@
-# Notes
+# Documentation
 
-- `pyk4a` needs to be installed from source to build it with numpy 2. Run `pixi run install-k4a`. This will take a long time to build. However, if the environment is deactivated/reactivated, it doesn't work anymore. In that case, run `pip uninstall pyk4a && pip install pyk4a` to get it working with the new env (should probably fix or automate this).
+Mixed bag of notes, tidbits and info with using LeRobot in our Kinect + Aloha stack:
 
-# Commands
+## Setup
+
+```
+git@github.com:r-pad/lerobot.git
+pixi shell
+pixi run install-pytorch3d
+pixi run install-k4a
+```
+
+- `pyk4a` needs to be installed from source to build it with numpy 2. Run `pixi run install-k4a`. This will take a long time to build. However, if the environment is deactivated/reactivated, it doesn't work anymore :(. In that case, run `pip uninstall pyk4a && pip install pyk4a` to get it working with the new env (should probably fix or automate this).
+
+## Commands
 
 ### Teleop
-`python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_kinect": {"type": "opencv", "camera_index": 0, "fps": 30, "width": 1280, "height": 720}}' --control.type=teleoperate --control.display_data=true`
 
-`python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --control.type=teleoperate --control.display_data=true`
+Base Teleop command:
+```
+python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --control.type=teleoperate --control.display_data=true
+```
+
+The camera can be configured through the attached config, with options in `lerobot/common/robot_devices/cameras/azure_kinect.py`. 
+
+Other options of note is the setting `--robot.max_relative_target` which is a limit on how much the robot can move in a single step. The default value is 5. With lower values <3, the motion is very laggy and joints move weirdly. The clamping can be disabled with `--robot.max_relative_target=null` allowing for very smooth high-frequency teleop, but I do not recommend as one wrong move can send the Aloha to DynaMixel heaven. The default value works well enough.
+
+Lastly we have `--control.display_data=true` which opens a streaming Rerun window.
 
 ### Record episodes
-`python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/aloha_mug_eef --control.num_episodes=100 --robot.cameras='{"cam_kinect": {"type": "opencv", "camera_index": 0, "fps": 30, "width": 1280, "height": 720}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=60 --control.reset_time_s=5 --control.warmup_time_s=3 --control.resume=true`
 
-`python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/aloha_mug_eef_depth --control.num_episodes=100 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=60 --control.reset_time_s=5 --control.warmup_time_s=3 --control.resume=true --control.num_image_writer_processes=4`
+Base record command:
 
-### Visualize 
-`python lerobot/scripts/visualize_dataset.py  --repo-id sriramsk/aloha_mug_eef   --episode-index 0`
+```
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/aloha_mug_eef_depth --control.num_episodes=100 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=60 --control.reset_time_s=5 --control.warmup_time_s=3 --control.resume=true --control.num_image_writer_processes=4
+```
 
-### Replay
-`python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_kinect": {"type": "opencv", "camera_index": 0, "fps": 30, "width": 1280, "height": 720}}' --control.type=replay --control.fps=60 --control.repo_id=sriramsk/aloha_mug_eef --control.episode=0`
+`--control.repo_id` indicates the name with which the dataset is saved and uploaded to Huggingface (if `--control.push_to_hub` is enabled). `--control.resume` allows writing to an existing dataset. While recording, use left/right arrow keys to finish / reset current episode. `--robot.use_eef=true` runs forward kinematics and stores the computed eef pose in the dataset.
 
-### Generate goals
+### Visualize and replay
 
-`python lerobot/scripts/migrate_dataset.py --source_repo_id sriramsk/aloha_mug_eef_depth_0709 --target_repo_id aloha_mug_eef_depth_0709_with_goal`
+```
+python lerobot/scripts/visualize_dataset.py  --repo-id sriramsk/aloha_mug_eef   --episode-index 0
+```
+
+(Careful when replaying)
+```
+python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_kinect": {"type": "opencv", "camera_index": 0, "fps": 30, "width": 1280, "height": 720}}' --control.type=replay --control.fps=60 --control.repo_id=sriramsk/aloha_mug_eef --control.episode=0
+```
+
+### Modify existing dataset
+
+LeRobot doesn't provide a simple way to add new keys / modify existing keys to a dataset. Instead this script takes the blunt approach of simply creating a new dataset, copying required keys and modifying/adding other keys.
+
+```
+python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718_heatmapGoal --discard_episodes 2 10 11 13 21 --phantomize --phantom_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718 --push_to_hub --new_features goal_gripper_proj
+```
+
+`--source_repo_id` is the id of the existing dataset and `--target_repo_id` is the id of the new dataset being created. `--discard_episodes` skips problematic episodes which may exist in the source data, `--new_features` takes in a list of new features to be added (in this case, a heatmap image).
+
+`--phantomize` and `--phantom_extradata` are extra arguments only required when retargeting a human demonstration dataset following the approach in[Phantom](https://phantom-human-videos.github.io/).
 
 ### Train
-`python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha --job_name=diffPo_aloha --policy.device=cuda --wandb.enable=true --policy.n_obs_steps=4 --policy.horizon=128 --policy.n_action_steps 64 --policy.drop_n_last_frames=61 --policy.crop_shape="[540, 960]"`
 
-`python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha_eef_rgb --job_name=diffPo_aloha_eef_rgb --policy.device=cuda --wandb.enable=true --policy.n_obs_steps=4 --policy.horizon=128 --policy.n_action_steps 64 --policy.drop_n_last_frames=61 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false`
+Too many options to describe in detail, some notes:
+- `horizon` and `n_action_steps` are much higher than the original diffusion policy because our data is captured at a high frequency.
+- Center crop `[600, 600]` to avoid extra parts of the workspace sneaking in.
+- `--policy.use_separate_rgb_encoder_per_camera` because we also have heatmap images and it doesn't make much sense to encode both RGB and heatmaps with the same encoder.
+- `enable_goal_conditioning=true` is mostly for inference since this flag can't (?) be set at inference.
 
-`python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0709_with_goal --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha_eef_rgb_0709_gc --job_name=diffPo_aloha_eef_rgb_0709_gc --policy.device=cuda --wandb.enable=true --policy.n_obs_steps=4 --policy.horizon=128 --policy.n_action_steps 64 --policy.drop_n_last_frames=61 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true`
+```
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0709_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal --job_name=diffPo_aloha_eef_rgb_0709_heatmapGoal --policy.device=cuda --wandb.enable=true --policy.n_obs_steps=4 --policy.horizon=128 --policy.n_action_steps 64 --policy.drop_n_last_frames=61 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --dataset.image_transforms.enable=true
+```
+
 
 # Rollout
-`python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=30 --control.single_task="Grasp mug and place it on the table." --control.repo_id=$USER/eval_aloha_mug --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_kinect": {"type": "opencv", "camera_index": 0, "fps": 30, "width": 1280, "height": 720}}' --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_aloha_mug/checkpoints/last/pretrained_model/`
 
-`python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=30 --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/eval_aloha_eef_rgb --control.num_episodes=1 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_aloha_eef_rgb/checkpoints/last/pretrained_model/`
+```
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=30 --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/eval_aloha_eef_rgb_0709_heatmapGoal --control.num_episodes=1 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
+```
 
 
 # Misc mapping stuff to align LeRobot Aloha and `robot_descriptions` Aloha
