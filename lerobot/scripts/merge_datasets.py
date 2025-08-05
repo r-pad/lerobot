@@ -26,7 +26,7 @@ def merge_datasets(dataset_a_repo_id: str, dataset_b_repo_id: str, target_repo_i
         features=dataset_a.features,
     )
 
-    def copy_dataset(source_dataset, source_meta, label):
+    def copy_in_dataset(source_dataset, source_meta, label):
         for episode_idx in range(source_meta.info["total_episodes"]):
             print(f"[{label}] Copying episode {episode_idx}")
             start = source_dataset.episode_data_index["from"][episode_idx].item()
@@ -45,8 +45,8 @@ def merge_datasets(dataset_a_repo_id: str, dataset_b_repo_id: str, target_repo_i
                 merged_dataset.add_frame(frame_data)
             merged_dataset.save_episode()
 
-    copy_dataset(dataset_a, meta_a, "A")
-    copy_dataset(dataset_b, meta_b, "B")
+    copy_in_dataset(dataset_a, meta_a, "A")
+    copy_in_dataset(dataset_b, meta_b, "B")
 
     print("Merge complete!")
     return merged_dataset
