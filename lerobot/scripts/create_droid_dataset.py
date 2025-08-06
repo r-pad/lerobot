@@ -73,7 +73,13 @@ def load_trajectory(droid_raw_dir, fname):
             )
         ee_pos = gripper_cartesian_pos[:, :3]
         ee_euler = gripper_cartesian_pos[:, 3:6]
-        R_ee = Rotation.from_euler("xyz", ee_euler).as_matrix()
+
+        R_ee = Rotation.from_euler("xyz", ee_euler)
+        # Align the coordinate frames in DROID with the one in the Aloha
+        R_aloha_align = Rotation.from_euler("xy", [180, -90], degrees=True)
+        R_ee = R_ee * R_aloha_align
+        R_ee = R_ee.as_matrix()
+
         ee_rot = transforms.matrix_to_rotation_6d(torch.from_numpy(R_ee)).numpy()
         eef_pose = np.concatenate([ee_rot, ee_pos, gripper_action[:, None]], axis=1).astype(np.float32)
         return eef_pose
