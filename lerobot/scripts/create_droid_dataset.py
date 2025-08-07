@@ -202,7 +202,7 @@ def gen_droid_dataset(
     try:
         droid_dataset = LeRobotDataset.create(
             repo_id=repo_id,
-            fps=60, # DROID data is recorded at 60fps
+            fps=15, # DROID data is recorded at 15fps but the videos have been sped up and report 60fps
             features=features,
         )
     except Exception as e:
