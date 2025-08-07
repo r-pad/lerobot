@@ -199,14 +199,20 @@ def gen_droid_dataset(
 
     print(f"Creating new dataset: {repo_id}")
 
-    droid_dataset = LeRobotDataset.create(
-        repo_id=repo_id,
-        fps=60, # DROID data is recorded at 60fps
-        features=features,
-    )
+    try:
+        droid_dataset = LeRobotDataset.create(
+            repo_id=repo_id,
+            fps=60, # DROID data is recorded at 60fps
+            features=features,
+        )
+    except Exception as e:
+        print("Caught exception", e)
+        print("Dataset already exists? Loading existing dataset.")
+        droid_dataset = LeRobotDataset("sriramsk/droid_lerobot")
 
     num_episodes = len(dataset_indexes)
-    for episode_idx in tqdm(range(num_episodes), total=num_episodes):
+    for episode_idx in tqdm(range(droid_dataset.meta.total_episodes, num_episodes),
+                            total=(num_episodes - droid_dataset.meta.total_episodes)):
         index = dataset_indexes[episode_idx]
         fname = idx_to_fname_mapping[index]
         cam_serial, K, baseline, world_to_cam = load_camera_params(droid_raw_dir, fname, camera_intrinsics_dict, scale_factor)
@@ -222,6 +228,8 @@ def gen_droid_dataset(
         obs, actions = load_trajectory(droid_raw_dir, fname)
         heatmap_images = generate_heatmap_images(index, gripper_pcd_dir, subgoal_indices,
                                                  K, images.shape, GRIPPER_IDX)
+
+        if subgoal_indices[-1] == 0: continue # some edge cases ...
 
         # Process until the end of the last subgoal
         for frame_idx in range(subgoal_indices[-1]):
