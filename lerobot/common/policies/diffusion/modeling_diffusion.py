@@ -44,7 +44,7 @@ from lerobot.common.policies.utils import (
     populate_queues,
 )
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics, ALOHA_REST_STATE
-from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper
+from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, get_siglip_text_embedding
 
 class DiffusionPolicy(PreTrainedPolicy):
     """
@@ -104,7 +104,7 @@ class DiffusionPolicy(PreTrainedPolicy):
                 in_channels=self.config.hl_in_channels,
                 use_gripper_pcd=self.config.hl_use_gripper_pcd,
                 use_text_embedding=self.config.hl_use_text_embedding,
-                text=self.config.hl_text,
+                text=self.config.text,
                 use_gemini=self.config.hl_use_gemini,
                 is_gmm=self.config.hl_is_gmm,
                 intrinsics_txt=self.config.hl_intrinsics_txt,
@@ -230,6 +230,8 @@ class DiffusionModel(nn.Module):
         else:
             raise NotImplementedError
 
+        self.use_text_embedding = self.config.use_text_embedding
+
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
         if self.config.image_features:
@@ -243,6 +245,18 @@ class DiffusionModel(nn.Module):
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
+        if self.use_text_embedding:
+            self.text_embedding_cache = {}
+
+            self.text_proj_dim = 32
+            self.text_proj = nn.Sequential(
+                nn.Linear(1152, 256),
+                nn.ReLU(),
+                nn.Linear(256, 64),
+                nn.ReLU(),
+                nn.Linear(64, self.text_proj_dim)
+            )
+            global_cond_dim += self.text_proj_dim
 
         self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
 
@@ -323,6 +337,18 @@ class DiffusionModel(nn.Module):
 
         if self.config.env_state_feature:
             global_cond_feats.append(batch[OBS_ENV])
+
+        if self.use_text_embedding:
+            def get_cached_embedding(instruction):
+                if instruction not in self.text_embedding_cache:
+                    self.text_embedding_cache[instruction] = get_siglip_text_embedding(instruction)
+                return self.text_embedding_cache[instruction]
+
+            text_feats = [get_cached_embedding(i) for i in batch['task']]
+            text_feats = torch.from_numpy(np.vstack(text_feats)).to(global_cond_feats[0].device)  # (B, text_dim)
+            text_feats = self.text_proj(text_feats)  # (B, 32)
+            text_feats = text_feats.unsqueeze(1).repeat(1, n_obs_steps, 1)
+            global_cond_feats.append(text_feats)
 
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
