@@ -325,7 +325,7 @@ def get_siglip_text_embedding(
         )
 
     # Process text input
-    inputs = siglip_processor(text=[caption], return_tensors="pt", padding=True)
+    inputs = siglip_processor(text=[caption], return_tensors="pt", padding=True, truncation=True,  max_length=64)
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
     # Generate embeddings

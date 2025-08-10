@@ -45,6 +45,8 @@ from lerobot.common.policies.utils import (
 )
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics, ALOHA_REST_STATE
 from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, get_siglip_text_embedding
+from transformers import AutoModel, AutoProcessor
+
 
 class DiffusionPolicy(PreTrainedPolicy):
     """
@@ -246,6 +248,8 @@ class DiffusionModel(nn.Module):
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
         if self.use_text_embedding:
+            self.siglip = AutoModel.from_pretrained("google/siglip-so400m-patch14-384")
+            self.siglip_processor = AutoProcessor.from_pretrained("google/siglip-so400m-patch14-384")
             self.text_embedding_cache = {}
 
             self.text_proj_dim = 32
@@ -341,7 +345,7 @@ class DiffusionModel(nn.Module):
         if self.use_text_embedding:
             def get_cached_embedding(instruction):
                 if instruction not in self.text_embedding_cache:
-                    self.text_embedding_cache[instruction] = get_siglip_text_embedding(instruction)
+                    self.text_embedding_cache[instruction] = get_siglip_text_embedding(instruction, self.siglip, self.siglip_processor)
                 return self.text_embedding_cache[instruction]
 
             text_feats = [get_cached_embedding(i) for i in batch['task']]
