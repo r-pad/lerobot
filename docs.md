@@ -73,6 +73,16 @@ Too many options to describe in detail, some notes:
 python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0709_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal --job_name=diffPo_aloha_eef_rgb_0709_heatmapGoal --policy.device=cuda --wandb.enable=true --policy.n_obs_steps=4 --policy.horizon=128 --policy.n_action_steps 64 --policy.drop_n_last_frames=61 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --dataset.image_transforms.enable=true
 ```
 
+Training with a subsampled dataset:
+```
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0709_heatmapGoal_subsampled --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal_subsampled --job_name=diffPo_aloha_eef_rgb_0709_heatmapGoal_subsampled --policy.device=cuda --wandb.enable=true --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --dataset.image_transforms.enable=true
+```
+
+Pretraining with DROID:
+```
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/droid_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_droid_lerobot --job_name=diffPo_droid_lerobot --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --steps=1_000_000
+```
+
 
 # Rollout
 
