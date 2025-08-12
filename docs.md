@@ -69,6 +69,7 @@ Too many options to describe in detail, some notes:
 - `--policy.use_separate_rgb_encoder_per_camera` because we also have heatmap images and it doesn't make much sense to encode both RGB and heatmaps with the same encoder.
 - `enable_goal_conditioning=true` is mostly for inference since this flag can't (?) be set at inference.
 - `--policy.use_text_embedding=true` to use siglip features and condition on those as well.
+- Bump up `num_workers` if gpu util is low, video decoding benefits well from parallelization.
 
 ```
 python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0709_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal --job_name=diffPo_aloha_eef_rgb_0709_heatmapGoal --policy.device=cuda --wandb.enable=true --policy.n_obs_steps=4 --policy.horizon=128 --policy.n_action_steps 64 --policy.drop_n_last_frames=61 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --dataset.image_transforms.enable=true
@@ -81,7 +82,7 @@ python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0
 
 Pretraining with DROID:
 ```
-python lerobot/scripts/train.py --dataset.repo_id=sriramsk/droid_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_droid_lerobot --job_name=diffPo_droid_lerobot --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --steps=1_000_000 --batch_size=64 --num_workers=64 --prefetch_factor=8 --policy.use_text_embedding=true 
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/droid_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_droid_lerobot --job_name=diffPo_droid_lerobot --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --steps=1_000_000 --batch_size=64 --num_workers=48 --prefetch_factor=8 --policy.use_text_embedding=true 
 ```
 
 
