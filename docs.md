@@ -81,7 +81,7 @@ python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0
 
 Pretraining with DROID:
 ```
-python lerobot/scripts/train.py --dataset.repo_id=sriramsk/droid_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_droid_lerobot --job_name=diffPo_droid_lerobot --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --steps=1_000_000 --policy.use_text_embedding=true
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/droid_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_droid_lerobot --job_name=diffPo_droid_lerobot --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --steps=1_000_000 --batch_size=64 --num_workers=64 --prefetch_factor=8 --policy.use_text_embedding=true 
 ```
 
 
