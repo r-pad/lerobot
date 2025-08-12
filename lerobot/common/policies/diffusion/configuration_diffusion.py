@@ -147,6 +147,9 @@ class DiffusionConfig(PreTrainedConfig):
 
     action_space: str = "right_eef"
 
+    use_text_embedding: bool = False
+    text: str = "grasp mug and place mug on table"
+
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
     hl_run_id: str | None = "ticsnohr"
@@ -155,13 +158,13 @@ class DiffusionConfig(PreTrainedConfig):
     hl_is_gmm: bool = True
     hl_use_text_embedding: bool = True
     hl_use_gripper_pcd: bool = True
-    hl_text: str = "grasp mug and place mug on table"
     hl_use_gemini: bool = False
     hl_in_channels: int = 4
     hl_intrinsics_txt: str = "lerobot/scripts/intrinsics.txt"
     hl_extrinsics_txt: str = "lerobot/scripts/T_world_from_camera_est_v6_0709.txt"
 
-    phantomize: bool = False # Overlay rendered robot at inference
+    # Phantom - Overlay rendered robot at inference
+    phantomize: bool = False
     phantom_downsample_factor: float = 0.25
 
     # Inference
