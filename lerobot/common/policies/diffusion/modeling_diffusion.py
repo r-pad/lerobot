@@ -249,6 +249,8 @@ class DiffusionModel(nn.Module):
             global_cond_dim += self.config.env_state_feature.shape[0]
         if self.use_text_embedding:
             self.siglip = AutoModel.from_pretrained("google/siglip-so400m-patch14-384")
+            for param in self.siglip.parameters():
+                param.requires_grad = False
             self.siglip_processor = AutoProcessor.from_pretrained("google/siglip-so400m-patch14-384")
             self.text_embedding_cache = {}
 
