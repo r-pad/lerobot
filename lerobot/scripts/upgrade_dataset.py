@@ -43,7 +43,7 @@ def prep_eef_pose(eef_pos, eef_rot, eef_artic):
 
 def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True, goal_repr="heatmap"):
     """
-    Render gripper pcd in camera frame, project the full point cloud or 4 handpicked points to a mask 
+    Render gripper pcd in camera frame, project the full point cloud or 4 handpicked points to a mask
     """
     mesh = render_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
     assert goal_repr in ["mask", "heatmap"]
@@ -77,7 +77,7 @@ def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True
         goal_image = (np.sqrt(goal_image / max_distance) * 255)
         goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
     return goal_image
-    
+
 def upgrade_dataset(
     source_repo_id: str,
     target_repo_id: str,
@@ -90,7 +90,7 @@ def upgrade_dataset(
 ):
     """
     Upgrade an existing LeRobot dataset with additional features.
-    
+
     Args:
         source_repo_id: Repository ID of the source dataset
         target_repo_id: Repository ID for the new dataset
@@ -114,20 +114,20 @@ def upgrade_dataset(
 
     # 2. Create expanded feature schema
     print("Creating expanded feature schema...")
-    
+
     # Start with existing features
     expanded_features = dict(source_dataset.features)
-    
+
     # Add new features
     expanded_features.update(new_features)
-    
+
     print(f"Original features: {list(source_dataset.features.keys())}")
     print(f"New features: {list(new_features.keys())}")
     print(f"Total features: {list(expanded_features.keys())}")
-    
+
     # 3. Create new dataset with expanded schema
     print(f"Creating new dataset: {target_repo_id}")
-    
+
     target_dataset = LeRobotDataset.create(
         repo_id=target_repo_id,
         fps=source_dataset.fps,
@@ -171,7 +171,7 @@ def upgrade_dataset(
 
             # Create new frame data with additional keys
             frame_data = {}
-            
+
             # Copy existing data
             for key in source_dataset.features.keys():
                 if key not in AUTO_FIELDS and key in original_frame:
@@ -204,6 +204,12 @@ def upgrade_dataset(
                 # Dummy value
                 frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
 
+            if "observation.points.gripper_pcds" in new_features:
+                frame_data["observation.points.gripper_pcds"] = render_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state).astype(np.float32)
+
+            if "next_event_idx" in new_features:
+                frame_data["next_event_idx"] = np.array([0], dtype=np.int32)
+
             # Add frame to new dataset
             target_dataset.add_frame(frame_data)
 
@@ -223,10 +229,24 @@ def upgrade_dataset(
             goal2_img = Image.fromarray(goal2).convert("RGB")
             for i in range(close_gripper_idx, episode_length):
                 goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
-        
+
+        if "next_event_idx" in new_features:
+            joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
+            # Empirically chosen
+            if phantomize: close_thresh, open_thresh = 45, 55
+            else: close_thresh, open_thresh = 15, 25
+            close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
+            for i in range(episode_length):
+                if i < close_gripper_idx:
+                    target_dataset.episode_buffer["next_event_idx"][i] = close_gripper_idx
+                elif i < open_gripper_idx:
+                    target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
+                else:
+                    target_dataset.episode_buffer["next_event_idx"][i] = episode_length
+
         # Save episode
         target_dataset.save_episode()
-        
+
     print(f"Upgrade complete! New dataset saved to: {target_dataset.root}")
     return target_dataset
 
@@ -266,13 +286,27 @@ if __name__ == "__main__":
             'names': ['height', 'width', 'channels'],
             'info': 'Projection of gripper pcd at goal position onto image'
         }
+    if "gripper_pcds" in args.new_features:
+        new_features["observation.points.gripper_pcds"] = {
+            'dtype': 'float32',
+            'shape': (500, 3),
+            'names': ['N', 'channels'],
+            'info': 'Raw gripper point cloud at current position'
+        }
+    if "next_event_idx" in args.new_features:
+        new_features["next_event_idx"] = {
+            'dtype': 'int32',
+            'shape': (1,),
+            'names': ['idx'],
+            'info': 'Index of next event in the dataset'
+        }
     assert (args.phantom_extradata is not None) if args.phantomize else True
     phantom_extradata = args.phantom_extradata if args.phantomize else None
 
     # Upgrade the dataset
     upgraded_dataset = upgrade_dataset(
         source_repo_id=args.source_repo_id,
-        target_repo_id=args.target_repo_id, 
+        target_repo_id=args.target_repo_id,
         new_features=new_features,
         intrinsics_txt=args.intrinsics_txt,
         extrinsics_txt=args.extrinsics_txt,
@@ -282,6 +316,6 @@ if __name__ == "__main__":
     )
 
     if args.push_to_hub: upgraded_dataset.push_to_hub(repo_id=args.target_repo_id)
-    
+
     print("Dataset upgrade completed successfully!")
     print(f"New dataset features: {list(upgraded_dataset.features.keys())}")
