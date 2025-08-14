@@ -147,6 +147,20 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
                 )
                 model.to(map_location)
         else:
+            import torch
+
+            # model.normalize_inputs.buffer_observation_images_cam_azure_kinect_transformed_depth.mean = torch.nn.Parameter(torch.zeros((3, 1, 1)).float())
+            # model.normalize_inputs.buffer_observation_images_cam_azure_kinect_transformed_depth.std = torch.nn.Parameter(torch.zeros((3, 1, 1)).float())
+            
+            weights = safetensors.torch.load_file(model_file)
+            model.normalize_inputs.buffer_observation_images_cam_azure_kinect_color.mean = torch.nn.Parameter(weights['normalize_inputs.buffer_observation_images_cam_color.mean'])
+            model.normalize_inputs.buffer_observation_images_cam_azure_kinect_color.std = torch.nn.Parameter(weights['normalize_inputs.buffer_observation_images_cam_color.std'])
+            model.normalize_inputs.buffer_observation_images_cam_azure_kinect_goal_gripper_proj.mean = torch.nn.Parameter(weights['normalize_inputs.buffer_observation_images_cam_goal_gripper_proj.mean'])
+            model.normalize_inputs.buffer_observation_images_cam_azure_kinect_goal_gripper_proj.std = torch.nn.Parameter(weights['normalize_inputs.buffer_observation_images_cam_goal_gripper_proj.std'])
+            model.normalize_inputs.buffer_observation_images_cam_azure_kinect_transformed_depth.mean = torch.nn.Parameter(torch.zeros((1, 1, 1)).float())
+            model.normalize_inputs.buffer_observation_images_cam_azure_kinect_transformed_depth.std = torch.nn.Parameter(torch.zeros((1, 1, 1)).float())
+
+
             safetensors.torch.load_model(model, model_file, strict=strict, device=map_location)
         return model
 

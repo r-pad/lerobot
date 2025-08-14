@@ -169,6 +169,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         if len(self._queues[self.act_key]) == 0:
             # stack n latest observations from the queue
             batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+            if self.config.use_text_embedding:
+                batch['task'] = [self.config.text]
             actions = self.diffusion.generate_actions(batch)
 
             # TODO(rcadene): make above methods return output dictionary?
@@ -542,6 +544,8 @@ class DiffusionRgbEncoder(nn.Module):
                 self.maybe_random_crop = self.center_crop
         else:
             self.do_crop = False
+        self.center_crop = torchvision.transforms.CenterCrop((180, 320))
+        self.resize = torchvision.transforms.Resize((270, 540))
 
         # Set up backbone.
         backbone_model = getattr(torchvision.models, config.vision_backbone)(
@@ -571,6 +575,7 @@ class DiffusionRgbEncoder(nn.Module):
         images_shape = next(iter(config.image_features.values())).shape
         dummy_shape_h_w = config.crop_shape if config.crop_shape is not None else images_shape[1:]
         dummy_shape = (1, images_shape[0], *dummy_shape_h_w)
+        dummy_shape = (1, 3, 180, 320)
         feature_map_shape = get_output_shape(self.backbone, dummy_shape)[1:]
 
         self.pool = SpatialSoftmax(feature_map_shape, num_kp=config.spatial_softmax_num_keypoints)
@@ -592,6 +597,8 @@ class DiffusionRgbEncoder(nn.Module):
             else:
                 # Always use center crop for eval.
                 x = self.center_crop(x)
+        x = self.center_crop(self.resize(x))
+
         # Extract backbone feature.
         x = torch.flatten(self.pool(self.backbone(x)), start_dim=1)
         # Final linear layer with non-linearity.
