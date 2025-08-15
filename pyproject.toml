@@ -89,6 +89,7 @@ dependencies = [
     "bddl==1.0.1",
     "future==0.18.2",
     "easydict==1.9",
+    "libero @ git+https://github.com/sriramsk1999/LIBERO.git",
 ]
 
 [project.optional-dependencies]
