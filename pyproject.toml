@@ -85,6 +85,10 @@ dependencies = [
     "sentencepiece>=0.2.0,<0.3",
     "google-genai>=1.26.0,<2",
     "ipdb>=0.13.13,<0.14",
+    "robosuite==1.4.0",
+    "bddl==1.0.1",
+    "future==0.18.2",
+    "easydict==1.9",
 ]
 
 [project.optional-dependencies]
