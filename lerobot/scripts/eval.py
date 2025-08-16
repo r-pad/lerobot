@@ -160,7 +160,7 @@ def rollout(
         observation = add_envs_task(env, observation)
 
         with torch.inference_mode():
-            action = policy.select_action(observation)
+            action, action_eef = policy.select_action(observation)
 
         # Convert to CPU / numpy.
         action = action.to("cpu").numpy()

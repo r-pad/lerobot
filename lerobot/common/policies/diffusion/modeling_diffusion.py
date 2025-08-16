@@ -148,6 +148,11 @@ class DiffusionPolicy(PreTrainedPolicy):
         actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
         """
         batch = self.normalize_inputs(batch)
+        if self.config.use_text_embedding:
+            # For sim eval, task description comes from batch
+            # For real, we pass it through the config
+            text = batch.get('task', [self.config.text])
+
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch["observation.images"] = torch.stack(
@@ -159,6 +164,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         if len(self._queues[self.act_key]) == 0:
             # stack n latest observations from the queue
             batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
+            if self.config.use_text_embedding:
+                batch['task'] = text
             actions = self.diffusion.generate_actions(batch)
 
             # TODO(rcadene): make above methods return output dictionary?
