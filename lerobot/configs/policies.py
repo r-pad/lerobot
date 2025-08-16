@@ -178,9 +178,8 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
             return AlohaAdapter(self.action_space)
         elif self.robot_type == "generic":
             from lerobot.common.policies.robot_adapters import GenericAdapter
-            # Use overrides or defaults
-            obs_key = self.obs_key_override or f"observation.{self.action_space}"
-            act_key = self.act_key_override or f"action.{self.action_space}"
+            obs_key = "observation.state"
+            act_key = "action"
             return GenericAdapter(obs_key, act_key)
         else:
             raise ValueError(f"Unknown robot_type: {self.robot_type}")
