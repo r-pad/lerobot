@@ -77,7 +77,7 @@ def gen_libero_dataset(
                 frame_data["task"] = caption
                 frame_data["observation.images.cam.agentview"] = agentview_imgs[frame_idx]
                 frame_data["observation.images.cam.wristview"] = wristview_imgs[frame_idx]
-                frame_data["observation"] = ee_poses[frame_idx]
+                frame_data["observation.state"] = ee_poses[frame_idx]
                 frame_data["action"] = actions[frame_idx]
                 libero_dataset.add_frame(frame_data)
 
@@ -117,7 +117,7 @@ if __name__ == "__main__":
 
     IMG_SHAPE = (128, 128)
     features = {
-        "observation": {
+        "observation.state": {
             'dtype': 'float32',
             'shape': (8,),
             'names': ['ee_pos_0', 'ee_pos_1', 'ee_pos_2', 'ee_ori_0', 'ee_ori_1', 'ee_rot_2', 'gripper_state_0', 'gripper_state_1']

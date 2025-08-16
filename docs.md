@@ -194,5 +194,20 @@ viewer = mujoco.viewer.launch(model, data)
 
 ## LIBERO
 
-Generating lerobot training data from hdf5 files
-Training on one hdf5, testing on one env.
+- Download source demos from [LIBERO](https://libero-project.github.io/datasets)
+- Generate LeRobotDatasets from hdf5 files:
+
+One task:
+```
+python lerobot/scripts/create_libero_dataset.py --hdf5_list libero_object/pick_up_the_alphabet_soup_and_place_it_in_the_basket_demo.hdf5
+```
+
+All tasks:
+```
+python lerobot/scripts/create_libero_dataset.py --suite_names libero_object libero_goal libero_spatial libero_90 libero_10 
+```
+
+- Training:
+```
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_libero --job_name=diffPo_libero --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.robot_type=generic
+```
