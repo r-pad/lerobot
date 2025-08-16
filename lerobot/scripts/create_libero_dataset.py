@@ -75,8 +75,8 @@ def gen_libero_dataset(
             for frame_idx in range(num_steps):
                 frame_data = {}
                 frame_data["task"] = caption
-                frame_data["observation.images.cam.agentview"] = agentview_imgs[frame_idx]
-                frame_data["observation.images.cam.wristview"] = wristview_imgs[frame_idx]
+                frame_data["observation.images.agentview"] = agentview_imgs[frame_idx]
+                frame_data["observation.images.wristview"] = wristview_imgs[frame_idx]
                 frame_data["observation.state"] = ee_poses[frame_idx]
                 frame_data["action"] = actions[frame_idx]
                 libero_dataset.add_frame(frame_data)
@@ -129,13 +129,13 @@ if __name__ == "__main__":
             'shape': (7,),
             'names': ['delta_ee_pos_0', 'delta_ee_pos_1', 'delta_ee_pos_2', 'delta_ee_rot_0', 'delta_ee_rot_1', 'delta_ee_rot_2', 'gripper_action']
         },
-        "observation.images.cam.agentview": {
+        "observation.images.agentview": {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
             'names': ['height', 'width', 'channels'],
             'info': 'Agentview RGB image'
         },
-        "observation.images.cam.wristview": {
+        "observation.images.wristview": {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
             'names': ['height', 'width', 'channels'],
