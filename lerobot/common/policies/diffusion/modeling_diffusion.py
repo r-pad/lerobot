@@ -43,7 +43,6 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, forward_kinematics, inverse_kinematics, ALOHA_REST_STATE
 from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, get_siglip_text_embedding
 from transformers import AutoModel, AutoProcessor
 
@@ -73,15 +72,9 @@ class DiffusionPolicy(PreTrainedPolicy):
         config.validate_features()
         self.config = config
 
-        self.action_space = config.action_space
-        if self.config.action_space == "right_eef":
-            self.obs_key = "observation.right_eef_pose"
-            self.act_key = "action.right_eef_pose"
-        elif self.config.action_space == "joint":
-            self.obs_key = "observation.state"
-            self.act_key = "action"
-        else:
-            raise NotImplementedError
+        self.robot_adapter = config.get_robot_adapter()
+        self.obs_key = self.robot_adapter.get_obs_key()
+        self.act_key = self.robot_adapter.get_act_key()
 
         self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
         self.normalize_targets = Normalize(
@@ -154,9 +147,6 @@ class DiffusionPolicy(PreTrainedPolicy):
         "horizon" may not the best name to describe what the variable actually means, because this period is
         actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
         """
-        state = batch['observation.state']
-        forward_kinematics(ALOHA_CONFIGURATION, state[0])
-
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
@@ -176,19 +166,9 @@ class DiffusionPolicy(PreTrainedPolicy):
 
             self._queues[self.act_key].extend(actions.transpose(0, 1))
 
-        if self.config.action_space == "right_eef":
-            action_eef = self._queues[self.act_key].popleft()
-            action = inverse_kinematics(ALOHA_CONFIGURATION, action_eef.squeeze())[None].float()
-            # Force the left arm to stay at a predefined rest state
-            action[:,:9] = ALOHA_REST_STATE[:, :9]
-
-            self.obs_key = "observation.right_eef_pose"
-            self.act_key = "action.right_eef_pose"
-        elif self.config.action_space == "joint":
-            action = self._queues[self.act_key].popleft()
-            action_eef = torch.zeros(10, device=action.device, dtype=action.dtype) # not used 
-        else:
-            raise NotImplementedError
+        action_raw = self._queues[self.act_key].popleft()
+        action = self.robot_adapter.transform_action(action_raw, batch)
+        action_eef = self.robot_adapter.get_eef_action(action_raw)
         return action, action_eef
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
@@ -222,15 +202,9 @@ class DiffusionModel(nn.Module):
     def __init__(self, config: DiffusionConfig):
         super().__init__()
         self.config = config
-        self.action_space = config.action_space
-        if self.config.action_space == "right_eef":
-            self.obs_key = "observation.right_eef_pose"
-            self.act_key = "action.right_eef_pose"
-        elif self.config.action_space == "joint":
-            self.obs_key = "observation.state"
-            self.act_key = "action"
-        else:
-            raise NotImplementedError
+        robot_adapter = config.get_robot_adapter()
+        self.obs_key = robot_adapter.get_obs_key()
+        self.act_key = robot_adapter.get_act_key()
 
         self.use_text_embedding = self.config.use_text_embedding
 
@@ -675,15 +649,9 @@ class DiffusionConditionalUnet1d(nn.Module):
         super().__init__()
 
         self.config = config
-
-        if self.config.action_space == "right_eef":
-            self.obs_key = "observation.right_eef_pose"
-            self.act_key = "action.right_eef_pose"
-        elif self.config.action_space == "joint":
-            self.obs_key = "observation.state"
-            self.act_key = "action"
-        else:
-            raise NotImplementedError
+        robot_adapter = config.get_robot_adapter()
+        self.obs_key = robot_adapter.get_obs_key()
+        self.act_key = robot_adapter.get_act_key()
 
         # Encoder for the diffusion timestep.
         self.diffusion_step_encoder = nn.Sequential(

@@ -208,7 +208,7 @@ def gen_droid_dataset(
     except Exception as e:
         print("Caught exception", e)
         print("Dataset already exists? Loading existing dataset.")
-        droid_dataset = LeRobotDataset("sriramsk/droid_lerobot")
+        droid_dataset = LeRobotDataset(repo_id)
 
     num_episodes = len(dataset_indexes)
     for episode_idx in tqdm(range(droid_dataset.meta.total_episodes, num_episodes),
