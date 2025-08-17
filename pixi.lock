@@ -132,7 +132,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/43/6a/ca128561b22b60bd5a0c4ea26649e68c8556b82bc70a0c396eebc977fe86/jupyterlab_widgets-3.0.15-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ed/f1/82ea8e783433707cafd9790099a2d19f113c22f32a31c8bb5abdc7a61dbb/jupytext-1.17.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3a/97/5edbed69a9d0caa2e4aa616ae7df8127e10f6586940aa683a496c2c280b9/kiwisolver-1.4.8-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-      - pypi: git+https://github.com/sriramsk1999/LIBERO.git#05e96016f29c2cd25c241e1faead073f8ece439a
+      - pypi: git+https://github.com/sriramsk1999/LIBERO.git?rev=15a91548acf90c6f502a99c21ca18792c5ae8256#15a91548acf90c6f502a99c21ca18792c5ae8256
       - pypi: https://files.pythonhosted.org/packages/99/fe/d030f1849ebb1f394bb3f7adad5e729b634fb100515594aca25c354ffc62/llvmlite-0.44.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/94/54/e7d793b573f298e1c9013b8c4dade17d481164aa517d1d7148619c2cedbf/markdown_it_py-4.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f1/a4/aefb044a2cd8d7334c8a47d3fb2c9f328ac48cb349468cc31c20b539305f/MarkupSafe-3.0.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -2130,7 +2130,7 @@ packages:
 - pypi: .
   name: lerobot
   version: 0.1.0
-  sha256: 6622857686068e93cf79ab578d591af0fa449d3831dd90c26b013762ddb06d16
+  sha256: a26cb948ddd1e698c64d96e4753e5ced840de3ba6e0e0da1b6c8e698c0409444
   requires_dist:
   - cmake>=3.29.0.1
   - datasets>=2.19.0
@@ -2176,7 +2176,7 @@ packages:
   - bddl==1.0.1
   - future==0.18.2
   - easydict==1.9
-  - libero @ git+https://github.com/sriramsk1999/LIBERO.git
+  - libero @ git+https://github.com/sriramsk1999/LIBERO.git@15a91548acf90c6f502a99c21ca18792c5ae8256
   - hf-doc-builder @ git+https://github.com/huggingface/doc-builder.git@main ; extra == 'docs'
   - watchdog>=6.0.0 ; extra == 'docs'
   - pre-commit>=3.7.0 ; extra == 'dev'
@@ -2202,7 +2202,7 @@ packages:
   - gym-xarm>=0.1.1 ; python_full_version < '4.0' and extra == 'xarm'
   requires_python: '>=3.10'
   editable: true
-- pypi: git+https://github.com/sriramsk1999/LIBERO.git#05e96016f29c2cd25c241e1faead073f8ece439a
+- pypi: git+https://github.com/sriramsk1999/LIBERO.git?rev=15a91548acf90c6f502a99c21ca18792c5ae8256#15a91548acf90c6f502a99c21ca18792c5ae8256
   name: libero
   version: 0.1.0
   requires_python: '>=3'

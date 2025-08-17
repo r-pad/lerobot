@@ -60,7 +60,7 @@ def sample_images(image_paths: list[str]) -> np.ndarray:
     images = None
     for i, idx in enumerate(sampled_indices):
         path = image_paths[idx]
-        if "observation.images.cam_azure_kinect.transformed_depth" in path: # HACK: Need a better way to handle depth
+        if "depth" in path: # HACK: Need a better way to handle depth
             img = load_depth_image_as_numpy(path, channel_first=True)
             img_dtype = np.float32
         else:
