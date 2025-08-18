@@ -86,14 +86,14 @@ python lerobot/scripts/train.py --dataset.repo_id=sriramsk/droid_lerobot --polic
 ```
 
 
-# Rollout
+### Rollout
 
 ```
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=30 --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/eval_aloha_eef_rgb_0709_heatmapGoal --control.num_episodes=1 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
 ```
 
 
-# Misc mapping stuff to align LeRobot Aloha and `robot_descriptions` Aloha
+## Misc mapping stuff to align LeRobot Aloha and `robot_descriptions` Aloha
 
 - In configuration.q of the mink configuration object
 ```py
@@ -190,4 +190,24 @@ from robot_descriptions.loaders.mujoco import load_robot_description
 model = load_robot_description("aloha_mj_description")
 data = mujoco.MjData(model)
 viewer = mujoco.viewer.launch(model, data)
+```
+
+## LIBERO
+
+- Download source demos from [LIBERO](https://libero-project.github.io/datasets)
+- Generate LeRobotDatasets from hdf5 files:
+
+One task:
+```
+python lerobot/scripts/create_libero_dataset.py --hdf5_list libero_object/pick_up_the_alphabet_soup_and_place_it_in_the_basket_demo.hdf5
+```
+
+All tasks:
+```
+python lerobot/scripts/create_libero_dataset.py --suite_names libero_object libero_goal libero_spatial libero_90 libero_10 
+```
+
+- Training:
+```
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_libero --job_name=diffPo_libero --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.robot_type=generic --env.type=libero --env.task=libero_object_0 --eval.batch_size=10
 ```

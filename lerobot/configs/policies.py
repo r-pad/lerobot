@@ -170,3 +170,16 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
         # something like --policy.path (in addition to --policy.type)
         cli_overrides = policy_kwargs.pop("cli_overrides", [])
         return draccus.parse(cls, config_file, args=cli_overrides)
+
+    def get_robot_adapter(self):
+        """Factory method to get appropriate robot adapter"""
+        if self.robot_type == "aloha":
+            from lerobot.common.policies.robot_adapters import AlohaAdapter
+            return AlohaAdapter(self.action_space)
+        elif self.robot_type == "generic":
+            from lerobot.common.policies.robot_adapters import GenericAdapter
+            obs_key = "observation.state"
+            act_key = "action"
+            return GenericAdapter(obs_key, act_key)
+        else:
+            raise ValueError(f"Unknown robot_type: {self.robot_type}")

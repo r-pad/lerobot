@@ -116,6 +116,9 @@ class DiffusionConfig(PreTrainedConfig):
         }
     )
 
+    robot_type: str = "aloha"
+    action_space: str = "right_eef"
+
     # The original implementation doesn't sample frames for the last 7 steps,
     # which avoids excessive padding and leads to improved training results.
     drop_n_last_frames: int = 7  # horizon - n_action_steps - n_obs_steps + 1
@@ -144,8 +147,6 @@ class DiffusionConfig(PreTrainedConfig):
     prediction_type: str = "epsilon"
     clip_sample: bool = True
     clip_sample_range: float = 1.0
-
-    action_space: str = "right_eef"
 
     use_text_embedding: bool = False
     text: str = "grasp mug and place mug on table"
