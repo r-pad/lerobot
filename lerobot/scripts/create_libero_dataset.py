@@ -2,6 +2,7 @@
 Use data from LIBERO to create a LeRobotDataset.
 """
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.scripts.dataset_utils import generate_heatmap_from_points, project_points_to_image, get_subgoal_indices_from_gripper_actions
 import torch
 from tqdm import tqdm
 import numpy as np
@@ -61,50 +62,7 @@ def get_4_points_from_gripper_pos_orient(gripper_pos, gripper_orn, cur_joint_ang
 
     return gripper_pcd.astype(np.float32)
 
-def generate_heatmap_from_points(points_2d, img_shape):
-    """
-    Generate a 3-channel heatmap from projected 2D points.
 
-    Creates a distance-based heatmap where each channel represents the distance
-    from every pixel to one of the projected gripper points.
-
-    Args:
-        points_2d (np.ndarray): Nx2 array of 2D pixel coordinates
-        img_shape (tuple): (height, width) of output image
-
-    Returns:
-        np.ndarray: HxWx3 heatmap image with uint8 values [0-255]
-    """
-    height, width = img_shape[:2]
-    max_distance = np.sqrt(width**2 + height**2)
-
-    # Clip points to image bounds
-    clipped_points = np.clip(points_2d, [0, 0], [width - 1, height - 1]).astype(int)
-
-    goal_image = np.zeros((height, width, 3))
-    y_coords, x_coords = np.mgrid[0:height, 0:width]
-    pixel_coords = np.stack([x_coords, y_coords], axis=-1)
-
-    # Use first 3 points for the 3 channels
-    for i in range(3):
-        target_point = clipped_points[i]  # (2,)
-        distances = np.linalg.norm(pixel_coords - target_point, axis=-1)  # (height, width)
-        goal_image[:, :, i] = distances
-
-    # Apply square root transformation for steeper near-target gradients
-    goal_image = (np.sqrt(goal_image / max_distance) * 255)
-    goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
-    return goal_image
-
-def get_subgoal_indices(gripper_actions):
-    """
-    Subgoal indices are timesteps at which gripper action changes from open->close or vice versa
-    and the last frame of the demo
-    """
-    subgoal_indices = np.where(np.diff(gripper_actions) != 0)[0] + 1
-    if len(subgoal_indices) == 0 or subgoal_indices[-1] != len(gripper_actions) - 1:
-        subgoal_indices = np.concatenate([subgoal_indices, [len(gripper_actions) - 1]])
-    return subgoal_indices
 
 def get_libero_caption(h5_fpath):
     """
@@ -195,7 +153,7 @@ def gen_libero_dataset(
             gripper_actions = actions[:, -1]
 
             # Get subgoal indices based on gripper state changes
-            subgoal_indices = get_subgoal_indices(gripper_actions)
+            subgoal_indices = get_subgoal_indices_from_gripper_actions(gripper_actions)
 
             task_bddl_file = CAPTION_TO_BDDL_MAPPING[caption]
             env = setup_libero_env(task_bddl_file, img_shape)
@@ -243,8 +201,7 @@ def gen_libero_dataset(
                 if "observation.images.agentview_goal_gripper_proj" in features:
                     # Generate gripper projection heatmap for agentview camera
                     gripper_pcd_cam = all_obs[next_event_idx]["gripper_pcd"]  # Already in camera frame
-                    points_2d_hom = agentview_int_mat @ gripper_pcd_cam.T
-                    points_2d = points_2d_hom[:2].T / points_2d_hom[2].T[:, np.newaxis]
+                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat)
                     frame_data["observation.images.agentview_goal_gripper_proj"] = generate_heatmap_from_points(points_2d, img_shape)
 
                 libero_dataset.add_frame(frame_data)

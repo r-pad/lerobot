@@ -2,6 +2,7 @@
 Use data from DROID (original + some postprocessing) to create a LeRobotDataset.
 """
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.scripts.dataset_utils import generate_heatmap_from_points, project_points_to_image
 import torch
 from tqdm import tqdm
 import numpy as np
@@ -32,27 +33,10 @@ def generate_heatmap_images(index, gripper_pcd_dir, subgoal_indices, K, img_shap
     )
     all_subgoal_heatmaps = []
 
-    def compute_heatmap(urdf_proj, width, height):
-        goal_image = np.zeros((height, width, 3))
-        max_distance = np.sqrt(width**2 + height**2)
-        y_coords, x_coords = np.mgrid[0:height, 0:width]
-        pixel_coords = np.stack([x_coords, y_coords], axis=-1)
-        for i in range(3):
-            target_point = urdf_proj[i]  # (2,)
-            distances = np.linalg.norm(pixel_coords - target_point, axis=-1)  # (height, width)
-            goal_image[:, :, i] = distances
-
-        # Apply square root transformation for steeper near-target gradients
-        goal_image = (np.sqrt(goal_image / max_distance) * 255)
-        goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
-        return goal_image
-
     for subgoal_idx in subgoal_indices:
         subgoal_pcd = gripper_pcds[subgoal_idx][GRIPPER_IDX]
-        proj_hom = (K @ subgoal_pcd.T).T
-        urdf_proj = (proj_hom / proj_hom[:, 2:])[:, :2]
-        urdf_proj = np.clip(urdf_proj, [0, 0], [width - 1, height - 1]).astype(int)
-        all_subgoal_heatmaps.append(compute_heatmap(urdf_proj, width, height))
+        urdf_proj = project_points_to_image(subgoal_pcd, K)
+        all_subgoal_heatmaps.append(generate_heatmap_from_points(urdf_proj, (height, width)))
 
     image_indices = np.searchsorted(subgoal_indices, np.arange(subgoal_indices[-1]), side='right')
     heatmap_images = np.array([all_subgoal_heatmaps[idx] for idx in image_indices])
