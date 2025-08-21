@@ -34,7 +34,11 @@ Base record command:
 
 ```
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/aloha_mug_eef_depth --control.num_episodes=100 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=60 --control.reset_time_s=5 --control.warmup_time_s=3 --control.resume=true --control.num_image_writer_processes=4
-```
+
+# With azure kinect
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/testing_realsense --control.num_episodes=100 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=60 --control.reset_time_s=5 --control.warmup_time_s=3 --control.resume=true --control.num_image_writer_processes=4
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/debug --control.num_episodes=2 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.fps=60 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4```
 
 `--control.repo_id` indicates the name with which the dataset is saved and uploaded to Huggingface (if `--control.push_to_hub` is enabled). `--control.resume` allows writing to an existing dataset. While recording, use left/right arrow keys to finish / reset current episode. `--robot.use_eef=true` runs forward kinematics and stores the computed eef pose in the dataset.
 

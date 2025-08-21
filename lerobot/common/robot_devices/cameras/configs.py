@@ -133,7 +133,7 @@ class IntelRealSenseCameraConfig(CameraConfig):
         base = f"observation.images.{cam_key}"
 
         # Color image
-        feature_specs[f"{base}.color"] = {
+        feature_specs[f"{base}"] = {
             "shape": (self.height, self.width, self.channels),
             "names": ["height", "width", "channels"],
             "info": f"{self.color_mode.upper()} color image",
