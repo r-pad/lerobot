@@ -219,36 +219,33 @@ def upgrade_dataset(
             # Add frame to new dataset
             target_dataset.add_frame(frame_data)
 
-        if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
+        if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features or "next_event_idx" in new_features:
             joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
             # Empirically chosen
             if phantomize: close_thresh, open_thresh = 45, 55
-            else: close_thresh, open_thresh = 15, 25
+            else: close_thresh, open_thresh = 25, 30
+
             close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
 
-            goal1 = get_goal_image(cam_to_world, joint_states[close_gripper_idx], K, width, height, four_points=True)
-            goal1_img = Image.fromarray(goal1).convert("RGB")
-            for i in range(close_gripper_idx):
-                goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+            if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
+                goal1 = get_goal_image(cam_to_world, joint_states[close_gripper_idx], K, width, height, four_points=True)
+                goal1_img = Image.fromarray(goal1).convert("RGB")
+                for i in range(close_gripper_idx):
+                    goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
 
-            goal2 = get_goal_image(cam_to_world, joint_states[open_gripper_idx], K, width, height)
-            goal2_img = Image.fromarray(goal2).convert("RGB")
-            for i in range(close_gripper_idx, episode_length):
-                goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+                goal2 = get_goal_image(cam_to_world, joint_states[open_gripper_idx], K, width, height)
+                goal2_img = Image.fromarray(goal2).convert("RGB")
+                for i in range(close_gripper_idx, episode_length):
+                    goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
 
-        if "next_event_idx" in new_features:
-            joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
-            # Empirically chosen
-            if phantomize: close_thresh, open_thresh = 45, 55
-            else: close_thresh, open_thresh = 15, 25
-            close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
-            for i in range(episode_length):
-                if i < close_gripper_idx:
-                    target_dataset.episode_buffer["next_event_idx"][i] = close_gripper_idx
-                elif i < open_gripper_idx:
-                    target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
-                else:
-                    target_dataset.episode_buffer["next_event_idx"][i] = episode_length
+            if "next_event_idx" in new_features:
+                for i in range(episode_length):
+                    if i < close_gripper_idx:
+                        target_dataset.episode_buffer["next_event_idx"][i] = close_gripper_idx
+                    elif i < open_gripper_idx:
+                        target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
+                    else:
+                        target_dataset.episode_buffer["next_event_idx"][i] = episode_length
 
         # Save episode
         target_dataset.save_episode()
