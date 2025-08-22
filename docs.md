@@ -52,19 +52,6 @@ python lerobot/scripts/visualize_dataset.py  --repo-id sriramsk/aloha_mug_eef   
 ```
 python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_kinect": {"type": "opencv", "camera_index": 0, "fps": 30, "width": 1280, "height": 720}}' --control.type=replay --control.fps=60 --control.repo_id=sriramsk/aloha_mug_eef --control.episode=0
 ```
-
-### Modify existing dataset
-
-LeRobot doesn't provide a simple way to add new keys / modify existing keys to a dataset. Instead this script takes the blunt approach of simply creating a new dataset, copying required keys and modifying/adding other keys.
-
-```
-python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718_heatmapGoal --discard_episodes 2 10 11 13 21 --phantomize --phantom_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718 --push_to_hub --new_features goal_gripper_proj
-```
-
-`--source_repo_id` is the id of the existing dataset and `--target_repo_id` is the id of the new dataset being created. `--discard_episodes` skips problematic episodes which may exist in the source data, `--new_features` takes in a list of new features to be added (in this case, a heatmap image).
-
-`--phantomize` and `--phantom_extradata` are extra arguments only required when retargeting a human demonstration dataset following the approach in[Phantom](https://phantom-human-videos.github.io/).
-
 ### Train
 
 Too many options to describe in detail, some notes:
@@ -215,3 +202,27 @@ python lerobot/scripts/create_libero_dataset.py --suite_names libero_object libe
 ```
 python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_libero --job_name=diffPo_libero --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.robot_type=generic --env.type=libero --env.task=libero_object_0 --eval.batch_size=10
 ```
+
+## Scripts
+
+There are many scripts for manipulating LeRobotDatasets in `lerobot/scripts`. LeRobot doesn't provide a simple way to add new keys / modify existing keys to a dataset. Instead we take the blunt approach of creating a new dataset, copying required keys and modifying/adding other keys.
+
+```
+python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718_heatmapGoal --discard_episodes 2 10 11 13 21 --phantomize --phantom_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718 --push_to_hub --new_features goal_gripper_proj
+```
+
+`--source_repo_id` is the id of the existing dataset and `--target_repo_id` is the id of the new dataset being created. `--discard_episodes` skips problematic episodes which may exist in the source data, `--new_features` takes in a list of new features to be added (in this case, a heatmap image).
+
+`--phantomize` and `--phantom_extradata` are extra arguments only required when retargeting a human demonstration dataset following the approach in[Phantom](https://phantom-human-videos.github.io/).
+
+**Merge datasets:**
+```bash
+python lerobot/scripts/merge_datasets.py --datasets DATASET1_ID DATASET2_ID DATASET3_ID --target_repo_id MERGED_DATASET_ID --push_to_hub
+```
+Merges multiple LeRobot datasets into a single dataset. All input datasets must have compatible features and fps.
+
+**Subsample dataset:**
+```bash
+python lerobot/scripts/subsample_dataset.py --source_repo_id SOURCE_ID --target_repo_id TARGET_ID --target_fps <fps>
+```
+Creates a subsampled version of a dataset by forcing a target fps.
