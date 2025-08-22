@@ -56,6 +56,11 @@ def subsample_dataset(source_repo_id: str, target_repo_id: str, target_fps: int 
                 frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = (
                     frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"].permute(1,2,0) * 255
                 ).to(torch.uint8)
+
+            if "observation.images.cam_wrist" in frame_data:
+                frame_data["observation.images.cam_wrist"] = (
+                    frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255
+                ).to(torch.uint8)
             subsampled_dataset.add_frame(frame_data)
 
         subsampled_dataset.save_episode()

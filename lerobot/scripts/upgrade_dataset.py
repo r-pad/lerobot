@@ -82,6 +82,7 @@ def upgrade_dataset(
     source_repo_id: str,
     target_repo_id: str,
     new_features: dict,
+    remove_features: List,
     intrinsics_txt: str,
     extrinsics_txt: str,
     discard_episodes: List[int],
@@ -94,6 +95,7 @@ def upgrade_dataset(
     Args:
         source_repo_id: Repository ID of the source dataset
         target_repo_id: Repository ID for the new dataset
+        remove_features: List of features to remove from the schema
         new_features: Dictionary of new features to add to the schema
         intrinsics_txt: Path to intrinsics txt
         extrinsics_txt: Path to extrinsics txt
@@ -118,11 +120,15 @@ def upgrade_dataset(
     # Start with existing features
     expanded_features = dict(source_dataset.features)
 
+    # Remove any unneeded features
+    for i in remove_features: expanded_features.pop(i)
+
     # Add new features
     expanded_features.update(new_features)
 
     print(f"Original features: {list(source_dataset.features.keys())}")
     print(f"New features: {list(new_features.keys())}")
+    print(f"Features being removed: {remove_features}")
     print(f"Total features: {list(expanded_features.keys())}")
 
     # 3. Create new dataset with expanded schema
@@ -174,7 +180,7 @@ def upgrade_dataset(
 
             # Copy existing data
             for key in source_dataset.features.keys():
-                if key not in AUTO_FIELDS and key in original_frame:
+                if key not in AUTO_FIELDS and key in expanded_features:
                     frame_data[key] = original_frame[key]
 
             frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
@@ -213,36 +219,33 @@ def upgrade_dataset(
             # Add frame to new dataset
             target_dataset.add_frame(frame_data)
 
-        if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
+        if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features or "next_event_idx" in new_features:
             joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
             # Empirically chosen
             if phantomize: close_thresh, open_thresh = 45, 55
-            else: close_thresh, open_thresh = 15, 25
+            else: close_thresh, open_thresh = 25, 30
+
             close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
 
-            goal1 = get_goal_image(cam_to_world, joint_states[close_gripper_idx], K, width, height, four_points=True)
-            goal1_img = Image.fromarray(goal1).convert("RGB")
-            for i in range(close_gripper_idx):
-                goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+            if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
+                goal1 = get_goal_image(cam_to_world, joint_states[close_gripper_idx], K, width, height, four_points=True)
+                goal1_img = Image.fromarray(goal1).convert("RGB")
+                for i in range(close_gripper_idx):
+                    goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
 
-            goal2 = get_goal_image(cam_to_world, joint_states[open_gripper_idx], K, width, height)
-            goal2_img = Image.fromarray(goal2).convert("RGB")
-            for i in range(close_gripper_idx, episode_length):
-                goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+                goal2 = get_goal_image(cam_to_world, joint_states[open_gripper_idx], K, width, height)
+                goal2_img = Image.fromarray(goal2).convert("RGB")
+                for i in range(close_gripper_idx, episode_length):
+                    goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
 
-        if "next_event_idx" in new_features:
-            joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
-            # Empirically chosen
-            if phantomize: close_thresh, open_thresh = 45, 55
-            else: close_thresh, open_thresh = 15, 25
-            close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
-            for i in range(episode_length):
-                if i < close_gripper_idx:
-                    target_dataset.episode_buffer["next_event_idx"][i] = close_gripper_idx
-                elif i < open_gripper_idx:
-                    target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
-                else:
-                    target_dataset.episode_buffer["next_event_idx"][i] = episode_length
+            if "next_event_idx" in new_features:
+                for i in range(episode_length):
+                    if i < close_gripper_idx:
+                        target_dataset.episode_buffer["next_event_idx"][i] = close_gripper_idx
+                    elif i < open_gripper_idx:
+                        target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
+                    else:
+                        target_dataset.episode_buffer["next_event_idx"][i] = episode_length
 
         # Save episode
         target_dataset.save_episode()
@@ -276,6 +279,8 @@ if __name__ == "__main__":
                         help="Path to auxiliary Phantom data")
     parser.add_argument("--push_to_hub", default=False, action="store_true",
                         help="Push upgraded dataset to HF Hub.")
+    parser.add_argument("--remove_features", type=str, nargs='*', default=[],
+                        help="Names of features to be removed")
     args = parser.parse_args()
 
     new_features = {}
@@ -300,6 +305,10 @@ if __name__ == "__main__":
             'names': ['idx'],
             'info': 'Index of next event in the dataset'
         }
+    remove_features = []
+    if "cam_wrist" in args.remove_features:
+        remove_features.append("observation.images.cam_wrist")
+
     assert (args.phantom_extradata is not None) if args.phantomize else True
     phantom_extradata = args.phantom_extradata if args.phantomize else None
 
@@ -308,6 +317,7 @@ if __name__ == "__main__":
         source_repo_id=args.source_repo_id,
         target_repo_id=args.target_repo_id,
         new_features=new_features,
+        remove_features=remove_features,
         intrinsics_txt=args.intrinsics_txt,
         extrinsics_txt=args.extrinsics_txt,
         discard_episodes=args.discard_episodes,
