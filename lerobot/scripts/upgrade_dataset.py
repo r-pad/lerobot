@@ -245,7 +245,7 @@ def upgrade_dataset(
                     elif i < open_gripper_idx:
                         target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
                     else:
-                        target_dataset.episode_buffer["next_event_idx"][i] = episode_length
+                        target_dataset.episode_buffer["next_event_idx"][i] = episode_length - 1
 
         # Save episode
         target_dataset.save_episode()

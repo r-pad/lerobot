@@ -14,7 +14,7 @@ class RobotAdapter(ABC):
         pass
 
     @abstractmethod
-    def transform_action(self, action: torch.Tensor, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def transform_action(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
         """Transform policy output to robot-executable action"""
         pass
 
@@ -41,12 +41,11 @@ class AlohaAdapter(RobotAdapter):
             return "action.right_eef_pose"
         return "action"
 
-    def transform_action(self, action: torch.Tensor, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def transform_action(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
         from lerobot.common.utils.aloha_utils import forward_kinematics, inverse_kinematics
 
         if self.action_space == "right_eef":
             # FK on current state
-            state = obs['observation.state']
             forward_kinematics(self.config, state[0])
 
             # IK to get joint action
@@ -74,7 +73,7 @@ class GenericAdapter(RobotAdapter):
     def get_act_key(self) -> str:
         return self.act_key
 
-    def transform_action(self, action: torch.Tensor, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
+    def transform_action(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
         return action  # No transformation
 
     def get_eef_action(self, action: torch.Tensor) -> torch.Tensor:

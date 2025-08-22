@@ -147,6 +147,7 @@ class DiffusionPolicy(PreTrainedPolicy):
         "horizon" may not the best name to describe what the variable actually means, because this period is
         actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
         """
+        state = batch['observation.state']
         batch = self.normalize_inputs(batch)
         if self.config.use_text_embedding:
             # For sim eval, task description comes from batch
@@ -174,7 +175,7 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues[self.act_key].extend(actions.transpose(0, 1))
 
         action_raw = self._queues[self.act_key].popleft()
-        action = self.robot_adapter.transform_action(action_raw, batch)
+        action = self.robot_adapter.transform_action(action_raw, state)
         action_eef = self.robot_adapter.get_eef_action(action_raw)
         return action, action_eef
 
