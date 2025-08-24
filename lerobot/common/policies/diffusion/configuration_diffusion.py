@@ -161,8 +161,8 @@ class DiffusionConfig(PreTrainedConfig):
     hl_use_gripper_pcd: bool = True
     hl_use_gemini: bool = False
     hl_in_channels: int = 4
-    hl_intrinsics_txt: str = "lerobot/scripts/intrinsics.txt"
-    hl_extrinsics_txt: str = "lerobot/scripts/T_world_from_camera_est_v6_0709.txt"
+    hl_intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
+    hl_extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt"
 
     # Phantom - Overlay rendered robot at inference
     phantomize: bool = False
