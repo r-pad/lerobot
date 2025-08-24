@@ -159,6 +159,16 @@ def rollout(
         # TODO: works with SyncVectorEnv but not AsyncVectorEnv
         observation = add_envs_task(env, observation)
 
+        if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
+            # Generate new goal prediction when queue is empty
+            # This code is specific to diffusion policy and LIBERO :(
+            if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
+                rgb = observation["observation.images.agentview"].cpu().numpy()
+                depth = observation["observation.images.agentview_depth"].cpu().numpy().squeeze()
+                gripper_proj = policy.high_level.predict_and_project(rgb, depth, observation["observation.state"])
+                policy.latest_gripper_proj = torch.from_numpy(gripper_proj)
+            observation["observation.images.agentview_goal_gripper_proj"] = policy.latest_gripper_proj
+
         with torch.inference_mode():
             action, action_eef = policy.select_action(observation)
 

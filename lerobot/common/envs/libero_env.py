@@ -8,6 +8,7 @@ from gymnasium import spaces
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 import robosuite.utils.transform_utils as T
+from robosuite.utils.camera_utils import get_real_depth_map
 
 
 class LiberoEnv(gym.Env):
@@ -53,7 +54,8 @@ class LiberoEnv(gym.Env):
         env_args = {
             "bddl_file_name": self.task_bddl_file,
             "camera_heights": camera_heights,
-            "camera_widths": camera_widths
+            "camera_widths": camera_widths,
+            "camera_depths": True,
         }
         self.env = OffScreenRenderEnv(**env_args)
         
@@ -84,6 +86,14 @@ class LiberoEnv(gym.Env):
                         shape=(camera_heights, camera_widths, 3),
                         dtype=np.uint8
                     )
+                }),
+                "depth": spaces.Dict({
+                    "agentview": spaces.Box(
+                        low=0,
+                        high=np.inf,
+                        shape=(camera_heights, camera_widths),
+                        dtype=np.float32
+                    )
                 })
             })
         elif obs_type == "pixels_agent_pos":
@@ -100,6 +110,14 @@ class LiberoEnv(gym.Env):
                         high=255,
                         shape=(camera_heights, camera_widths, 3),
                         dtype=np.uint8
+                    )
+                }),
+                "depth": spaces.Dict({
+                    "agentview": spaces.Box(
+                        low=0,
+                        high=np.inf,
+                        shape=(camera_heights, camera_widths),
+                        dtype=np.float32
                     )
                 }),
                 "agent_pos": spaces.Box(
@@ -169,6 +187,16 @@ class LiberoEnv(gym.Env):
                 "agentview": raw_obs["agentview_image"].astype(np.uint8),
                 "wristview": raw_obs["robot0_eye_in_hand_image"].astype(np.uint8)
             }
+            # Add depth information for agentview
+            # Convert to metric depth
+            metric_depth = get_real_depth_map(self.env.sim, raw_obs["agentview_depth"])
+            depth_data = metric_depth.astype(np.float32)
+            # Ensure depth has correct shape (H, W) - squeeze if needed
+            if depth_data.ndim == 3 and depth_data.shape[-1] == 1:
+                depth_data = depth_data.squeeze(-1)
+            obs["depth"] = {
+                "agentview": depth_data
+            }
         
         if "agent_pos" in self.obs_type:
             # Match dataset format: ee_pos (3D) + ee_ori (3D) + gripper_states (2D) = 8D
@@ -197,6 +225,16 @@ class LiberoEnv(gym.Env):
             obs["pixels"] = {
                 "agentview": raw_obs["agentview_image"].astype(np.uint8),
                 "wristview": raw_obs["robot0_eye_in_hand_image"].astype(np.uint8)
+            }
+            # Add depth information for agentview only
+            # Convert to metric depth
+            metric_depth = get_real_depth_map(self.env.sim, raw_obs["agentview_depth"])
+            depth_data = metric_depth.astype(np.float32)
+            # Ensure depth has correct shape (H, W) - squeeze if needed
+            if depth_data.ndim == 3 and depth_data.shape[-1] == 1:
+                depth_data = depth_data.squeeze(-1)
+            obs["depth"] = {
+                "agentview": depth_data
             }
         
         if "agent_pos" in self.obs_type:
