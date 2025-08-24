@@ -42,7 +42,6 @@ class HighLevelWrapper:
                  in_channels=3,
                  use_gripper_pcd=False,
                  use_text_embedding=False,
-                 text=None,
                  use_gemini=False,
                  is_gmm=False,
                  intrinsics_txt=None,
@@ -56,20 +55,13 @@ class HighLevelWrapper:
         self.is_gmm = is_gmm
         self.use_text_embedding = use_text_embedding
         self.use_gripper_pcd = use_gripper_pcd
-        self.text_embedding = {}
-        self.text = text
+        self.text_embedding_cache = {}
 
         self.use_gemini = use_gemini
         if self.use_gemini:
             self.client = setup_client(os.environ.get("RPAD_GEMINI_API_KEY"))
             self.gemini_config = genai.types.GenerateContentConfig(temperature=0.0, candidate_count=1)
             self.model_name = "gemini-2.5-pro"
-            self.subgoals = TASK_SPEC[text]
-            for subgoal in self.subgoals:
-                self.text_embedding[subgoal] = get_siglip_text_embedding(subgoal)
-        else:
-            self.text_embedding[self.text] = get_siglip_text_embedding(self.text)
-
 
         self.original_K = np.loadtxt(intrinsics_txt) # not scaled
         self.scaled_K = None
@@ -79,7 +71,7 @@ class HighLevelWrapper:
         self.model = initialize_model(run_id, use_text_embedding, in_channels, self.device)
         self.rng = np.random.default_rng()
 
-    def predict(self, rgb, depth, robot_type, robot_kwargs):
+    def predict(self, text, rgb, depth, robot_type, robot_kwargs):
         if self.scaled_K is None:
             self.scaled_K = get_scaled_intrinsics(self.original_K, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
 
@@ -103,15 +95,21 @@ class HighLevelWrapper:
                 raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
 
-        infer_text = self.get_goal_text(rgb, robot_type, robot_kwargs)
+        infer_text = self.get_goal_text(text, rgb, robot_type, robot_kwargs)
+        def get_cached_embedding(instruction):
+            if instruction not in self.text_embedding_cache:
+                self.text_embedding_cache[instruction] = get_siglip_text_embedding(instruction)
+            return self.text_embedding_cache[instruction]
+        text_embed = get_cached_embedding(infer_text)
+
         #### Run inference
-        goal_prediction = inference(self.model, pcd_xyz, self.text_embedding[infer_text], self.is_gmm, self.device)
+        goal_prediction = inference(self.model, pcd_xyz, text_embed, self.is_gmm, self.device)
 
         return goal_prediction
 
-    def get_goal_text(self, rgb, robot_type, robot_kwargs):
+    def get_goal_text(self, text, rgb, robot_type, robot_kwargs):
         if not self.use_gemini:
-            return self.text
+            return text
 
         if robot_type == "aloha":
             joint_state = robot_kwargs["observation.state"]
@@ -120,12 +118,13 @@ class HighLevelWrapper:
 
         pil_image = PIL.Image.fromarray(rgb)
 
+        subgoals = TASK_SPEC[text]
         GRIPPER_MIN, GRIPPER_MAX = 0.0, 0.041
         gripper_state = joint_state[7]
         gripper_state_scaled = (gripper_state - GRIPPER_MIN) / GRIPPER_MAX
-        
+
         prompt = generate_prompt_for_current_subtask(
-                self.text, self.subgoals, pil_image, gripper_state_scaled, EXAMPLES
+                text, subgoals, pil_image, gripper_state_scaled, EXAMPLES
         )
         goal_text = call_gemini_with_retry(self.client, self.model_name, prompt, self.gemini_config)
         return goal_text
@@ -152,8 +151,8 @@ class HighLevelWrapper:
             goal_gripper_proj = np.clip(goal_gripper_proj, 0, 255)
         return goal_gripper_proj.astype(np.uint8)
 
-    def predict_and_project(self, rgb, depth, robot_type, robot_kwargs):
-        goal_prediction = self.predict(rgb, depth, robot_type, robot_kwargs)
+    def predict_and_project(self, text, rgb, depth, robot_type, robot_kwargs):
+        goal_prediction = self.predict(text, rgb, depth, robot_type, robot_kwargs)
         goal_gripper_proj = self.project(goal_prediction, rgb.shape)
         return goal_gripper_proj
 

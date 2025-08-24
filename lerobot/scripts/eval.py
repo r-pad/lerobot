@@ -173,7 +173,8 @@ def rollout(
                     ee_pos_ = ee_pos[i]
                     ee_quat_ = ee_quat[i]
                     gripper_angle_ = gripper_angle[i]
-                    g_proj = policy.high_level.predict_and_project(rgb_, depth_, robot_type=policy.config.robot_type,
+                    task = observation["task"][i]
+                    g_proj = policy.high_level.predict_and_project(task, rgb_, depth_, robot_type=policy.config.robot_type,
                                                                      robot_kwargs={
                                                                          "ee_pos": ee_pos_,
                                                                          "ee_quat": ee_quat_,

@@ -283,7 +283,7 @@ def control_loop(
                     if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
                         rgb = observation["observation.images.cam_azure_kinect.color"].numpy()
                         depth = observation["observation.images.cam_azure_kinect.transformed_depth"].numpy().squeeze()
-                        gripper_proj = policy.high_level.predict_and_project(rgb, depth, robot_type=policy.config.robot_type,
+                        gripper_proj = policy.high_level.predict_and_project(policy.config.text, rgb, depth, robot_type=policy.config.robot_type,
                                                                              robot_kwargs={
                                                                                  "observation.state": observation["observation.state"]
                                                                              })
