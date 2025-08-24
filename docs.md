@@ -201,12 +201,12 @@ python lerobot/scripts/create_libero_dataset.py --suite_names libero_object libe
 
 - Training/eval:
 ```
-python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_libero --job_name=diffPo_libero --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.robot_type=generic --env.type=libero --env.task=libero_object_0 --eval.batch_size=10
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_libero --job_name=diffPo_libero --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.robot_type=libero_franka --env.type=libero --env.task=libero_object_0 --eval.batch_size=10
 ```
 
 - Training/eval with goal conditioning:
 ```
-python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot_singleTask_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_libero_gc --job_name=diffPo_libero_gc --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.enable_goal_conditioning=true --policy.robot_type=generic --env.type=libero --env.task=libero_object_0 --eval.batch_size=10
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot_singleTask_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_libero_gc --job_name=diffPo_libero_gc --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.enable_goal_conditioning=true --policy.robot_type=libero_franka --env.type=libero --env.task=libero_object_0 --eval.batch_size=10
 ```
 
 ## Scripts

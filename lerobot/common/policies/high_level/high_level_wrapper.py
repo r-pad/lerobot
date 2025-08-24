@@ -7,7 +7,8 @@ from pytorch3d.ops import sample_farthest_points
 from lerobot.common.policies.high_level.articubot import PointNet2_super, get_weighted_displacement, sample_from_gmm
 import wandb
 from transformers import AutoModel, AutoProcessor
-from lerobot.common.utils.aloha_utils import render_gripper_pcd
+from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd
+from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
 import os
 from google import genai
 from lerobot.common.policies.high_level.classify_utils import setup_client, generate_prompt_for_current_subtask, call_gemini_with_retry, TASK_SPEC, EXAMPLES
@@ -78,7 +79,7 @@ class HighLevelWrapper:
         self.model = initialize_model(run_id, use_text_embedding, in_channels, self.device)
         self.rng = np.random.default_rng()
 
-    def predict(self, rgb, depth, joint_state):
+    def predict(self, rgb, depth, robot_type, robot_kwargs):
         if self.scaled_K is None:
             self.scaled_K = get_scaled_intrinsics(self.original_K, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
 
@@ -86,19 +87,36 @@ class HighLevelWrapper:
                             depth_preprocess, self.device, self.rng,
                             self.num_points, self.max_depth)
         pcd_xyz = pcd[:,:3]
+
         if self.use_gripper_pcd:
-            gripper_pcd = render_gripper_pcd(self.cam_to_world, joint_state)
+            if robot_type == "aloha":
+                joint_state = robot_kwargs["observation.state"]
+                gripper_pcd = render_aloha_gripper_pcd(self.cam_to_world, joint_state)
+            elif robot_type == "libero_franka":
+                gripper_pcd = get_4_points_from_gripper_pos_orient(
+                            ee_pos=robot_kwargs["ee_pos"],
+                            ee_quat=robot_kwargs["ee_quat"],
+                            gripper_angle=robot_kwargs["gripper_angle"],
+                            world_to_cam_mat=robot_kwargs["world_to_cam_mat"]
+                        )
+            else:
+                raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
 
-        infer_text = self.get_goal_text(rgb, joint_state)
+        infer_text = self.get_goal_text(rgb, robot_type, robot_kwargs)
         #### Run inference
         goal_prediction = inference(self.model, pcd_xyz, self.text_embedding[infer_text], self.is_gmm, self.device)
 
         return goal_prediction
 
-    def get_goal_text(self, rgb, joint_state):
+    def get_goal_text(self, rgb, robot_type, robot_kwargs):
         if not self.use_gemini:
             return self.text
+
+        if robot_type == "aloha":
+            joint_state = robot_kwargs["observation.state"]
+        else:
+            raise NotImplementedError(f"Need to implement code to extract joint state for {robot_type}.")
 
         pil_image = PIL.Image.fromarray(rgb)
 
@@ -134,8 +152,8 @@ class HighLevelWrapper:
             goal_gripper_proj = np.clip(goal_gripper_proj, 0, 255)
         return goal_gripper_proj.astype(np.uint8)
 
-    def predict_and_project(self, rgb, depth, joint_state):
-        goal_prediction = self.predict(rgb, depth, joint_state)
+    def predict_and_project(self, rgb, depth, robot_type, robot_kwargs):
+        goal_prediction = self.predict(rgb, depth, robot_type, robot_kwargs)
         goal_gripper_proj = self.project(goal_prediction, rgb.shape)
         return goal_gripper_proj
 

@@ -9,7 +9,7 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatas
 import torch
 from tqdm import tqdm
 import numpy as np
-from lerobot.common.utils.aloha_utils import render_gripper_pcd
+from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd
 from PIL import Image
 from typing import List
 import argparse
@@ -45,7 +45,7 @@ def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True
     """
     Render gripper pcd in camera frame, project the full point cloud or 4 handpicked points to a mask
     """
-    mesh = render_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
+    mesh = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
     assert goal_repr in ["mask", "heatmap"]
 
     if four_points:
@@ -211,7 +211,7 @@ def upgrade_dataset(
                 frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
 
             if "observation.points.gripper_pcds" in new_features:
-                frame_data["observation.points.gripper_pcds"] = render_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state).astype(np.float32)
+                frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state).astype(np.float32)
 
             if "next_event_idx" in new_features:
                 frame_data["next_event_idx"] = np.array([0], dtype=np.int32)
