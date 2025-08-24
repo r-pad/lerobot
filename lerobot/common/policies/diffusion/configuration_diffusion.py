@@ -158,6 +158,7 @@ class DiffusionConfig(PreTrainedConfig):
     hl_num_points: int = 4096
     hl_is_gmm: bool = True
     hl_use_text_embedding: bool = True
+    hl_use_rgb: bool = False
     hl_use_gripper_pcd: bool = True
     hl_use_gemini: bool = False
     hl_in_channels: int = 4

@@ -42,6 +42,7 @@ class HighLevelWrapper:
                  in_channels=3,
                  use_gripper_pcd=False,
                  use_text_embedding=False,
+                 use_rgb=False,
                  use_gemini=False,
                  is_gmm=False,
                  intrinsics_txt=None,
@@ -54,6 +55,7 @@ class HighLevelWrapper:
         self.num_points = num_points
         self.is_gmm = is_gmm
         self.use_text_embedding = use_text_embedding
+        self.use_rgb = use_rgb
         self.use_gripper_pcd = use_gripper_pcd
         self.text_embedding_cache = {}
 
@@ -78,7 +80,7 @@ class HighLevelWrapper:
         pcd = compute_pcd(rgb, depth, self.scaled_K, rgb_preprocess,
                             depth_preprocess, self.device, self.rng,
                             self.num_points, self.max_depth)
-        pcd_xyz = pcd[:,:3]
+        pcd_xyz, pcd_rgb = pcd[:,:3], pcd[:, 3:]
 
         if self.use_gripper_pcd:
             if robot_type == "aloha":
@@ -94,6 +96,14 @@ class HighLevelWrapper:
             else:
                 raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
+            if self.use_rgb:
+                gripper_rgb = np.zeros((gripper_pcd.shape[0], 3))
+                pcd_rgb = np.concatenate([gripper_rgb, pcd_rgb], axis=0)
+
+        if self.use_rgb:
+            pcd = np.concatenate([pcd_xyz, pcd_rgb], axis=1)
+        else:
+            pcd = pcd_xyz
 
         infer_text = self.get_goal_text(text, rgb, robot_type, robot_kwargs)
         def get_cached_embedding(instruction):
@@ -103,7 +113,7 @@ class HighLevelWrapper:
         text_embed = get_cached_embedding(infer_text)
 
         #### Run inference
-        goal_prediction = inference(self.model, pcd_xyz, text_embed, self.is_gmm, self.device)
+        goal_prediction = inference(self.model, pcd, text_embed, self.is_gmm, self.device)
 
         return goal_prediction
 
@@ -177,13 +187,13 @@ def initialize_model(run_id, use_text_embedding, in_channels, device):
 
     return model
 
-def inference(model, pcd_xyz, text_embedding, is_gmm, device):
+def inference(model, pcd, text_embedding, is_gmm, device):
     """
     Run model inference on point cloud data.
 
     Args:
         model (PointNet2_super): Trained model.
-        pcd_xyz (np.ndarray): Point cloud coordinates (N, 3) or batched.
+        pcd (np.ndarray): Point cloud coordinates (N, K) or batched.
         text_embedding (np.ndarray): Goal text embedding.
         device (torch.device): Device for inference.
 
@@ -191,17 +201,17 @@ def inference(model, pcd_xyz, text_embedding, is_gmm, device):
         np.ndarray: Predicted goal displacement (e.g., 4x3 array).
     """
     with torch.no_grad():
-        if len(pcd_xyz.shape) == 2:
-            pcd_xyz = pcd_xyz.transpose(1,0)[None] # [1, 3, N]
-        elif len(pcd_xyz.shape) == 3: # batched inference
-            pcd_xyz = pcd_xyz.transpose(0,2,1)
-        pcd_xyz = torch.from_numpy(pcd_xyz.astype(np.float32)).to(device)
+        if len(pcd.shape) == 2:
+            pcd = pcd.transpose(1,0)[None] # [1, K, N]
+        elif len(pcd.shape) == 3: # batched inference
+            pcd = pcd.transpose(0,2,1)
+        pcd = torch.from_numpy(pcd.astype(np.float32)).to(device)
         text_embedding = torch.from_numpy(text_embedding.astype(np.float32)[None]).to(device)
-        outputs = model(pcd_xyz, text_embedding) # [1, N, 13]
+        outputs = model(pcd, text_embedding) # [1, N, 13]
         if not is_gmm:
-            goal_prediction = get_weighted_displacement(pcd_xyz.permute(0,2,1), outputs).squeeze().cpu().numpy() # [4, 3]
+            goal_prediction = get_weighted_displacement(pcd.permute(0,2,1), outputs).squeeze().cpu().numpy() # [4, 3]
         else:
-            goal_prediction = sample_from_gmm(pcd_xyz.permute(0,2,1), outputs).squeeze().cpu().numpy() # [4, 3]
+            goal_prediction = sample_from_gmm(pcd.permute(0,2,1), outputs).squeeze().cpu().numpy() # [4, 3]
         return goal_prediction
 
 def compute_pcd(rgb, depth, K, rgb_preprocess, depth_preprocess, device, rng, num_points, max_depth):
@@ -224,7 +234,7 @@ def compute_pcd(rgb, depth, K, rgb_preprocess, depth_preprocess, device, rng, nu
     """
     # Downsample images
     rgb_ = PIL.Image.fromarray(rgb)
-    rgb_ = np.asarray(rgb_preprocess(rgb_))
+    rgb_ = (np.asarray(rgb_preprocess(rgb_)) / 255.).astype(np.float32)
 
     depth_ = (depth / 1000.0).squeeze().astype(np.float32)
     depth_ = PIL.Image.fromarray(depth_)
