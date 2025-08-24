@@ -94,10 +94,10 @@ class HighLevelWrapper:
                 gripper_pcd = render_aloha_gripper_pcd(self.cam_to_world, joint_state)
             elif robot_type == "libero_franka":
                 gripper_pcd = get_4_points_from_gripper_pos_orient(
-                            ee_pos=robot_kwargs["ee_pos"],
-                            ee_quat=robot_kwargs["ee_quat"],
-                            gripper_angle=robot_kwargs["gripper_angle"],
-                            world_to_cam_mat=robot_kwargs["world_to_cam_mat"]
+                            gripper_pos=robot_kwargs["ee_pos"],
+                            gripper_orn=robot_kwargs["ee_quat"],
+                            cur_joint_angle=robot_kwargs["gripper_angle"],
+                            world_to_cam_mat=np.linalg.inv(self.cam_to_world),
                         )
             else:
                 raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
@@ -210,8 +210,8 @@ def compute_pcd(rgb, depth, K, rgb_preprocess, depth_preprocess, device, rng, nu
     Compute a downsampled point cloud from RGB and depth images.
 
     Args:
-        rgb (np.ndarray): RGB image array (H, W, 3).
-        depth (np.ndarray): Depth image array (H, W).
+        rgb (np.ndarray): RGB image array (H, W, 3). np.uint8
+        depth (np.ndarray): Depth image array (H, W). np.uint16
         K (np.ndarray): 3x3 camera intrinsic matrix.
         rgb_preprocess (transforms.Compose): Preprocessing for RGB.
         depth_preprocess (transforms.Compose): Preprocessing for depth.

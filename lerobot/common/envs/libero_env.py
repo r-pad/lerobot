@@ -125,7 +125,27 @@ class LiberoEnv(gym.Env):
                     high=np.inf,
                     shape=(8,),
                     dtype=np.float32
-                )
+                ),
+                "robot_data": spaces.Dict({
+                    "ee_pos": spaces.Box(
+                        low=-np.inf,
+                        high=np.inf,
+                        shape=(3,),
+                        dtype=np.float32
+                    ),
+                    "ee_quat": spaces.Box(
+                        low=-1.0,
+                        high=1.0,
+                        shape=(4,),
+                        dtype=np.float32
+                    ),
+                    "gripper_angle": spaces.Box(
+                        low=0.0,
+                        high=0.04,
+                        shape=(),
+                        dtype=np.float32
+                    )
+                })
             })
         else:
             raise ValueError(f"Unsupported obs_type: {obs_type}")
@@ -206,6 +226,13 @@ class LiberoEnv(gym.Env):
             gripper_states = raw_obs["robot0_gripper_qpos"]  # 2D gripper positions
             # Concatenate: pos(3) + ori(3) + gripper(2) = 8D to match dataset
             obs["agent_pos"] = np.concatenate([ee_pos, ee_ori, gripper_states]).astype(np.float32)
+
+            obs["robot_data"] = {
+                "ee_pos": ee_pos,
+                "ee_quat": ee_quat,
+                "gripper_angle": gripper_states[0]
+            }
+
         
         # Add success indicator for evaluation
         # LIBERO tasks give sparse reward=1.0 for success
@@ -245,7 +272,13 @@ class LiberoEnv(gym.Env):
             gripper_states = raw_obs["robot0_gripper_qpos"]  # 2D gripper positions
             # Concatenate: pos(3) + ori(3) + gripper(2) = 8D to match dataset
             obs["agent_pos"] = np.concatenate([ee_pos, ee_ori, gripper_states]).astype(np.float32)
-        
+
+            obs["robot_data"] = {
+                "ee_pos": ee_pos,
+                "ee_quat": ee_quat,
+                "gripper_angle": gripper_states[0]
+            }
+
         return obs
     
     def render(self):
