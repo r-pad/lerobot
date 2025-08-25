@@ -206,7 +206,7 @@ python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot --poli
 
 - Training/eval with goal conditioning:
 ```
-python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot_singleTask_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_libero_gc --job_name=diffPo_libero_gc --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.enable_goal_conditioning=true --policy.robot_type=libero_franka --env.type=libero --env.task=libero_object_0 --eval.batch_size=10
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot_singleTask_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_libero_gc --job_name=diffPo_libero_gc --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.enable_goal_conditioning=true --policy.robot_type=libero_franka --env.type=libero --env.task=libero_object_0 --eval.batch_size=10 --policy.hl_use_rgb=true --policy.hl_run_id=v8z0lx5h --policy.hl_max_depth=2 --policy.hl_in_channels=7 --policy.hl_intrinsics_txt=lerobot/scripts/libero_franka_calibration/intrinsics.txt --policy.hl_extrinsics_txt=lerobot/scripts/libero_franka_calibration/agentview_cam_to_world.txt
 ```
 
 ## Scripts

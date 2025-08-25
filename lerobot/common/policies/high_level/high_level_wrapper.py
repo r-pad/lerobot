@@ -234,7 +234,7 @@ def compute_pcd(rgb, depth, K, rgb_preprocess, depth_preprocess, device, rng, nu
     """
     # Downsample images
     rgb_ = PIL.Image.fromarray(rgb)
-    rgb_ = (np.asarray(rgb_preprocess(rgb_)) / 255.).astype(np.float32)
+    rgb_ = ((np.asarray(rgb_preprocess(rgb_), dtype=np.float32) * 2 / 255.) - 1)
 
     depth_ = (depth / 1000.0).squeeze().astype(np.float32)
     depth_ = PIL.Image.fromarray(depth_)
