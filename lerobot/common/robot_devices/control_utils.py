@@ -84,7 +84,7 @@ def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, f
                 log_dt(f"dtR{name}", robot.logs[key])
 
     info_str = " ".join(log_items)
-    logging.info(info_str)
+    # logging.info(info_str)
 
 
 @cache
@@ -114,6 +114,7 @@ def predict_action(observation, policy, device, use_amp):
     ):
         # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
         for name in observation:
+            if type(observation[name]) == str: observation[name] = [observation[name]]; continue
             if "image" in name:
                 if observation[name].dtype == torch.uint8:
                     observation[name] = observation[name].type(torch.float32) / 255
@@ -283,7 +284,7 @@ def control_loop(
                     if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
                         rgb = observation["observation.images.cam_azure_kinect.color"].numpy()
                         depth = observation["observation.images.cam_azure_kinect.transformed_depth"].numpy().squeeze()
-                        gripper_proj = policy.high_level.predict_and_project(policy.config.text, rgb, depth, robot_type=policy.config.robot_type,
+                        gripper_proj = policy.high_level.predict_and_project(single_task, rgb, depth, robot_type=policy.config.robot_type,
                                                                              robot_kwargs={
                                                                                  "observation.state": observation["observation.state"]
                                                                              })
@@ -301,6 +302,7 @@ def control_loop(
                     phantomized_img = render_and_overlay(policy.renderer, ALOHA_MODEL, state, rgb, policy.downsample_factor)
                     observation['observation.images.cam_azure_kinect.color'] = torch.from_numpy(phantomized_img)
 
+                observation["task"] = single_task
                 pred_action, pred_action_eef = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
                 )

@@ -150,9 +150,7 @@ class DiffusionPolicy(PreTrainedPolicy):
         state = batch['observation.state']
         batch = self.normalize_inputs(batch)
         if self.config.use_text_embedding:
-            # For sim eval, task description comes from batch
-            # For real, we pass it through the config
-            text = batch.get('task', [self.config.text])
+            text = batch['task']
 
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
