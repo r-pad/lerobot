@@ -73,6 +73,12 @@ class HighLevelWrapper:
         self.model = initialize_model(run_id, use_text_embedding, in_channels, self.device)
         self.rng = np.random.default_rng()
 
+        # For rerun visualization
+        self.last_pcd_xyz = None
+        self.last_pcd_rgb = None
+        self.last_gripper_pcd = None
+        self.last_goal_prediction = None
+
     def predict(self, text, rgb, depth, robot_type, robot_kwargs):
         if self.scaled_K is None:
             self.scaled_K = get_scaled_intrinsics(self.original_K, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
@@ -81,6 +87,9 @@ class HighLevelWrapper:
                             depth_preprocess, self.device, self.rng,
                             self.num_points, self.max_depth)
         pcd_xyz, pcd_rgb = pcd[:,:3], pcd[:, 3:]
+        # Store for rerun visualization
+        self.last_pcd_xyz = pcd_xyz
+        self.last_pcd_rgb = pcd_rgb
 
         if self.use_gripper_pcd:
             if robot_type == "aloha":
@@ -99,6 +108,7 @@ class HighLevelWrapper:
             if self.use_rgb:
                 gripper_rgb = np.zeros((gripper_pcd.shape[0], 3))
                 pcd_rgb = np.concatenate([gripper_rgb, pcd_rgb], axis=0)
+            self.last_gripper_pcd = gripper_pcd
 
         if self.use_rgb:
             pcd = np.concatenate([pcd_xyz, pcd_rgb], axis=1)
@@ -114,6 +124,8 @@ class HighLevelWrapper:
 
         #### Run inference
         goal_prediction = inference(self.model, pcd, text_embed, self.is_gmm, self.device)
+        # Store for rerun visualization
+        self.last_goal_prediction = goal_prediction
 
         return goal_prediction
 

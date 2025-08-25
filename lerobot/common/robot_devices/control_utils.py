@@ -24,6 +24,7 @@ from contextlib import nullcontext
 from copy import copy
 from functools import cache
 
+import numpy as np
 import rerun as rr
 import torch
 from deepdiff import DeepDiff
@@ -327,6 +328,24 @@ def control_loop(
             image_keys = [key for key in observation if "image" in key]
             for key in image_keys:
                 rr.log(key, rr.Image(observation[key].numpy()), static=True)
+
+            # Add point cloud visualization from high-level model
+            if policy is not None and hasattr(policy, 'high_level'):
+                hl_wrapper = policy.high_level
+
+                pcd_rgb = ((hl_wrapper.last_pcd_rgb + 1) * 255 / 2).astype(np.uint8)
+
+                # Scene point cloud with colors
+                rr.log("high_level/scene_pointcloud", rr.Points3D(hl_wrapper.last_pcd_xyz, colors=pcd_rgb))
+
+                # Gripper point cloud
+                if hl_wrapper.last_gripper_pcd is not None:
+                    rr.log("high_level/gripper_pointcloud", 
+                           rr.Points3D(hl_wrapper.last_gripper_pcd, colors=[255, 0, 0]))
+
+                # Goal prediction
+                rr.log("high_level/goal_prediction", 
+                       rr.Points3D(hl_wrapper.last_goal_prediction, colors=[0, 255, 0], radii=0.005))
 
         if fps is not None:
             dt_s = time.perf_counter() - start_loop_t
