@@ -17,6 +17,9 @@ def submit():
     parser.add_argument(
         "--partition", "-p", default="preempt", help="Partition to submit to"
     )
+    parser.add_argument(
+        "--qos", "-q", default=None, help="Quality of Service (QoS) to use"
+    )
     parser.add_argument("--nodes", "-N", type=int, default=1, help="Number of nodes")
     parser.add_argument("--ntasks", "-n", type=int, default=1, help="Number of tasks")
     parser.add_argument(
@@ -54,6 +57,7 @@ def submit():
 
     job_name = args.job_name
     partition = args.partition
+    qos = args.qos
     nodes = args.nodes
     ntasks = args.ntasks
     cpus_per_task = args.cpus_per_task
@@ -89,6 +93,9 @@ def submit():
 
     if partition:
         script_content += f"#SBATCH --partition={partition}\n"
+
+    if qos:
+        script_content += f"#SBATCH --qos={qos}\n"
 
     if memory:
         script_content += f"#SBATCH --mem={memory}\n"
