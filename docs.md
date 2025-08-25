@@ -252,7 +252,10 @@ CC=/usr/bin/gcc CXX=/usr/bin/g++ pixi install
 # Install pytorch3d INSIDE a slurm job. Because we can't pretend.
 # This can take up to 20 minutes.
 ./cluster/launch-slurm.py -J install_pytorch3d --gpus 1 install-pytorch3d
+```
 
 2. Launch a job to actually run the training script. This can be made pretty flexible.
-./cluster/launch-slurm.py -J train --gpus 1 $MY_TRAINING_SCRIPT
+```
+# MY_TRAINING_SCRIPT is exactly the same python command you write when training locally.
+./cluster/launch-slurm.py -J train --gpus 1 --sync-logs $MY_TRAINING_SCRIPT
 ```
