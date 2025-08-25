@@ -42,19 +42,9 @@ def submit():
         help="Show the generated script without submitting",
     )
     parser.add_argument(
-        "--data-transfer",
+        "--sync-logs",
         action="store_true",
-        help="Enable data transfer and cleanup commands",
-    )
-    parser.add_argument(
-        "--source-tar",
-        default="gs://cmu-gpucloud-baeisner/lfd3d-data/pick_mug_pcd/mug_aloha_0627_sriram_train.tar.gz",
-        help="Source directory to sync from cloud storage"
-    )
-    parser.add_argument(
-        "--dest-tar",
-        default="/tmp/lfd3d-data/pick_mug_pcd/mug_aloha_0627_sriram_train.tar.gz",
-        help="Destination directory to sync to cloud storage"
+        help="Sync logs after job completion",
     )
 
     args, command = parser.parse_known_args()
@@ -76,9 +66,7 @@ def submit():
     email_type = args.email_type
     additional_options = args.sbatch_opt
     dry_run = args.dry_run
-    data_transfer = args.data_transfer
-    source_tar = args.source_tar
-    dest_tar = args.dest_tar
+    sync_logs = args.sync_logs
 
     # Add datetime suffix to job name
     from datetime import datetime
@@ -143,24 +131,6 @@ def submit():
     script_content += "export HF_HOME=/tmp/huggingface\n"
     script_content += "\n"
 
-    # Add data transfer and cleanup commands if requested
-    if data_transfer:
-        script_content += "# Data transfer setup\n"
-        script_content += f"S={source_tar}\n"
-        script_content += f"D={dest_tar}\n"
-        script_content += f"D_PARENT=$(dirname $D)\n"
-        script_content += "mkdir -p $D_PARENT\n"
-        script_content += "# Copy the data to the local storage\n"
-        script_content += f"gcloud storage cp $S $D\n"
-        script_content += "\n"
-
-        script_content += "# Extract the tar.gz file\n"
-        script_content += "tar -xzf $D_PARENT/*.tar.gz -C $D_PARENT\n"
-        script_content += "rm $D_PARENT/*.tar.gz\n"
-
-
-    script_content += "\n"
-
     # Activate pixi environment
     script_content += "# Activate pixi environment and run\n"
     script_content += "# Job execution\n"
@@ -170,12 +140,10 @@ def submit():
     script_content += f"pixi run {escaped_command}\n"
 
     # Add data transfer back and cleanup if requested
-    if data_transfer:
+    if sync_logs:
         script_content += "\n"
-        script_content += "# Copy your stuff back to the object storage\n"
-        script_content += f"gcloud storage rsync /tmp/lfd3d-logs gs://cmu-gpucloud-baeisner/lfd3d-logs --recursive\n"
-        script_content += "# Clean up local storage when done\n"
-        script_content += "rm -fr $D_PARENT\n"
+        script_content += "# Copy logs back to the object storage\n"
+        script_content += f"gcloud storage rsync /tmp/lerobot-logs gs://cmu-gpucloud-$USER/lerobot-logs --recursive\n"
 
     if dry_run:
         print("Generated sbatch script:")
