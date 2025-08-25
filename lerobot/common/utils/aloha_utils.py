@@ -161,7 +161,7 @@ def inverse_kinematics(configuration, ee_pose):
     return vec
 
 
-def render_gripper_pcd(cam_to_world, joint_state, sample_n_points=500):
+def render_aloha_gripper_pcd(cam_to_world, joint_state, sample_n_points=500):
     """
     Run FK, extract gripper pcd from robot URDF, transform to camera frame
     """

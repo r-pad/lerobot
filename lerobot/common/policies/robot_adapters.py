@@ -61,8 +61,8 @@ class AlohaAdapter(RobotAdapter):
         # For joint space, return dummy eef
         return torch.zeros(10, device=action.device, dtype=action.dtype)
 
-class GenericAdapter(RobotAdapter):
-    """Generic adapter"""
+class LiberoFrankaAdapter(RobotAdapter):
+    """Libero Franka adapter"""
     def __init__(self, obs_key: str, act_key: str):
         self.obs_key = obs_key
         self.act_key = act_key

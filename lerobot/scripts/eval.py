@@ -146,6 +146,7 @@ def rollout(
     )
     check_env_attributes_and_types(env)
     while not np.all(done):
+        ee_pos, ee_quat, gripper_angle = [observation["robot_data"][i] for i in ("ee_pos", "ee_quat", "gripper_angle")]
         # Numpy array to tensor and changing dictionary keys to LeRobot policy format.
         observation = preprocess_observation(observation)
         if return_observations:
@@ -158,6 +159,32 @@ def rollout(
         # Infer "task" from attributes of environments.
         # TODO: works with SyncVectorEnv but not AsyncVectorEnv
         observation = add_envs_task(env, observation)
+
+        if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
+            # Generate new goal prediction when queue is empty
+            # This code is specific to diffusion policy and LIBERO :(
+            if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
+                rgb = observation["observation.images.agentview"].cpu().numpy()
+                depth = observation["observation.images.agentview_depth"].cpu().numpy().squeeze()
+                gripper_proj = []
+                for i in range(rgb.shape[0]):
+                    rgb_ = (rgb[i].transpose(1,2,0) * 255).astype(np.uint8)
+                    depth_ = (depth[i] * 1000).astype(np.uint16)
+                    ee_pos_ = ee_pos[i]
+                    ee_quat_ = ee_quat[i]
+                    gripper_angle_ = gripper_angle[i]
+                    task = observation["task"][i]
+                    g_proj = policy.high_level.predict_and_project(task, rgb_, depth_, robot_type=policy.config.robot_type,
+                                                                     robot_kwargs={
+                                                                         "ee_pos": ee_pos_,
+                                                                         "ee_quat": ee_quat_,
+                                                                         "gripper_angle": gripper_angle_,
+                                                                     })
+                    gripper_proj.append(g_proj)
+                goal_gripper_proj = torch.from_numpy(np.stack(gripper_proj))
+                goal_gripper_proj = ((goal_gripper_proj / 255.).float().to(device)).permute(0,3,1,2)
+                policy.latest_gripper_proj = goal_gripper_proj
+            observation["observation.images.agentview_goal_gripper_proj"] = policy.latest_gripper_proj
 
         with torch.inference_mode():
             action, action_eef = policy.select_action(observation)

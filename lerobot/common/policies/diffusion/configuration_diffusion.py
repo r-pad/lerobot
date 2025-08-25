@@ -149,7 +149,7 @@ class DiffusionConfig(PreTrainedConfig):
     clip_sample_range: float = 1.0
 
     use_text_embedding: bool = False
-    text: str = "grasp mug and place mug on table"
+    # text: str = "grasp mug and place mug on table" # Commented out for backwards compatability, can be deleted eventually
 
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
@@ -158,11 +158,12 @@ class DiffusionConfig(PreTrainedConfig):
     hl_num_points: int = 4096
     hl_is_gmm: bool = True
     hl_use_text_embedding: bool = True
+    hl_use_rgb: bool = False
     hl_use_gripper_pcd: bool = True
     hl_use_gemini: bool = False
     hl_in_channels: int = 4
-    hl_intrinsics_txt: str = "lerobot/scripts/intrinsics.txt"
-    hl_extrinsics_txt: str = "lerobot/scripts/T_world_from_camera_est_v6_0709.txt"
+    hl_intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
+    hl_extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt"
 
     # Phantom - Overlay rendered robot at inference
     phantomize: bool = False
