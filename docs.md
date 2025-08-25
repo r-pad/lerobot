@@ -22,7 +22,7 @@ Base Teleop command:
 python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --control.type=teleoperate --control.display_data=true
 ```
 
-The camera can be configured through the attached config, with options in `lerobot/common/robot_devices/cameras/azure_kinect.py`. 
+The camera can be configured through the attached config, with options in `lerobot/common/robot_devices/cameras/azure_kinect.py`.
 
 Other options of note is the setting `--robot.max_relative_target` which is a limit on how much the robot can move in a single step. The default value is 5. With lower values <3, the motion is very laggy and joints move weirdly. The clamping can be disabled with `--robot.max_relative_target=null` allowing for very smooth high-frequency teleop, but I do not recommend as one wrong move can send the Aloha to DynaMixel heaven. The default value works well enough.
 
@@ -73,7 +73,7 @@ python lerobot/scripts/train.py --dataset.repo_id=sriramsk/aloha_mug_eef_depth_0
 
 Pretraining with DROID:
 ```
-python lerobot/scripts/train.py --dataset.repo_id=sriramsk/droid_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_droid_lerobot --job_name=diffPo_droid_lerobot --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --steps=1_000_000 --batch_size=64 --num_workers=48 --prefetch_factor=8 --policy.use_text_embedding=true 
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/droid_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_droid_lerobot --job_name=diffPo_droid_lerobot --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.enable_goal_conditioning=true --steps=1_000_000 --batch_size=64 --num_workers=48 --prefetch_factor=8 --policy.use_text_embedding=true
 ```
 
 
@@ -90,25 +90,25 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 ```py
 [
     'left/waist',
-    'left/shoulder', 
-    'left/elbow', 
-    'left/forearm_roll', 
-    'left/wrist_angle', 
-    'left/wrist_rotate', 
-    'left/left_finger', 
-    'left/right_finger', 
-    'right/waist', 
-    'right/shoulder', 
-    'right/elbow', 
-    'right/forearm_roll', 
-    'right/wrist_angle', 
-    'right/wrist_rotate', 
-    'right/left_finger', 
+    'left/shoulder',
+    'left/elbow',
+    'left/forearm_roll',
+    'left/wrist_angle',
+    'left/wrist_rotate',
+    'left/left_finger',
+    'left/right_finger',
+    'right/waist',
+    'right/shoulder',
+    'right/elbow',
+    'right/forearm_roll',
+    'right/wrist_angle',
+    'right/wrist_rotate',
+    'right/left_finger',
     'right/right_finger'
 ]
 ```
 
-- In `observation['state']`: 
+- In `observation['state']`:
 ```py
             "left": DynamixelMotorsBusConfig(
                 port="/dev/ttyDXL_follower_left",
@@ -195,7 +195,7 @@ python lerobot/scripts/create_libero_dataset.py --hdf5_list libero_object/pick_u
 
 All tasks:
 ```
-python lerobot/scripts/create_libero_dataset.py --suite_names libero_object libero_goal libero_spatial libero_90 libero_10 
+python lerobot/scripts/create_libero_dataset.py --suite_names libero_object libero_goal libero_spatial libero_90 libero_10
 ```
 
 - Training:
@@ -226,3 +226,33 @@ Merges multiple LeRobot datasets into a single dataset. All input datasets must 
 python lerobot/scripts/subsample_dataset.py --source_repo_id SOURCE_ID --target_repo_id TARGET_ID --target_fps <fps>
 ```
 Creates a subsampled version of a dataset by forcing a target fps.
+
+# Launching on Orchard
+
+0. (Optional): Make the pixi default cache directory elsewhere.
+
+```
+# Add the following line to your .bashrc or .zshrc file.
+export PIXI_CACHE_DIR=/project/flame/$USER/.cache/pixi
+```
+
+```
+# Create the config.toml file with the desired settings, which tells pixi to put environments in flame.
+# Only necessary if you have multiple environments, because envs can get quite big, larger than the 20G allowance.
+echo 'detached-environments = "/project/flame/$USER/envs"' > ~/.pixi/config.toml
+```
+1. Clone & install
+
+```
+git clone git@github.com:r-pad/lerobot.git
+cd lerobot
+# Minor complication: currently evdev is giving problems when using the gcc inside pixi env.
+CC=/usr/bin/gcc CXX=/usr/bin/g++ pixi install
+
+# Install pytorch3d INSIDE a slurm job. Because we can't pretend.
+# This can take up to 20 minutes.
+./cluster/launch-slurm.py -J install_pytorch3d --gpus 1 install-pytorch3d
+
+2. Launch a job to actually run the training script. This can be made pretty flexible.
+./cluster/launch-slurm.py -J train --gpus 1 $MY_TRAINING_SCRIPT
+```
