@@ -61,6 +61,30 @@ def preprocess_observation(observations: dict[str, np.ndarray]) -> dict[str, Ten
 
             return_observations[imgkey] = img
 
+    # Process depth have similar structure to rgb observations
+    if "depth" in observations:
+        if isinstance(observations["depth"], dict):
+            depths = {f"observation.images.{key}_depth": depth for key, depth in observations["depth"].items()}
+        else:
+            depths = {"observation.images.depth": observations["depth"]}
+
+        for depthkey, depth in depths.items():
+            # Convert to tensor
+            depth = torch.from_numpy(depth)
+
+            # sanity check that depth is 2D (H, W) or 3D batch (B, H, W)
+            if depth.ndim == 2:
+                # Add batch dimension if missing
+                depth = depth.unsqueeze(0)
+
+            # sanity check that depth is float32
+            assert depth.dtype == torch.float32, f"expect torch.float32, but instead {depth.dtype=}"
+
+            # add channel dimension to make it (B, 1, H, W) for consistency with image format
+            depth = depth.unsqueeze(1).contiguous()
+
+            return_observations[depthkey] = depth
+
     if "environment_state" in observations:
         return_observations["observation.environment_state"] = torch.from_numpy(
             observations["environment_state"]

@@ -99,7 +99,7 @@ class DiffusionPolicy(PreTrainedPolicy):
                 in_channels=self.config.hl_in_channels,
                 use_gripper_pcd=self.config.hl_use_gripper_pcd,
                 use_text_embedding=self.config.hl_use_text_embedding,
-                text=self.config.text,
+                use_rgb=self.config.hl_use_rgb,
                 use_gemini=self.config.hl_use_gemini,
                 is_gmm=self.config.hl_is_gmm,
                 intrinsics_txt=self.config.hl_intrinsics_txt,
@@ -150,9 +150,7 @@ class DiffusionPolicy(PreTrainedPolicy):
         state = batch['observation.state']
         batch = self.normalize_inputs(batch)
         if self.config.use_text_embedding:
-            # For sim eval, task description comes from batch
-            # For real, we pass it through the config
-            text = batch.get('task', [self.config.text])
+            text = batch['task']
 
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original

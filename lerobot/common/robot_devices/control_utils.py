@@ -24,6 +24,7 @@ from contextlib import nullcontext
 from copy import copy
 from functools import cache
 
+import numpy as np
 import rerun as rr
 import torch
 from deepdiff import DeepDiff
@@ -84,7 +85,7 @@ def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, f
                 log_dt(f"dtR{name}", robot.logs[key])
 
     info_str = " ".join(log_items)
-    logging.info(info_str)
+    # logging.info(info_str)
 
 
 @cache
@@ -114,6 +115,7 @@ def predict_action(observation, policy, device, use_amp):
     ):
         # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
         for name in observation:
+            if type(observation[name]) == str: observation[name] = [observation[name]]; continue
             if "image" in name:
                 if observation[name].dtype == torch.uint8:
                     observation[name] = observation[name].type(torch.float32) / 255
@@ -283,7 +285,10 @@ def control_loop(
                     if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
                         rgb = observation["observation.images.cam_azure_kinect.color"].numpy()
                         depth = observation["observation.images.cam_azure_kinect.transformed_depth"].numpy().squeeze()
-                        gripper_proj = policy.high_level.predict_and_project(rgb, depth, observation["observation.state"])
+                        gripper_proj = policy.high_level.predict_and_project(single_task, rgb, depth, robot_type=policy.config.robot_type,
+                                                                             robot_kwargs={
+                                                                                 "observation.state": observation["observation.state"]
+                                                                             })
                         policy.latest_gripper_proj = torch.from_numpy(gripper_proj)
                     observation["observation.images.cam_azure_kinect.goal_gripper_proj"] = policy.latest_gripper_proj
 
@@ -298,6 +303,7 @@ def control_loop(
                     phantomized_img = render_and_overlay(policy.renderer, ALOHA_MODEL, state, rgb, policy.downsample_factor)
                     observation['observation.images.cam_azure_kinect.color'] = torch.from_numpy(phantomized_img)
 
+                observation["task"] = single_task
                 pred_action, pred_action_eef = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
                 )
@@ -322,6 +328,24 @@ def control_loop(
             image_keys = [key for key in observation if "image" in key]
             for key in image_keys:
                 rr.log(key, rr.Image(observation[key].numpy()), static=True)
+
+            # Add point cloud visualization from high-level model
+            if policy is not None and hasattr(policy, 'high_level'):
+                hl_wrapper = policy.high_level
+
+                pcd_rgb = ((hl_wrapper.last_pcd_rgb + 1) * 255 / 2).astype(np.uint8)
+
+                # Scene point cloud with colors
+                rr.log("high_level/scene_pointcloud", rr.Points3D(hl_wrapper.last_pcd_xyz, colors=pcd_rgb))
+
+                # Gripper point cloud
+                if hl_wrapper.last_gripper_pcd is not None:
+                    rr.log("high_level/gripper_pointcloud", 
+                           rr.Points3D(hl_wrapper.last_gripper_pcd, colors=[255, 0, 0]))
+
+                # Goal prediction
+                rr.log("high_level/goal_prediction", 
+                       rr.Points3D(hl_wrapper.last_goal_prediction, colors=[0, 255, 0], radii=0.005))
 
         if fps is not None:
             dt_s = time.perf_counter() - start_loop_t

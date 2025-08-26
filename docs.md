@@ -41,6 +41,7 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/debug --control.num_episodes=2 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.fps=60 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4```
 
 `--control.repo_id` indicates the name with which the dataset is saved and uploaded to Huggingface (if `--control.push_to_hub` is enabled). `--control.resume` allows writing to an existing dataset. While recording, use left/right arrow keys to finish / reset current episode. `--robot.use_eef=true` runs forward kinematics and stores the computed eef pose in the dataset.
+```
 
 ### Visualize and replay
 
@@ -198,9 +199,14 @@ All tasks:
 python lerobot/scripts/create_libero_dataset.py --suite_names libero_object libero_goal libero_spatial libero_90 libero_10
 ```
 
-- Training:
+- Training/eval:
 ```
-python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_libero --job_name=diffPo_libero --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.robot_type=generic --env.type=libero --env.task=libero_object_0 --eval.batch_size=10
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot --policy.type=diffusion --output_dir=outputs/train/diffPo_libero --job_name=diffPo_libero --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.robot_type=libero_franka --env.type=libero --env.task=libero_object_0 --eval.batch_size=10
+```
+
+- Training/eval with goal conditioning:
+```
+python lerobot/scripts/train.py --dataset.repo_id=sriramsk/libero_lerobot_singleTask_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_libero_gc --job_name=diffPo_libero_gc --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --policy.enable_goal_conditioning=true --policy.robot_type=libero_franka --env.type=libero --env.task=libero_object_0 --eval.batch_size=10 --policy.hl_use_rgb=true --policy.hl_run_id=v8z0lx5h --policy.hl_max_depth=2 --policy.hl_in_channels=7 --policy.hl_intrinsics_txt=lerobot/scripts/libero_franka_calibration/intrinsics.txt --policy.hl_extrinsics_txt=lerobot/scripts/libero_franka_calibration/agentview_cam_to_world.txt
 ```
 
 ## Scripts
