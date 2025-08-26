@@ -183,22 +183,7 @@ class LiberoEnv(gym.Env):
         
         return obs, info
     
-    def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict]:
-        # Ensure action is the right shape and type
-        action = np.array(action, dtype=np.float32)
-        if action.shape != (7,):
-            raise ValueError(f"Action must have shape (7,), got {action.shape}")
-        
-        # Step environment
-        raw_obs, reward, done, info = self.env.step(action.tolist())
-        
-        self.current_step += 1
-        
-        # Check if episode is done due to max steps
-        truncated = self.current_step >= self._max_episode_steps
-        terminated = bool(done)
-        
-        # Format observation to match preprocess_observation expectations
+    def _process_raw_obs(self, raw_obs: Dict[str, Any]) -> Dict[str, np.ndarray]:
         obs = {}
         
         if "pixels" in self.obs_type:
@@ -233,6 +218,25 @@ class LiberoEnv(gym.Env):
                 "gripper_angle": gripper_states[0]
             }
 
+        return obs
+
+    def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, bool, Dict]:
+        # Ensure action is the right shape and type
+        action = np.array(action, dtype=np.float32)
+        if action.shape != (7,):
+            raise ValueError(f"Action must have shape (7,), got {action.shape}")
+
+        # Step environment
+        raw_obs, reward, done, info = self.env.step(action.tolist())
+
+        self.current_step += 1
+
+        # Check if episode is done due to max steps
+        truncated = self.current_step >= self._max_episode_steps
+        terminated = bool(done)
+
+        # Process observation using shared method
+        obs = self._process_raw_obs(raw_obs)
         
         # Add success indicator for evaluation
         # LIBERO tasks give sparse reward=1.0 for success
@@ -244,42 +248,8 @@ class LiberoEnv(gym.Env):
         # Get observation by taking a dummy step
         dummy_action = [0.0] * 7
         raw_obs, _, _, _ = self.env.step(dummy_action)
-
-        obs = {}
         
-        if "pixels" in self.obs_type:
-            # Return pixels as dict with camera names as keys
-            obs["pixels"] = {
-                "agentview": raw_obs["agentview_image"].astype(np.uint8),
-                "wristview": raw_obs["robot0_eye_in_hand_image"].astype(np.uint8)
-            }
-            # Add depth information for agentview only
-            # Convert to metric depth
-            metric_depth = get_real_depth_map(self.env.sim, raw_obs["agentview_depth"])
-            depth_data = metric_depth.astype(np.float32)
-            # Ensure depth has correct shape (H, W) - squeeze if needed
-            if depth_data.ndim == 3 and depth_data.shape[-1] == 1:
-                depth_data = depth_data.squeeze(-1)
-            obs["depth"] = {
-                "agentview": depth_data
-            }
-        
-        if "agent_pos" in self.obs_type:
-            # Match dataset format: ee_pos (3D) + ee_ori (3D) + gripper_states (2D) = 8D
-            ee_pos = raw_obs["robot0_eef_pos"]  # 3D position
-            ee_quat = raw_obs["robot0_eef_quat"]  # 4D quaternion
-            ee_ori = T.quat2axisangle(ee_quat)  # Convert to 3D axis-angle
-            gripper_states = raw_obs["robot0_gripper_qpos"]  # 2D gripper positions
-            # Concatenate: pos(3) + ori(3) + gripper(2) = 8D to match dataset
-            obs["agent_pos"] = np.concatenate([ee_pos, ee_ori, gripper_states]).astype(np.float32)
-
-            obs["robot_data"] = {
-                "ee_pos": ee_pos,
-                "ee_quat": ee_quat,
-                "gripper_angle": gripper_states[0]
-            }
-
-        return obs
+        return self._process_raw_obs(raw_obs)
     
     def render(self):
         if self.render_mode == "rgb_array":

@@ -61,6 +61,7 @@ def preprocess_observation(observations: dict[str, np.ndarray]) -> dict[str, Ten
 
             return_observations[imgkey] = img
 
+    # Process depth have similar structure to rgb observations
     if "depth" in observations:
         if isinstance(observations["depth"], dict):
             depths = {f"observation.images.{key}_depth": depth for key, depth in observations["depth"].items()}
