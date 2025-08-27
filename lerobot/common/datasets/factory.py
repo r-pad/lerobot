@@ -21,6 +21,7 @@ import torch
 from lerobot.common.datasets.lerobot_dataset import (
     LeRobotDataset,
     LeRobotDatasetMetadata,
+    MultiHomogeneousLeRobotDataset,
     MultiLeRobotDataset,
 )
 from lerobot.common.datasets.transforms import ImageTransforms
@@ -66,31 +67,42 @@ def resolve_delta_timestamps(
     return delta_timestamps
 
 
-def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset:
+def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset | MultiHomogeneousLeRobotDataset:
     """Handles the logic of setting up delta timestamps and image transforms before creating a dataset.
 
     Args:
         cfg (TrainPipelineConfig): A TrainPipelineConfig config which contains a DatasetConfig and a PreTrainedConfig.
 
-    Raises:
-        NotImplementedError: The MultiLeRobotDataset is currently deactivated.
-
     Returns:
-        LeRobotDataset | MultiLeRobotDataset
+        LeRobotDataset | MultiLeRobotDataset | MultiHomogeneousLeRobotDataset
+
+    Example:
+        # Single dataset
+        cfg.dataset.repo_id = "lerobot/pusht"
+
+        # Multiple homogeneous datasets (default behavior)
+        cfg.dataset.repo_id = ["lerobot/pusht", "lerobot/pusht_v2"]
+        # This will create a MultiHomogeneousLeRobotDataset using torch.utils.data.ConcatDataset
     """
     image_transforms = (
         ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
     )
-
     if isinstance(cfg.dataset.repo_id, str):
         ds_meta = LeRobotDatasetMetadata(
             cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision
         )
         delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
+        # Handle episodes - for single dataset, episodes should be a list or None
+        episodes = cfg.dataset.episodes
+        if isinstance(episodes, dict):
+            # If episodes is a dict but we have a single repo_id, this is likely an error
+            # or the dict contains a single key matching the repo_id
+            episodes = episodes.get(cfg.dataset.repo_id) if cfg.dataset.repo_id in episodes else None
+
         dataset = LeRobotDataset(
             cfg.dataset.repo_id,
             root=cfg.dataset.root,
-            episodes=cfg.dataset.episodes,
+            episodes=episodes,
             delta_timestamps=delta_timestamps,
             image_transforms=image_transforms,
             revision=cfg.dataset.revision,
@@ -98,18 +110,54 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             tolerance_s=cfg.dataset.tolerance_s
         )
     else:
-        raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
-        dataset = MultiLeRobotDataset(
-            cfg.dataset.repo_id,
-            # TODO(aliberts): add proper support for multi dataset
-            # delta_timestamps=delta_timestamps,
-            image_transforms=image_transforms,
-            video_backend=cfg.dataset.video_backend,
-        )
-        logging.info(
-            "Multiple datasets were provided. Applied the following index mapping to the provided datasets: "
-            f"{pformat(dataset.repo_id_to_index, indent=2)}"
-        )
+        # Multiple repo_ids provided - use MultiHomogeneousLeRobotDataset by default
+        use_homogeneous = getattr(cfg.dataset, 'use_homogeneous_dataset', True)
+
+        if use_homogeneous:
+            # Create individual LeRobotDataset instances for homogeneous concatenation
+            datasets = []
+            for repo_id in cfg.dataset.repo_id:
+                ds_meta = LeRobotDatasetMetadata(repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision)
+                delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
+
+                # Handle episodes - can be dict mapping repo_id to episodes, or global episodes list
+                episodes = None
+                if cfg.dataset.episodes is not None:
+                    if isinstance(cfg.dataset.episodes, dict):
+                        episodes = cfg.dataset.episodes.get(repo_id)
+                    else:
+                        episodes = cfg.dataset.episodes
+
+                ds = LeRobotDataset(
+                    repo_id,
+                    root=cfg.dataset.root,
+                    episodes=episodes,
+                    delta_timestamps=delta_timestamps,
+                    image_transforms=image_transforms,
+                    revision=cfg.dataset.revision,
+                    video_backend=cfg.dataset.video_backend,
+                    tolerance_s=cfg.dataset.tolerance_s
+                )
+                datasets.append(ds)
+
+            dataset = MultiHomogeneousLeRobotDataset(datasets)
+            logging.info(
+                f"Multiple homogeneous datasets were provided: {cfg.dataset.repo_id}"
+            )
+        else:
+            # Fall back to original MultiLeRobotDataset (currently not implemented)
+            raise NotImplementedError("The heterogeneous MultiLeRobotDataset isn't supported for now.")
+            dataset = MultiLeRobotDataset(
+                cfg.dataset.repo_id,
+                # TODO(aliberts): add proper support for multi dataset
+                # delta_timestamps=delta_timestamps,
+                image_transforms=image_transforms,
+                video_backend=cfg.dataset.video_backend,
+            )
+            logging.info(
+                "Multiple datasets were provided. Applied the following index mapping to the provided datasets: "
+                f"{pformat(dataset.repo_id_to_index, indent=2)}"
+            )
 
     if cfg.dataset.use_imagenet_stats:
         for key in dataset.meta.camera_keys:
