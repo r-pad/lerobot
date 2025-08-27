@@ -995,7 +995,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
             ).parent
-            
+
             # Get input frames
             template = "frame_" + ("[0-9]" * 6) + ".png"
             input_list = sorted(
@@ -1068,6 +1068,160 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.video_backend = video_backend if video_backend is not None else get_safe_default_codec()
         return obj
 
+
+class MultiHomogeneousLeRobotDataset(torch.utils.data.Dataset):
+    """A dataset consisting of multiple homogeneous LeRobotDatasets concatenated together.
+
+    This class uses torch.utils.data.ConcatDataset under the hood to properly index into
+    a list of LeRobotDatasets. All datasets must have matching structure (same features),
+    and metadata is returned from the first dataset.
+    """
+
+    def __init__(
+        self,
+        datasets: list[LeRobotDataset],
+    ):
+        """
+        Args:
+            datasets: List of LeRobotDataset instances to concatenate.
+        """
+        super().__init__()
+
+        if not datasets:
+            raise ValueError("At least one dataset must be provided")
+
+        self._datasets = datasets
+        self._first_dataset = datasets[0]
+
+        # Validate that all datasets have matching structure
+        self._validate_homogeneous_datasets()
+
+        # Create the underlying ConcatDataset
+        self._concat_dataset = torch.utils.data.ConcatDataset(datasets)
+
+        # Build episode_data_index that transparently reflects from/to across all datasets
+        self._build_episode_data_index()
+
+    def _validate_homogeneous_datasets(self):
+        """Ensure all datasets have matching structure for output dictionaries."""
+        first_features = self._first_dataset.features
+        first_shapes = {k: v.get('shape') for k, v in first_features.items()}
+        first_dtypes = {k: v.get('dtype') for k, v in first_features.items()}
+
+        for i, dataset in enumerate(self._datasets[1:], 1):
+            # Check features match
+            if set(dataset.features.keys()) != set(first_features.keys()):
+                raise ValueError(
+                    f"Dataset {i} has different features than dataset 0. "
+                    f"Expected: {set(first_features.keys())}, "
+                    f"Got: {set(dataset.features.keys())}"
+                )
+
+            # Check shapes and dtypes match for each feature
+            for key in first_features.keys():
+                dataset_shape = dataset.features[key].get('shape')
+                dataset_dtype = dataset.features[key].get('dtype')
+
+                if dataset_shape != first_shapes[key]:
+                    raise ValueError(
+                        f"Dataset {i} has different shape for feature '{key}'. "
+                        f"Expected: {first_shapes[key]}, Got: {dataset_shape}"
+                    )
+
+                if dataset_dtype != first_dtypes[key]:
+                    raise ValueError(
+                        f"Dataset {i} has different dtype for feature '{key}'. "
+                        f"Expected: {first_dtypes[key]}, Got: {dataset_dtype}"
+                    )
+
+    def _build_episode_data_index(self):
+        """Build combined episode_data_index from all constituent datasets."""
+        combined_from = []
+        combined_to = []
+        frame_offset = 0
+
+        for dataset in self._datasets:
+            dataset_from = dataset.episode_data_index["from"]
+            dataset_to = dataset.episode_data_index["to"]
+
+            # Add frame offset to shift indices for this dataset
+            combined_from.extend((dataset_from + frame_offset).tolist())
+            combined_to.extend((dataset_to + frame_offset).tolist())
+
+            # Update frame offset for next dataset
+            frame_offset += dataset.num_frames
+
+        self._episode_data_index = {
+            "from": torch.LongTensor(combined_from),
+            "to": torch.LongTensor(combined_to),
+        }
+
+    # Properties that return metadata from the first dataset
+    @property
+    def repo_id(self) -> str:
+        """Repository ID from the first dataset."""
+        return self._first_dataset.repo_id
+
+    @property
+    def fps(self) -> int:
+        """Frames per second from the first dataset."""
+        return self._first_dataset.fps
+
+    @property
+    def features(self) -> dict[str, dict]:
+        """Features from the first dataset."""
+        return self._first_dataset.features
+
+    @property
+    def hf_features(self):
+        """HuggingFace features from the first dataset."""
+        return self._first_dataset.hf_features
+
+    @property
+    def meta(self):
+        """Metadata from the first dataset."""
+        return self._first_dataset.meta
+
+    @property
+    def stats(self):
+        """Stats aggregated from all datasets."""
+        return aggregate_stats([dataset.meta.stats for dataset in self._datasets])
+
+    @property
+    def episode_data_index(self):
+        """Episode data index that transparently reflects from/to across all datasets."""
+        return self._episode_data_index
+
+    # Properties that aggregate across all datasets
+    @property
+    def num_frames(self) -> int:
+        """Total number of frames across all datasets."""
+        return sum(dataset.num_frames for dataset in self._datasets)
+
+    @property
+    def num_episodes(self) -> int:
+        """Total number of episodes across all datasets."""
+        return sum(dataset.num_episodes for dataset in self._datasets)
+
+    # Delegate to ConcatDataset
+    def __len__(self) -> int:
+        return len(self._concat_dataset)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self._concat_dataset[idx]
+
+    def __repr__(self) -> str:
+        repo_ids = [dataset.repo_id for dataset in self._datasets]
+        feature_keys = list(self.features.keys())
+        return (
+            f"{self.__class__.__name__}({{\n"
+            f"    Repository IDs: {repo_ids},\n"
+            f"    Number of datasets: {len(self._datasets)},\n"
+            f"    Total episodes: {self.num_episodes},\n"
+            f"    Total frames: {self.num_frames},\n"
+            f"    Features: {feature_keys},\n"
+            f"}})\n"
+        )
 
 class MultiLeRobotDataset(torch.utils.data.Dataset):
     """A dataset consisting of multiple underlying `LeRobotDataset`s.

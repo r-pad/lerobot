@@ -30,9 +30,18 @@ def cfg_to_group(cfg: TrainPipelineConfig, return_list: bool = False) -> list[st
     """Return a group name for logging. Optionally returns group name as list."""
     lst = [
         f"policy:{cfg.policy.type}",
-        f"dataset:{cfg.dataset.repo_id}",
         f"seed:{cfg.seed}",
     ]
+
+    # Handle repo_id as either a string or a list
+    if isinstance(cfg.dataset.repo_id, list):
+        # If it's a list, don't add dataset tag at all
+        # This is a limitation when the repo names are too long lol,
+        # exceeds wandb's max tag length of 64 chars.
+        pass
+    else:
+        lst.append(f"dataset:{cfg.dataset.repo_id}")
+
     if cfg.env is not None:
         lst.append(f"env:{cfg.env.type}")
     return lst if return_list else "-".join(lst)
