@@ -136,9 +136,25 @@ def make_policy(
             )
         features = env_to_policy_features(env_cfg)
 
+    # Filter features by action type for output
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
-    cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
-    
+
+    # Get all non-action features
+    non_action_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
+
+    # Separate visual and non-visual features
+    visual_features = {key: ft for key, ft in non_action_features.items() if ft.type is FeatureType.VISUAL}
+    non_visual_features = {key: ft for key, ft in non_action_features.items() if ft.type is not FeatureType.VISUAL}
+
+    # Filter visual features by input_image_feature_keys if specified
+    if cfg.input_image_feature_keys is not None:
+        filtered_visual_features = {key: ft for key, ft in visual_features.items() if key in cfg.input_image_feature_keys}
+    else:
+        filtered_visual_features = visual_features
+
+    # Combine filtered visual features with all non-visual features
+    cfg.input_features = {**filtered_visual_features, **non_visual_features}
+
     kwargs["config"] = cfg
 
     if cfg.pretrained_path:
