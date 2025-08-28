@@ -47,6 +47,9 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
             normalization mode to apply.
         output_normalization_modes: Similar dictionary as `input_normalization_modes`, but to unnormalize to
             the original scale.
+        input_image_feature_keys: Optional list of visual feature keys to include in input_features. If None, all
+            visual features are included. If provided, only visual features in this list are included in input_features.
+            Non-visual features (state, proprioceptive) are always included.
     """
 
     n_obs_steps: int = 1
@@ -54,6 +57,7 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
 
     input_features: dict[str, PolicyFeature] = field(default_factory=dict)
     output_features: dict[str, PolicyFeature] = field(default_factory=dict)
+    input_image_feature_keys: list[str] | None = None
 
     device: str | None = None  # cuda | cpu | mp
     # `use_amp` determines whether to use Automatic Mixed Precision (AMP) for training and evaluation. With AMP,
