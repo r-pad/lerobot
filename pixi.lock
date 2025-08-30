@@ -385,6 +385,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/92/44/8634af40b0db528b5b37e901c0dc67321354880d251bf8965901d57693a5/PyOpenGL-3.1.9-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/05/e7/df2285f3d08fee213f2d041540fa4fc9ca6c2d44cf36d3a035bf2a8d2bcc/pyparsing-3.2.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/49/b3/d8482e8cacc8ea15a356efea13d22ce1c5914a9ee36622ba250523240bf2/pyquaternion-0.9.9-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/1f/ab/f2c066a11f632dfcd79b467e728623da9489ed524eb36ec0cc14b497661a/pyrealsense2-2.56.5.9235-cp311-cp311-manylinux1_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8d/59/b4572118e098ac8e46e399a1dd0f2d85403ce8bbaad9ec79373ed6badaf9/PySocks-1.7.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/29/16/c8a903f4c4dffe7a12843191437d7cd8e32751d5de349d45d3fe69544e87/pytest-8.4.1-py3-none-any.whl
@@ -3291,7 +3292,7 @@ packages:
 - pypi: .
   name: lerobot
   version: 0.1.0
-  sha256: 84a514f02da4635f34b1b45dc94b2ab026984f15bc0daad1a3fade866bc3567e
+  sha256: a950a42907dae467ae9fa7cfc9484f0b457dc73b50861dbe7a007769c37b6e34
   requires_dist:
   - cmake>=3.29.0.1
   - datasets>=2.19.0
@@ -3337,6 +3338,7 @@ packages:
   - future==0.18.2
   - easydict==1.9
   - libero @ git+https://github.com/sriramsk1999/LIBERO.git@15a91548acf90c6f502a99c21ca18792c5ae8256
+  - pyrealsense2>=2.55.1.6486
   - hf-doc-builder @ git+https://github.com/huggingface/doc-builder.git@main ; extra == 'docs'
   - watchdog>=6.0.0 ; extra == 'docs'
   - pre-commit>=3.7.0 ; extra == 'dev'
@@ -3346,7 +3348,6 @@ packages:
   - pynput>=1.7.7 ; extra == 'dynamixel'
   - feetech-servo-sdk>=1.0.0 ; extra == 'feetech'
   - pynput>=1.7.7 ; extra == 'feetech'
-  - pyrealsense2>=2.55.1.6486 ; sys_platform != 'darwin' and extra == 'intelrealsense'
   - transformers>=4.48.0 ; extra == 'pi0'
   - gym-pusht>=0.1.5 ; python_full_version < '4.0' and extra == 'pusht'
   - hello-robot-stretch-body>=0.7.27 ; python_full_version < '4.0' and sys_platform == 'linux' and extra == 'stretch'
@@ -5278,6 +5279,11 @@ packages:
   - numpy
   - mkdocs ; extra == 'dev'
   - nose ; extra == 'test'
+- pypi: https://files.pythonhosted.org/packages/1f/ab/f2c066a11f632dfcd79b467e728623da9489ed524eb36ec0cc14b497661a/pyrealsense2-2.56.5.9235-cp311-cp311-manylinux1_x86_64.whl
+  name: pyrealsense2
+  version: 2.56.5.9235
+  sha256: 76d384ea99f257b4697a82cb3581b05cc69fadfd0701021ad76da098a3e240f0
+  requires_python: '>=3.9'
 - pypi: https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl
   name: pyserial
   version: '3.5'
