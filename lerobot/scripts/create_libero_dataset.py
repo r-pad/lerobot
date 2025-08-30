@@ -18,6 +18,37 @@ def prep_ee_pose(demo):
     ee_poses = np.concatenate([ee_states, gripper_states], axis=1)
     return ee_poses
 
+def extract_obs_from_demo(demo, task_bddl_file, img_shape):
+    states = np.asarray(demo["states"])
+
+    env = setup_libero_env(task_bddl_file, img_shape)
+    env.seed(0)
+    env.reset()
+
+    # Extract camera calibration matrices for projection computations
+    agentview_ext_mat = get_camera_extrinsic_matrix(env.sim, "agentview")
+    agentview_int_mat = get_camera_intrinsic_matrix(env.sim, "agentview", img_shape[1], img_shape[0])
+
+    # The original demo doesn't contain depth so we walk through the demo
+    # again in the env to render depth.
+    all_obs = []
+    for state in states:
+        obs = env.regenerate_obs_from_state(state)
+        # Convert depth to metric, store in mm
+        depth = get_real_depth_map(env.sim, obs["agentview_depth"])
+        obs["agentview_depth"] = (depth * 1000).astype(np.uint16)
+        obs["gripper_pcd"] = get_4_points_from_gripper_pos_orient(
+            obs['robot0_eef_pos'],
+            obs['robot0_eef_quat'],
+            obs['robot0_gripper_qpos'][0],
+            np.linalg.inv(agentview_ext_mat),  # Transform to camera frame
+        )
+        all_obs.append(obs)
+
+    env.close()
+    return all_obs, agentview_int_mat
+
+
 def gen_libero_dataset(
     repo_id: str,
     features: dict,
@@ -50,47 +81,27 @@ def gen_libero_dataset(
     for h5_file in file_list:
         hf = h5py.File(h5_file)
         num_demos = len(hf['data'])
+        caption = get_libero_caption(h5_file)
+        task_bddl_file = CAPTION_TO_BDDL_MAPPING[caption]
 
         for idx in range(num_demos):
             demo = hf[f'data/demo_{idx}']
 
             actions = np.asarray(demo["actions"]).astype(np.float32)
-            num_steps = actions.shape[0]
-            caption = get_libero_caption(h5_file)
-
             ee_poses = prep_ee_pose(demo).astype(np.float32)
-            states = np.asarray(demo["states"])
+            num_steps = actions.shape[0]
             gripper_actions = actions[:, -1]
 
             # Get subgoal indices based on gripper state changes
             subgoal_indices = get_subgoal_indices_from_gripper_actions(gripper_actions)
 
-            task_bddl_file = CAPTION_TO_BDDL_MAPPING[caption]
-            env = setup_libero_env(task_bddl_file, img_shape)
-            env.seed(0)
-            env.reset()
-
-            # Extract camera calibration matrices for projection computations
-            agentview_ext_mat = get_camera_extrinsic_matrix(env.sim, "agentview")
-            agentview_int_mat = get_camera_intrinsic_matrix(env.sim, "agentview", img_shape[1], img_shape[0])
-
-            # The original demo doesn't contain depth so we walk through the demo
-            # again in the env to render depth.
-            all_obs = []
-            for state in states:
-                obs = env.regenerate_obs_from_state(state)
-                # Convert depth to metric, store in mm
-                depth = get_real_depth_map(env.sim, obs["agentview_depth"])
-                obs["agentview_depth"] = (depth * 1000).astype(np.uint16)
-                obs["gripper_pcd"] = get_4_points_from_gripper_pos_orient(
-                    obs['robot0_eef_pos'],
-                    obs['robot0_eef_quat'],
-                    obs['robot0_gripper_qpos'][0],
-                    np.linalg.inv(agentview_ext_mat),  # Transform to camera frame
-                )
-                all_obs.append(obs)
-
-            env.close()
+            # Some demos in LIBERO have mismatched states and can't be plugged into the simulator? :/
+            # try-catch and skip
+            try:
+                all_obs, agentview_int_mat = extract_obs_from_demo(demo, task_bddl_file, img_shape)
+            except Exception as e:
+                print(f"Could not process {h5_file}, demo {idx} due to exception {e}")
+                continue
 
             for frame_idx in range(num_steps):
                 frame_data = {}
