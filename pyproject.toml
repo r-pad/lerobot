@@ -77,7 +77,6 @@ dependencies = [
     "robot-descriptions>=1.17.0,<2",
     "setuptools",
     "wheel",
-    "pyk4a>=1.5.0,<2",
     "pybind11>=2.13.6,<3",
     "open3d>=0.19.0,<0.20",
     "trimesh>=4.6.13,<5",
@@ -90,6 +89,7 @@ dependencies = [
     "future==0.18.2",
     "easydict==1.9",
     "libero @ git+https://github.com/sriramsk1999/LIBERO.git@15a91548acf90c6f502a99c21ca18792c5ae8256",
+    "pyrealsense2>=2.55.1.6486",
 ]
 
 [project.optional-dependencies]
@@ -103,7 +103,6 @@ dora = [
 ]
 dynamixel = ["dynamixel-sdk>=3.7.31", "pynput>=1.7.7"]
 feetech = ["feetech-servo-sdk>=1.0.0", "pynput>=1.7.7"]
-intelrealsense = ["pyrealsense2>=2.55.1.6486 ; sys_platform != 'darwin'"]
 pi0 = ["transformers>=4.48.0"]
 pusht = ["gym-pusht>=0.1.5 ; python_version < '4.0'"]
 stretch = [
@@ -161,12 +160,14 @@ platforms = ["linux-64"]
 
 [tool.pixi.system-requirements]
 libc = { family = "glibc", version = "2.31" } # Need this for rerun
+cuda = "12.4"
 
 [tool.pixi.dependencies]
 python = "<=3.11"    # Pyrealsense needs this, wheels aren't released for Python 3.12
 pip = ">=25.1.1,<26"
 gcc = "11.*"
 gxx = "11.*"
+cuda-toolkit = "12.4.*"
 ffmpeg = ">=6,<8"
 
 [tool.pixi.pypi-dependencies]
@@ -195,5 +196,5 @@ pip install git+https://github.com/facebookresearch/pytorch3d.git@stable --no-bu
 """
 # Build K4A from scratch to support numpy 2
 install-k4a = """
-pip install --verbose --no-binary :all: pyk4a
+CPLUS_INCLUDE_PATH=/usr/include:$CPLUS_INCLUDE_PATH CC=/usr/bin/gcc CXX=/usr/bin/g++ pip install --no-build-isolation --verbose --no-binary :all: pyk4a==1.5.0
 """

@@ -340,6 +340,8 @@ def record(
         if events["stop_recording"]:
             break
 
+        input("Press Enter to continue...")
+
     log_say("Stop recording", cfg.play_sounds, blocking=True)
     stop_recording(robot, listener, cfg.display_data)
 
