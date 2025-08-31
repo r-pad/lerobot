@@ -16,6 +16,8 @@ import argparse
 import os
 import imageio.v3 as iio
 import pytorch3d.transforms as transforms
+import json
+from typing import Optional
 
 def extract_events_with_gripper_pos(
     joint_states, close_thresh=15, open_thresh=25
@@ -41,15 +43,23 @@ def prep_eef_pose(eef_pos, eef_rot, eef_artic):
     eef_pose = np.concatenate([rot_6d, eef_pos, eef_artic[:, None]], axis=1).astype(np.float32)
     return eef_pose
 
-def get_goal_image(cam_to_world, joint_state, K, width, height, four_points=True, goal_repr="heatmap"):
+def get_goal_image(K, width, height, four_points=True, goal_repr="heatmap", humanize=False, gripper_pcd=None, cam_to_world=None, joint_state=None):
     """
-    Render gripper pcd in camera frame, project the full point cloud or 4 handpicked points to a mask
+    Generate goal image from robot/human hand point cloud data
+
+    Robot: Render gripper pcd in camera frame, project the full point cloud or 4 handpicked points to a mask
+    Hand: Extracted with WiLoR and postprocessed to be in camera frame
     """
-    mesh = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
+    if not humanize:
+        mesh = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
+        gripper_idx = np.array([6, 197, 174]) # Handpicked idxs
+    else:
+        mesh = gripper_pcd
+        gripper_idx = np.array([343, 763, 60]) # Handpicked idxs
+
     assert goal_repr in ["mask", "heatmap"]
 
     if four_points:
-        gripper_idx = np.array([6, 197, 174])
         mesh_primary_points = mesh[gripper_idx]
         # Assumes 0/1 are tips to be averaged
         mesh_extra_point = (mesh_primary_points[0] + mesh_primary_points[1]) / 2
@@ -87,7 +97,8 @@ def upgrade_dataset(
     extrinsics_txt: str,
     discard_episodes: List[int],
     phantomize: bool,
-    phantom_extradata: str,
+    humanize: bool,
+    path_to_extradata: Optional[str],
 ):
     """
     Upgrade an existing LeRobot dataset with additional features.
@@ -101,7 +112,8 @@ def upgrade_dataset(
         extrinsics_txt: Path to extrinsics txt
         discard_episodes: Episodes to be discarded when upgrading
         phantomize: Source data is from human demos, upgrade to robot using output from Phantom
-        phantom_extradata: Auxiliary data after retargeting using Phantom
+        humanize: Source data is from human demos, use directly without phantom retargeting
+        path_to_extradata: Auxiliary data for phantomize / humanize
     """
     tolerance_s = 0.0004
     cam_to_world = np.loadtxt(extrinsics_txt)
@@ -146,7 +158,9 @@ def upgrade_dataset(
     # 4. Upgrade data episode by episode
     print(f"Upgrading {source_meta.info['total_episodes']} episodes...")
 
-    PHANTOM_VID_DIR = f"{phantom_extradata}/phantom_retarget"
+    PHANTOM_VID_DIR = f"{path_to_extradata}/phantom_retarget"
+    GEMINI_EVENTS_DIR = f"{path_to_extradata}/gemini_events"
+    GRIPPER_PCDS_DIR = f"{path_to_extradata}/wilor_hand_pose"
 
     for episode_idx in range(source_meta.info["total_episodes"]):
         print(f"Processing episode {episode_idx + 1}/{source_meta.info['total_episodes']}")
@@ -164,6 +178,14 @@ def upgrade_dataset(
                                                  phantom_proprio["eef_rot"],
                                                  phantom_proprio["eef_artic"]))
                 phantom_joint_state = torch.from_numpy(phantom_proprio["joint_state"]).float()
+        elif humanize:
+            # Load human data events and hand point clouds
+            events_file = f"{GEMINI_EVENTS_DIR}/episode_{episode_idx:06d}.mp4.json"
+            with open(events_file, 'r') as f:
+                episode_events = json.load(f)
+
+            gripper_pcds_file = f"{GRIPPER_PCDS_DIR}/episode_{episode_idx:06d}.mp4.npy"
+            episode_gripper_pcds = np.load(gripper_pcds_file).astype(np.float32)
 
         # Get episode bounds
         episode_start = source_dataset.episode_data_index["from"][episode_idx].item()
@@ -192,6 +214,9 @@ def upgrade_dataset(
                 action_eef = phantom_eef_pose[next_idx]
                 action = phantom_joint_state[next_idx]
             else:
+                # If robot data, we copy over the original robot states/actions
+                # If human data without retargeting, we don't have any robot states/actions
+                # and so we just copy over the original states/actions as a placeholder.
                 rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
                 eef_data = frame_data["observation.right_eef_pose"]
                 joint_state = frame_data["observation.state"]
@@ -211,7 +236,10 @@ def upgrade_dataset(
                 frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
 
             if "observation.points.gripper_pcds" in new_features:
-                frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state).astype(np.float32)
+                if humanize:
+                    frame_data["observation.points.gripper_pcds"] = episode_gripper_pcds[frame_idx]
+                else:
+                    frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state).astype(np.float32)
 
             if "next_event_idx" in new_features:
                 frame_data["next_event_idx"] = np.array([0], dtype=np.int32)
@@ -220,20 +248,30 @@ def upgrade_dataset(
             target_dataset.add_frame(frame_data)
 
         if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features or "next_event_idx" in new_features:
-            joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
-            # Empirically chosen
-            if phantomize: close_thresh, open_thresh = 45, 55
-            else: close_thresh, open_thresh = 25, 30
+            if humanize:
+                # Use events from JSON for human data
+                close_gripper_idx = episode_events['event_idxs'][0]
+                open_gripper_idx = episode_events['event_idxs'][1]
+            else:
+                joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
+                # Empirically chosen
+                if phantomize: close_thresh, open_thresh = 45, 55
+                else: close_thresh, open_thresh = 25, 30
 
-            close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
+                close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
 
             if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
-                goal1 = get_goal_image(cam_to_world, joint_states[close_gripper_idx], K, width, height, four_points=True)
+                if humanize:
+                    goal1 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[close_gripper_idx])
+                    goal2 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[open_gripper_idx])
+                else:
+                    goal1 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[close_gripper_idx])
+                    goal2 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[open_gripper_idx])
+
                 goal1_img = Image.fromarray(goal1).convert("RGB")
                 for i in range(close_gripper_idx):
                     goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
 
-                goal2 = get_goal_image(cam_to_world, joint_states[open_gripper_idx], K, width, height)
                 goal2_img = Image.fromarray(goal2).convert("RGB")
                 for i in range(close_gripper_idx, episode_length):
                     goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
@@ -257,8 +295,15 @@ def upgrade_dataset(
 # Example usage
 if __name__ == "__main__":
     """
+    Examples:
+
+    # Phantom retargeting mode
     python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718 --discard_episodes 3 10 11 13 21 --new_features goal_gripper_proj \
-    --phantomize --phantom_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718
+    --phantomize --path_to_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718
+    
+    # Direct human data mode
+    python upgrade_dataset.py --source_repo_id sriramsk/mug_on_platform_20250830_human --target_repo_id sriramsk/mug_on_platform_20250830_human_heatmapGoal --new_features gripper_pcds goal_gripper_proj next_event_idx \
+    --humanize --path_to_extradata /data/sriram/lerobot_extradata/sriramsk/mug_on_platform_20250830_human
     """
     parser = argparse.ArgumentParser(description="Upgrade dataset with new keys and optional intrinsics/extrinsics transformation.")
     parser.add_argument("--source_repo_id", type=str, default="sriramsk/human_mug_0718",
@@ -273,10 +318,12 @@ if __name__ == "__main__":
                         help="List of episode indices to discard")
     parser.add_argument("--new_features", type=str, nargs='*', default=[],
                         help="Names of new features")
+    parser.add_argument("--humanize", default=False, action="store_true",
+                        help="Use human data directly without phantom retargeting.")
     parser.add_argument("--phantomize", default=False, action="store_true",
-                        help="Prepare new data after retargeting using Phantom.")
-    parser.add_argument("--phantom_extradata", type=str,
-                        help="Path to auxiliary Phantom data")
+                        help="Prepare new data after retargeting human data with Phantom.")
+    parser.add_argument("--path_to_extradata", type=str,
+                        help="Path to auxiliary data for Phantom or for human data")
     parser.add_argument("--push_to_hub", default=False, action="store_true",
                         help="Push upgraded dataset to HF Hub.")
     parser.add_argument("--remove_features", type=str, nargs='*', default=[],
@@ -293,8 +340,8 @@ if __name__ == "__main__":
         }
     if "gripper_pcds" in args.new_features:
         new_features["observation.points.gripper_pcds"] = {
-            'dtype': 'float32',
-            'shape': (500, 3),
+            'dtype': 'pcd',
+            'shape': [-1, 3],
             'names': ['N', 'channels'],
             'info': 'Raw gripper point cloud at current position'
         }
@@ -309,8 +356,11 @@ if __name__ == "__main__":
     if "cam_wrist" in args.remove_features:
         remove_features.append("observation.images.cam_wrist")
 
-    assert (args.phantom_extradata is not None) if args.phantomize else True
-    phantom_extradata = args.phantom_extradata if args.phantomize else None
+    assert not (args.phantomize and args.humanize), "Cannot use both phantomize and humanize modes simultaneously"
+    if args.phantomize or args.humanize:
+        path_to_extradata = args.path_to_extradata
+    else:
+        path_to_extradata = None
 
     # Upgrade the dataset
     upgraded_dataset = upgrade_dataset(
@@ -322,7 +372,8 @@ if __name__ == "__main__":
         extrinsics_txt=args.extrinsics_txt,
         discard_episodes=args.discard_episodes,
         phantomize=args.phantomize,
-        phantom_extradata=args.phantom_extradata,
+        humanize=args.humanize,
+        path_to_extradata=path_to_extradata,
     )
 
     if args.push_to_hub: upgraded_dataset.push_to_hub(repo_id=args.target_repo_id)
