@@ -6,7 +6,7 @@ Usage examples:
 python lerobot/scripts/eval_suite.py \
     --policy.path=outputs/train/diffPo_libero_v3/checkpoints/last/pretrained_model \
     --env.type=libero \
-    --env.task_suite_name=libero_object \
+    --env.suite_name=libero_object \
     --task_ids=0 \
     --eval.batch_size=10
 """
@@ -42,7 +42,7 @@ from libero.libero import benchmark
 @dataclass
 class EvalSuiteConfig(EvalPipelineConfig):
     """Configuration for evaluating on a suite of LIBERO tasks."""
-    task_suite_name: str = "libero_object"  # Suite name or "all" for all suites
+    suite_name: str = "libero_object"  # Suite name or "all" for all suites (separate from env's task_suite_name)
     task_ids: Optional[str] = None  # Comma-separated task IDs, or None for all tasks in suite
     save_individual_results: bool = True  # Save results for each task separately
     aggregate_results: bool = True  # Compute and save aggregated results across tasks
@@ -83,10 +83,10 @@ def eval_suite(
     """Evaluate a policy on a suite of tasks."""
     
     # Determine which suites and tasks to evaluate
-    if cfg.task_suite_name == "all":
+    if cfg.suite_name == "all":
         suites_to_eval = get_available_suites()
     else:
-        suites_to_eval = [cfg.task_suite_name]
+        suites_to_eval = [cfg.suite_name]
 
     # Parse task IDs if provided
     task_ids_filter = None
@@ -298,8 +298,8 @@ def eval_suite_main(cfg: EvalSuiteConfig):
     available_suites = get_available_suites()
     logging.info(f"Available LIBERO suites: {available_suites}")
     
-    if cfg.task_suite_name != "all" and cfg.task_suite_name not in available_suites:
-        raise ValueError(f"Unknown task suite: {cfg.task_suite_name}. Available: {available_suites}")
+    if cfg.suite_name != "all" and cfg.suite_name not in available_suites:
+        raise ValueError(f"Unknown task suite: {cfg.suite_name}. Available: {available_suites}")
 
     # Run evaluation  
     policy_path = getattr(cfg.policy, 'pretrained_path', cfg.policy.path if hasattr(cfg.policy, 'path') else 'unknown')
