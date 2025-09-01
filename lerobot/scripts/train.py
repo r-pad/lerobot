@@ -122,7 +122,7 @@ def train(cfg: TrainPipelineConfig):
     # Check device is available
     device = get_safe_torch_device(cfg.policy.device, log=True)
     torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = False
 
     logging.info("Creating dataset")
     dataset = make_dataset(cfg)
