@@ -3292,7 +3292,7 @@ packages:
 - pypi: .
   name: lerobot
   version: 0.1.0
-  sha256: a950a42907dae467ae9fa7cfc9484f0b457dc73b50861dbe7a007769c37b6e34
+  sha256: a1e21847a47c067270cbde14e7469d9591d5e4ee425dde99c5c6f5002b4be2cc
   requires_dist:
   - cmake>=3.29.0.1
   - datasets>=2.19.0

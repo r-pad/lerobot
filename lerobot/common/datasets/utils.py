@@ -376,6 +376,12 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
             continue
         elif ft["dtype"] == "image":
             hf_features[key] = datasets.Image()
+        elif ft["dtype"] == "pcd":
+            # Point clouds are stored as 2D arrays with variable first dimension
+            # We use a sequence of 3D points (float32 coordinates)
+            hf_features[key] = datasets.Sequence(
+                feature=datasets.Sequence(feature=datasets.Value("float32"), length=3)
+            )
         elif ft["shape"] == (1,):
             hf_features[key] = datasets.Value(dtype=ft["dtype"])
         elif len(ft["shape"]) == 1:
@@ -749,6 +755,8 @@ def validate_feature_dtype_and_shape(name: str, feature: dict, value: np.ndarray
         return validate_feature_numpy_array(name, expected_dtype, expected_shape, value)
     elif expected_dtype in ["image", "video"]:
         return validate_feature_image_or_video(name, expected_shape, value)
+    elif expected_dtype == "pcd":
+        return validate_feature_point_cloud(name, expected_shape, value)
     elif expected_dtype == "string":
         return validate_feature_string(name, value)
     else:
@@ -786,6 +794,26 @@ def validate_feature_image_or_video(name: str, expected_shape: list[str], value:
         pass
     else:
         error_message += f"The feature '{name}' is expected to be of type 'PIL.Image' or 'np.ndarray' channel first or channel last, but type '{type(value)}' provided instead.\n"
+
+    return error_message
+
+
+def validate_feature_point_cloud(name: str, expected_shape: list[int], value: np.ndarray):
+    """
+    Validate point cloud data: (N, 3) where N can vary but must be > 0
+    expected_shape should be [None, 3] or [-1, 3] to indicate variable N
+    """
+    error_message = ""
+    if isinstance(value, np.ndarray):
+        actual_shape = value.shape
+        if len(actual_shape) != 2:
+            error_message += f"The point cloud feature '{name}' must be 2D (N, 3), but got shape '{actual_shape}'.\n"
+        elif actual_shape[1] != 3:
+            error_message += f"The point cloud feature '{name}' must have 3 coordinates per point, but got '{actual_shape[1]}'.\n"
+        elif actual_shape[0] == 0:
+            error_message += f"The point cloud feature '{name}' must have at least 1 point, but got 0 points.\n"
+    else:
+        error_message += f"The point cloud feature '{name}' must be a numpy array, but got '{type(value)}'.\n"
 
     return error_message
 
