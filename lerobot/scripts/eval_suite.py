@@ -137,7 +137,7 @@ def eval_suite(
                 env,
                 policy,
                 cfg.eval.n_episodes,
-                max_episodes_rendered=3,  # Render fewer videos for suite eval
+                max_episodes_rendered=50,
                 videos_dir=output_dir / "videos" / f"{task_suite_name}_{task_id}",
                 start_seed=cfg.seed,
             )
@@ -257,6 +257,9 @@ def eval_suite_main(cfg: EvalSuiteConfig):
             elif key == 'observation.images.agentview_depth':
                 features['agentview_depth'] = policy_feature
                 features_map['agentview_depth'] = key
+            elif key == 'observation.images.agentview_goal_gripper_proj':
+                features['agentview_goal_gripper_proj'] = policy_feature
+                features_map['agentview_goal_gripper_proj'] = key
             elif key == 'observation.state':
                 features['agent_pos'] = policy_feature
                 features_map['agent_pos'] = key
