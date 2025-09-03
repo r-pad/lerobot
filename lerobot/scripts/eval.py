@@ -87,6 +87,7 @@ def rollout(
     seeds: list[int] | None = None,
     return_observations: bool = False,
     render_callback: Callable[[gym.vector.VectorEnv], None] | None = None,
+    goal_gripper_proj_callback: Callable[[dict], None] | None = None,
 ) -> dict:
     """Run a batched policy rollout once through a batch of environments.
 
@@ -185,6 +186,10 @@ def rollout(
                 goal_gripper_proj = ((goal_gripper_proj / 255.).float().to(device)).permute(0,3,1,2)
                 policy.latest_gripper_proj = goal_gripper_proj
             observation["observation.images.agentview_goal_gripper_proj"] = policy.latest_gripper_proj
+
+        # Save goal gripper proj frames if callback is provided
+        if goal_gripper_proj_callback is not None and "observation.images.agentview_goal_gripper_proj" in observation:
+            goal_gripper_proj_callback(observation)
 
         with torch.inference_mode():
             action, action_eef = policy.select_action(observation)
@@ -302,8 +307,24 @@ def eval_policy(
             # Here we must render all frames and discard any we don't need.
             ep_frames.append(np.stack(env.call("render")[:n_to_render_now]))
 
+    # Callback for saving goal gripper proj frames
+    def save_goal_gripper_proj_frame(observation: dict):
+        # noqa: B023
+        if n_episodes_rendered >= max_episodes_rendered:
+            return
+        n_to_render_now = min(max_episodes_rendered - n_episodes_rendered, env.num_envs)
+        if "observation.images.agentview_goal_gripper_proj" in observation:
+            # Convert from tensor to numpy and from (B, C, H, W) to (B, H, W, C) for video saving
+            goal_proj_tensor = observation["observation.images.agentview_goal_gripper_proj"][:n_to_render_now]
+            # Convert to numpy and rescale from [0, 1] to [0, 255]
+            goal_proj_frames = (goal_proj_tensor.detach().cpu().numpy() * 255).astype(np.uint8)
+            # Transpose from (B, C, H, W) to (B, H, W, C)
+            goal_proj_frames = goal_proj_frames.transpose(0, 2, 3, 1)
+            ep_goal_proj_frames.append(goal_proj_frames)  # noqa: B023
+
     if max_episodes_rendered > 0:
         video_paths: list[str] = []
+        goal_proj_video_paths: list[str] = []
 
     if return_episode_data:
         episode_data: dict | None = None
@@ -315,6 +336,7 @@ def eval_policy(
         # step.
         if max_episodes_rendered > 0:
             ep_frames: list[np.ndarray] = []
+            ep_goal_proj_frames: list[np.ndarray] = []
 
         if start_seed is None:
             seeds = None
@@ -328,6 +350,7 @@ def eval_policy(
             seeds=list(seeds) if seeds else None,
             return_observations=return_episode_data,
             render_callback=render_frame if max_episodes_rendered > 0 else None,
+            goal_gripper_proj_callback=save_goal_gripper_proj_frame if max_episodes_rendered > 0 else None,
         )
 
         # Figure out where in each rollout sequence the first done condition was encountered (results after
@@ -372,13 +395,20 @@ def eval_policy(
         # Maybe render video for visualization.
         if max_episodes_rendered > 0 and len(ep_frames) > 0:
             batch_stacked_frames = np.stack(ep_frames, axis=1)  # (b, t, *)
-            for stacked_frames, done_index in zip(
+            # Also stack goal projection frames if available
+            batch_goal_proj_frames = None
+            if len(ep_goal_proj_frames) > 0:
+                batch_goal_proj_frames = np.stack(ep_goal_proj_frames, axis=1)  # (b, t, h, w, c)
+            
+            for ep_idx, (stacked_frames, done_index) in enumerate(zip(
                 batch_stacked_frames, done_indices.flatten().tolist(), strict=False
-            ):
+            )):
                 if n_episodes_rendered >= max_episodes_rendered:
                     break
 
                 videos_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Save regular video
                 video_path = videos_dir / f"eval_episode_{n_episodes_rendered}.mp4"
                 video_paths.append(str(video_path))
                 thread = threading.Thread(
@@ -391,6 +421,22 @@ def eval_policy(
                 )
                 thread.start()
                 threads.append(thread)
+                
+                # Save goal projection video if available
+                if batch_goal_proj_frames is not None and ep_idx < len(batch_goal_proj_frames):
+                    goal_proj_video_path = videos_dir / f"eval_episode_{n_episodes_rendered}_goal_gripper_proj.mp4"
+                    goal_proj_video_paths.append(str(goal_proj_video_path))
+                    goal_proj_thread = threading.Thread(
+                        target=write_video,
+                        args=(
+                            str(goal_proj_video_path),
+                            batch_goal_proj_frames[ep_idx][: done_index + 1],  # + 1 to capture the last observation
+                            env.unwrapped.metadata["render_fps"],
+                        ),
+                    )
+                    goal_proj_thread.start()
+                    threads.append(goal_proj_thread)
+                
                 n_episodes_rendered += 1
 
         progbar.set_postfix(
@@ -435,6 +481,8 @@ def eval_policy(
 
     if max_episodes_rendered > 0:
         info["video_paths"] = video_paths
+        if goal_proj_video_paths:
+            info["goal_gripper_proj_video_paths"] = goal_proj_video_paths
 
     return info
 
@@ -492,7 +540,7 @@ def eval_main(cfg: EvalPipelineConfig):
     device = get_safe_torch_device(cfg.policy.device, log=True)
 
     torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_tf32 = False
     set_seed(cfg.seed)
 
     logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
