@@ -18,6 +18,27 @@ import imageio.v3 as iio
 import pytorch3d.transforms as transforms
 import json
 from typing import Optional
+import av
+
+def read_depth_video(video_path):
+    # Open video with PyAV directly
+    container = av.open(video_path)
+    video_stream = container.streams.video[0]
+
+    loaded_frames = []
+    # Decode frames
+    for frame in container.decode(video_stream):
+        # Convert frame to numpy array preserving bit depth
+        if frame.format.name in ["gray16le", "gray16be"]:
+            # 16-bit grayscale
+            frame_array = frame.to_ndarray(format="gray16le") / 1000.0
+        else:
+            raise NotImplementedError("Not supporting other formats right now.")
+        loaded_frames.append(frame_array)
+    container.close()
+
+    frames = np.stack([frame for frame in loaded_frames])
+    return frames
 
 def extract_events_with_gripper_pos(
     joint_states, close_thresh=15, open_thresh=25
@@ -173,6 +194,7 @@ def upgrade_dataset(
                 continue
             else:
                 phantom_vid = torch.from_numpy(iio.imread(f"{vid_dir}/episode_{episode_idx:06d}.mp4"))
+                phantom_depth_vid = torch.from_numpy(read_depth_video(f"{vid_dir}/depth_episode_{episode_idx:06d}.mkv"))
                 phantom_proprio = np.load(f"{vid_dir}/episode_{episode_idx:06d}.mp4_eef.npz")
                 phantom_eef_pose = torch.from_numpy(prep_eef_pose(phantom_proprio["eef_pos"],
                                                  phantom_proprio["eef_rot"],
@@ -208,6 +230,7 @@ def upgrade_dataset(
             frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
             if phantomize:
                 rgb_data = phantom_vid[frame_idx]
+                depth_data = (phantom_depth_vid[frame_idx][:, :, None] * 1000).to(torch.uint16)
                 eef_data = phantom_eef_pose[frame_idx]
                 joint_state = phantom_joint_state[frame_idx]
                 next_idx = (frame_idx + 1) if (frame_idx + 1) < episode_length else frame_idx
@@ -218,14 +241,14 @@ def upgrade_dataset(
                 # If human data without retargeting, we don't have any robot states/actions
                 # and so we just copy over the original states/actions as a placeholder.
                 rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
+                depth_data = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
                 eef_data = frame_data["observation.right_eef_pose"]
                 joint_state = frame_data["observation.state"]
                 action_eef = frame_data["action.right_eef_pose"]
                 action = frame_data["action"]
 
             frame_data["observation.images.cam_azure_kinect.color"] = rgb_data
-            # TODO: Phantom should process depth as well
-            frame_data["observation.images.cam_azure_kinect.transformed_depth"] = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
+            frame_data["observation.images.cam_azure_kinect.transformed_depth"] = depth_data
             frame_data["observation.right_eef_pose"] = eef_data
             frame_data["observation.state"] = joint_state
             frame_data["action.right_eef_pose"] = action_eef
@@ -267,14 +290,19 @@ def upgrade_dataset(
                 else:
                     goal1 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[close_gripper_idx])
                     goal2 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[open_gripper_idx])
+                goal3 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[-1])
 
                 goal1_img = Image.fromarray(goal1).convert("RGB")
                 for i in range(close_gripper_idx):
                     goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
 
                 goal2_img = Image.fromarray(goal2).convert("RGB")
-                for i in range(close_gripper_idx, episode_length):
+                for i in range(close_gripper_idx, open_gripper_idx):
                     goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+
+                goal3_img = Image.fromarray(goal3).convert("RGB")
+                for i in range(open_gripper_idx, episode_length):
+                    goal3_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
 
             if "next_event_idx" in new_features:
                 for i in range(episode_length):
