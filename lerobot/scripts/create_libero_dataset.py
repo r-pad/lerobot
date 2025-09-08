@@ -208,8 +208,8 @@ if __name__ == "__main__":
         }
     if "gripper_pcds" in args.new_features:
         new_features["observation.points.gripper_pcds"] = {
-            'dtype': 'float32',
-            'shape': (4, 3),
+            'dtype': 'pcd',
+            'shape': (-1, 3),
             'names': ['N', 'channels'],
             'info': 'Raw gripper point cloud at current position'
         }

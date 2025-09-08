@@ -46,6 +46,10 @@ def create_stats_buffers(
 
         shape = tuple(ft.shape)
 
+        # Handle variable-length pcd
+        if shape == (-1, 3):
+            shape = (1,3)
+
         if ft.type is FeatureType.VISUAL:
             # sanity checks
             assert len(shape) == 3, f"number of dimensions of {key} != 3 ({shape=}"

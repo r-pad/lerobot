@@ -95,9 +95,9 @@ def compute_episode_stats(episode_data: dict[str, list[str] | np.ndarray], featu
             axes_to_reduce = (0, 2, 3)  # keep channel dim
             keepdims = True
         elif features[key]["dtype"] == "pcd":
-            ep_ft_array = data  # data is already a np.ndarray (N, 3)
-            axes_to_reduce = (0, 1)  # compute stats over the first axis (across points)
-            keepdims = True  # keep dims to preserve coordinate structure (3,)
+            ep_ft_array = data  # data is already a np.ndarray (B, N, 3)
+            axes_to_reduce = (0, 1)  # compute stats over the first two axes (across points)
+            keepdims = True  # keep dims to preserve coordinate structure (1, 1, 3,)
         else:
             ep_ft_array = data  # data is already a np.ndarray
             axes_to_reduce = 0  # compute stats over the first axis
@@ -134,8 +134,8 @@ def _assert_type_and_shape(stats_list: list[dict[str, dict]]):
                     elif v.shape != (3, 1, 1):
                         raise ValueError(f"Shape of '{k}' must be (3,1,1), but is {v.shape} instead.")
                 elif "pcd" in fkey and k != "count":
-                    if v.shape != (3,):
-                        raise ValueError(f"Shape of '{k}' for pcd feature must be (3,), but is {v.shape} instead.")
+                    if v.shape != (1, 1, 3,):
+                        raise ValueError(f"Shape of '{k}' for pcd feature must be (1, 1, 3,), but is {v.shape} instead.")
 
 
 def aggregate_feature_stats(stats_ft_list: list[dict[str, dict]]) -> dict[str, dict[str, np.ndarray]]:
