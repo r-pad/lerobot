@@ -180,7 +180,7 @@ def upgrade_dataset(
     print(f"Upgrading {source_meta.info['total_episodes']} episodes...")
 
     PHANTOM_VID_DIR = f"{path_to_extradata}/phantom_retarget"
-    GEMINI_EVENTS_DIR = f"{path_to_extradata}/gemini_events"
+    EVENTS_DIR = f"{path_to_extradata}/events"
     GRIPPER_PCDS_DIR = f"{path_to_extradata}/wilor_hand_pose"
 
     for episode_idx in range(source_meta.info["total_episodes"]):
@@ -202,7 +202,7 @@ def upgrade_dataset(
                 phantom_joint_state = torch.from_numpy(phantom_proprio["joint_state"]).float()
         elif humanize:
             # Load human data events and hand point clouds
-            events_file = f"{GEMINI_EVENTS_DIR}/episode_{episode_idx:06d}.mp4.json"
+            events_file = f"{EVENTS_DIR}/episode_{episode_idx:06d}.mp4.json"
             with open(events_file, 'r') as f:
                 episode_events = json.load(f)
 
@@ -287,10 +287,11 @@ def upgrade_dataset(
                 if humanize:
                     goal1 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[close_gripper_idx])
                     goal2 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[open_gripper_idx])
+                    goal3 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[-1])
                 else:
                     goal1 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[close_gripper_idx])
                     goal2 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[open_gripper_idx])
-                goal3 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[-1])
+                    goal3 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[-1])
 
                 goal1_img = Image.fromarray(goal1).convert("RGB")
                 for i in range(close_gripper_idx):

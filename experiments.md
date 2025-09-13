@@ -124,6 +124,14 @@ Low-level trained on [plate on platform, plate in bin, mug in bin]
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Grasp mug and place it on the platform." --control.repo_id=sriramsk/eval_hl_ABCD_ll_ACD_mug_on_platform_goal4_withRgbHuman --control.num_episodes=20 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffpo_Plate_platformBin_mugBin_subsmpld_noWrist_heatmap_goal4-high-level-withRgb_human/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
 ```
 
+High-level trained on [plate on platform, plate in bin, mug in bin, mug on platform (and HUMAN phantomized)] with RGB
+Low-level trained on [plate on platform, plate in bin, mug in bin]
+
+```py
+# Mug on Platform eval
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Grasp mug and place it on the platform." --control.repo_id=sriramsk/eval_hl_ABCD_ll_ACD_mug_on_platform_goal4_withRgbPhantom --control.num_episodes=20 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffpo_Plate_platformBin_mugBin_subsmpld_noWrist_heatmap_goal4-high-level-withRgb_phantom/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
+```
 
 ### Specialist policy with wrist cam
 
