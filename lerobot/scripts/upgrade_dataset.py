@@ -110,6 +110,169 @@ def get_goal_image(K, width, height, four_points=True, goal_repr="heatmap", huma
         goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
     return goal_image
 
+def _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata):
+    """Load phantom retargeted data or human demo extras for an episode."""
+    episode_extras = {}
+
+    if phantomize:
+        PHANTOM_VID_DIR = f"{path_to_extradata}/phantom_retarget"
+        vid_dir = f"{PHANTOM_VID_DIR}/episode_{episode_idx:06d}.mp4/"
+        assert os.path.exists(vid_dir)
+
+        phantom_vid = torch.from_numpy(iio.imread(f"{vid_dir}/episode_{episode_idx:06d}.mp4"))
+        phantom_depth_vid = torch.from_numpy(read_depth_video(f"{vid_dir}/depth_episode_{episode_idx:06d}.mkv"))
+        phantom_proprio = np.load(f"{vid_dir}/episode_{episode_idx:06d}.mp4_eef.npz")
+        phantom_eef_pose = torch.from_numpy(prep_eef_pose(phantom_proprio["eef_pos"],
+                                         phantom_proprio["eef_rot"],
+                                         phantom_proprio["eef_artic"]))
+        phantom_joint_state = torch.from_numpy(phantom_proprio["joint_state"]).float()
+
+        episode_extras.update({
+            'phantom_vid': phantom_vid,
+            'phantom_depth_vid': phantom_depth_vid,
+            'phantom_eef_pose': phantom_eef_pose,
+            'phantom_joint_state': phantom_joint_state
+        })
+
+    elif humanize:
+        EVENTS_DIR = f"{path_to_extradata}/events"
+        GRIPPER_PCDS_DIR = f"{path_to_extradata}/wilor_hand_pose"
+
+        events_file = f"{EVENTS_DIR}/episode_{episode_idx:06d}.mp4.json"
+        with open(events_file, 'r') as f:
+            episode_events = json.load(f)
+
+        gripper_pcds_file = f"{GRIPPER_PCDS_DIR}/episode_{episode_idx:06d}.mp4.npy"
+        episode_gripper_pcds = np.load(gripper_pcds_file).astype(np.float32)
+
+        episode_extras.update({
+            'episode_events': episode_events,
+            'episode_gripper_pcds': episode_gripper_pcds
+        })
+
+    return episode_extras
+
+
+def _process_frame_data(original_frame, source_dataset, expanded_features, source_meta,
+                       phantomize, humanize, episode_extras, frame_idx, episode_length,
+                       new_features, cam_to_world):
+    """Process a single frame's data with additional features."""
+    frame_data = {}
+
+    # Define fields that LeRobot manages automatically
+    AUTO_FIELDS = {"episode_index", "frame_index", "index", "task_index", "timestamp"}
+
+    # Copy existing data
+    for key in source_dataset.features.keys():
+        if key not in AUTO_FIELDS and key in expanded_features:
+            frame_data[key] = original_frame[key]
+
+    frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
+
+    if phantomize:
+        rgb_data = episode_extras['phantom_vid'][frame_idx]
+        depth_data = (episode_extras['phantom_depth_vid'][frame_idx][:, :, None] * 1000).to(torch.uint16)
+        eef_data = episode_extras['phantom_eef_pose'][frame_idx]
+        joint_state = episode_extras['phantom_joint_state'][frame_idx]
+        next_idx = (frame_idx + 1) if (frame_idx + 1) < episode_length else frame_idx
+        action_eef = episode_extras['phantom_eef_pose'][next_idx]
+        action = episode_extras['phantom_joint_state'][next_idx]
+    else:
+        # If robot data, we copy over the original robot states/actions
+        # If human data without retargeting, we don't have any robot states/actions
+        # and so we just copy over the original states/actions as a placeholder.
+        rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
+        depth_data = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
+        eef_data = frame_data["observation.right_eef_pose"]
+        joint_state = frame_data["observation.state"]
+        action_eef = frame_data["action.right_eef_pose"]
+        action = frame_data["action"]
+
+    frame_data["observation.images.cam_azure_kinect.color"] = rgb_data
+    frame_data["observation.images.cam_azure_kinect.transformed_depth"] = depth_data
+    frame_data["observation.right_eef_pose"] = eef_data
+    frame_data["observation.state"] = joint_state
+    frame_data["action.right_eef_pose"] = action_eef
+    frame_data["action"] = action
+
+    if "observation.points.gripper_pcds" in new_features:
+        if humanize:
+            frame_data["observation.points.gripper_pcds"] = episode_extras['episode_gripper_pcds'][frame_idx]
+        else:
+            frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state).astype(np.float32)
+
+    # Dummy values, replaced at the end of the episode
+    if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
+        frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
+    if "next_event_idx" in new_features:
+        frame_data["next_event_idx"] = np.array([0], dtype=np.int32)
+    if "subgoal" in new_features:
+        frame_data["subgoal"] = ""
+
+    return frame_data
+
+
+def _process_episode_goals(target_dataset, episode_length, new_features, humanize,
+                          episode_extras, phantomize, K, width, height, cam_to_world):
+    """Process goal projections, event indices, and subgoals for an episode."""
+    if humanize:
+        # Use events from JSON for human data
+        close_gripper_idx = episode_extras['episode_events']['event_idxs'][0]
+        open_gripper_idx = episode_extras['episode_events']['event_idxs'][1]
+        episode_gripper_pcds = episode_extras['episode_gripper_pcds']
+    else:
+        joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
+        # Empirically chosen
+        if phantomize:
+            close_thresh, open_thresh = 45, 55
+        else:
+            close_thresh, open_thresh = 25, 30
+
+        close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(
+            joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
+
+    if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
+        if humanize:
+            goal1 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[close_gripper_idx])
+            goal2 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[open_gripper_idx])
+            goal3 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[-1])
+        else:
+            goal1 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[close_gripper_idx])
+            goal2 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[open_gripper_idx])
+            goal3 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[-1])
+
+        goal1_img = Image.fromarray(goal1).convert("RGB")
+        for i in range(close_gripper_idx):
+            goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+
+        goal2_img = Image.fromarray(goal2).convert("RGB")
+        for i in range(close_gripper_idx, open_gripper_idx):
+            goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+
+        goal3_img = Image.fromarray(goal3).convert("RGB")
+        for i in range(open_gripper_idx, episode_length):
+            goal3_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+
+    if "next_event_idx" in new_features:
+        for i in range(episode_length):
+            if i < close_gripper_idx:
+                target_dataset.episode_buffer["next_event_idx"][i] = close_gripper_idx
+            elif i < open_gripper_idx:
+                target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
+            else:
+                target_dataset.episode_buffer["next_event_idx"][i] = episode_length - 1
+
+    if "subgoal" in new_features:
+        task = target_dataset.episode_buffer['task'][0]
+        for i in range(episode_length):
+            if i < close_gripper_idx:
+                target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][0]
+            elif i < open_gripper_idx:
+                target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][1]
+            else:
+                target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][2]
+
+
 def upgrade_dataset(
     source_repo_id: str,
     target_repo_id: str,
@@ -174,41 +337,16 @@ def upgrade_dataset(
         features=expanded_features,
     )
 
-    # Define fields that LeRobot manages automatically
-    AUTO_FIELDS = {"episode_index", "frame_index", "index", "task_index", "timestamp"}
-
     # 4. Upgrade data episode by episode
     print(f"Upgrading {source_meta.info['total_episodes']} episodes...")
-
-    PHANTOM_VID_DIR = f"{path_to_extradata}/phantom_retarget"
-    EVENTS_DIR = f"{path_to_extradata}/events"
-    GRIPPER_PCDS_DIR = f"{path_to_extradata}/wilor_hand_pose"
 
     for episode_idx in range(source_meta.info["total_episodes"]):
         print(f"Processing episode {episode_idx + 1}/{source_meta.info['total_episodes']}")
         if episode_idx in discard_episodes:
             continue
 
-        if phantomize:
-            vid_dir = f"{PHANTOM_VID_DIR}/episode_{episode_idx:06d}.mp4/"
-            if not os.path.exists(vid_dir):
-                continue
-            else:
-                phantom_vid = torch.from_numpy(iio.imread(f"{vid_dir}/episode_{episode_idx:06d}.mp4"))
-                phantom_depth_vid = torch.from_numpy(read_depth_video(f"{vid_dir}/depth_episode_{episode_idx:06d}.mkv"))
-                phantom_proprio = np.load(f"{vid_dir}/episode_{episode_idx:06d}.mp4_eef.npz")
-                phantom_eef_pose = torch.from_numpy(prep_eef_pose(phantom_proprio["eef_pos"],
-                                                 phantom_proprio["eef_rot"],
-                                                 phantom_proprio["eef_artic"]))
-                phantom_joint_state = torch.from_numpy(phantom_proprio["joint_state"]).float()
-        elif humanize:
-            # Load human data events and hand point clouds
-            events_file = f"{EVENTS_DIR}/episode_{episode_idx:06d}.mp4.json"
-            with open(events_file, 'r') as f:
-                episode_events = json.load(f)
-
-            gripper_pcds_file = f"{GRIPPER_PCDS_DIR}/episode_{episode_idx:06d}.mp4.npy"
-            episode_gripper_pcds = np.load(gripper_pcds_file).astype(np.float32)
+        # Load any extra data needed for this episode
+        episode_extras = _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata)
 
         # Get episode bounds
         episode_start = source_dataset.episode_data_index["from"][episode_idx].item()
@@ -217,115 +355,21 @@ def upgrade_dataset(
 
         # Process each frame in the episode
         for frame_idx in tqdm(range(episode_length)):
-            # Get original frame data
             original_frame = source_dataset[episode_start + frame_idx]
 
-            # Create new frame data with additional keys
-            frame_data = {}
+            frame_data = _process_frame_data(
+                original_frame, source_dataset, expanded_features, source_meta,
+                phantomize, humanize, episode_extras, frame_idx, episode_length,
+                new_features, cam_to_world
+            )
 
-            # Copy existing data
-            for key in source_dataset.features.keys():
-                if key not in AUTO_FIELDS and key in expanded_features:
-                    frame_data[key] = original_frame[key]
-
-            frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
-            if phantomize:
-                rgb_data = phantom_vid[frame_idx]
-                depth_data = (phantom_depth_vid[frame_idx][:, :, None] * 1000).to(torch.uint16)
-                eef_data = phantom_eef_pose[frame_idx]
-                joint_state = phantom_joint_state[frame_idx]
-                next_idx = (frame_idx + 1) if (frame_idx + 1) < episode_length else frame_idx
-                action_eef = phantom_eef_pose[next_idx]
-                action = phantom_joint_state[next_idx]
-            else:
-                # If robot data, we copy over the original robot states/actions
-                # If human data without retargeting, we don't have any robot states/actions
-                # and so we just copy over the original states/actions as a placeholder.
-                rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
-                depth_data = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
-                eef_data = frame_data["observation.right_eef_pose"]
-                joint_state = frame_data["observation.state"]
-                action_eef = frame_data["action.right_eef_pose"]
-                action = frame_data["action"]
-
-            frame_data["observation.images.cam_azure_kinect.color"] = rgb_data
-            frame_data["observation.images.cam_azure_kinect.transformed_depth"] = depth_data
-            frame_data["observation.right_eef_pose"] = eef_data
-            frame_data["observation.state"] = joint_state
-            frame_data["action.right_eef_pose"] = action_eef
-            frame_data["action"] = action
-
-            if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
-                # Dummy value
-                frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
-
-            if "observation.points.gripper_pcds" in new_features:
-                if humanize:
-                    frame_data["observation.points.gripper_pcds"] = episode_gripper_pcds[frame_idx]
-                else:
-                    frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state).astype(np.float32)
-
-            if "next_event_idx" in new_features:
-                frame_data["next_event_idx"] = np.array([0], dtype=np.int32)
-            if "subgoal" in new_features:
-                frame_data["subgoal"] = ""
-
-            # Add frame to new dataset
             target_dataset.add_frame(frame_data)
 
-        if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features or "next_event_idx" in new_features:
-            if humanize:
-                # Use events from JSON for human data
-                close_gripper_idx = episode_events['event_idxs'][0]
-                open_gripper_idx = episode_events['event_idxs'][1]
-            else:
-                joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
-                # Empirically chosen
-                if phantomize: close_thresh, open_thresh = 45, 55
-                else: close_thresh, open_thresh = 25, 30
-
-                close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
-
-            if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
-                if humanize:
-                    goal1 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[close_gripper_idx])
-                    goal2 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[open_gripper_idx])
-                    goal3 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[-1])
-                else:
-                    goal1 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[close_gripper_idx])
-                    goal2 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[open_gripper_idx])
-                    goal3 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[-1])
-
-                goal1_img = Image.fromarray(goal1).convert("RGB")
-                for i in range(close_gripper_idx):
-                    goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
-
-                goal2_img = Image.fromarray(goal2).convert("RGB")
-                for i in range(close_gripper_idx, open_gripper_idx):
-                    goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
-
-                goal3_img = Image.fromarray(goal3).convert("RGB")
-                for i in range(open_gripper_idx, episode_length):
-                    goal3_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
-
-            if "next_event_idx" in new_features:
-                for i in range(episode_length):
-                    if i < close_gripper_idx:
-                        target_dataset.episode_buffer["next_event_idx"][i] = close_gripper_idx
-                    elif i < open_gripper_idx:
-                        target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
-                    else:
-                        target_dataset.episode_buffer["next_event_idx"][i] = episode_length - 1
-
-            if "subgoal" in new_features:
-                task = target_dataset.episode_buffer['task'][0]
-                for i in range(episode_length):
-                    if i < close_gripper_idx:
-                        target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][0]
-                    elif i < open_gripper_idx:
-                        target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][1]
-                    else:
-                        target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][2]
+        # Process episode-level goals and events
+        _process_episode_goals(
+            target_dataset, episode_length, new_features, humanize,
+            episode_extras, phantomize, K, width, height, cam_to_world
+        )
 
         # Save episode
         target_dataset.save_episode()
@@ -344,7 +388,7 @@ if __name__ == "__main__":
     --phantomize --path_to_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718
     
     # Direct human data mode
-    python upgrade_dataset.py --source_repo_id sriramsk/mug_on_platform_20250830_human --target_repo_id sriramsk/mug_on_platform_20250830_human_heatmapGoal --new_features gripper_pcds goal_gripper_proj next_event_idx \
+    python upgrade_dataset.py --source_repo_id sriramsk/mug_on_platform_20250830_human --target_repo_id sriramsk/mug_on_platform_20250830_human_heatmapGoal --new_features gripper_pcds goal_gripper_proj next_event_idx subgoal \
     --humanize --path_to_extradata /data/sriram/lerobot_extradata/sriramsk/mug_on_platform_20250830_human
     """
     parser = argparse.ArgumentParser(description="Upgrade dataset with new keys and optional intrinsics/extrinsics transformation.")

@@ -42,6 +42,7 @@ class HighLevelWrapper:
                  in_channels=3,
                  use_gripper_pcd=False,
                  use_text_embedding=False,
+                 use_dual_head=False,
                  use_rgb=False,
                  use_gemini=False,
                  is_gmm=False,
@@ -55,6 +56,7 @@ class HighLevelWrapper:
         self.num_points = num_points
         self.is_gmm = is_gmm
         self.use_text_embedding = use_text_embedding
+        self.use_dual_head = use_dual_head
         self.use_rgb = use_rgb
         self.use_gripper_pcd = use_gripper_pcd
         self.text_embedding_cache = {}
@@ -70,7 +72,7 @@ class HighLevelWrapper:
         self.cam_to_world = np.loadtxt(extrinsics_txt)
         #############################################
 
-        self.model = initialize_model(run_id, use_text_embedding, in_channels, self.device)
+        self.model = initialize_model(run_id, use_text_embedding, use_dual_head, in_channels, self.device)
         self.rng = np.random.default_rng()
 
         # For rerun visualization
@@ -179,7 +181,7 @@ class HighLevelWrapper:
         return goal_gripper_proj
 
 
-def initialize_model(run_id, use_text_embedding, in_channels, device):
+def initialize_model(run_id, use_text_embedding, use_dual_head, in_channels, device):
     # Initialize WandB API and download artifact
     # Follows naming convention in lfd3d
     artifact_dir = "wandb"
@@ -191,7 +193,7 @@ def initialize_model(run_id, use_text_embedding, in_channels, device):
     # Remove the "network." prefix, since we're not using Lightning here.
     state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
 
-    model = PointNet2_super(num_classes=13, input_channel=in_channels, use_text_embedding=use_text_embedding)
+    model = PointNet2_super(num_classes=13, input_channel=in_channels, use_text_embedding=use_text_embedding, use_dual_head=use_dual_head)
     model.load_state_dict(state_dict)
 
     model = model.eval()
@@ -219,7 +221,7 @@ def inference(model, pcd, text_embedding, is_gmm, device):
             pcd = pcd.transpose(0,2,1)
         pcd = torch.from_numpy(pcd.astype(np.float32)).to(device)
         text_embedding = torch.from_numpy(text_embedding.astype(np.float32)[None]).to(device)
-        outputs = model(pcd, text_embedding) # [1, N, 13]
+        outputs = model(pcd, text_embedding, data_source=["robot"]) # [1, N, 13]
         if not is_gmm:
             goal_prediction = get_weighted_displacement(pcd.permute(0,2,1), outputs).squeeze().cpu().numpy() # [4, 3]
         else:
