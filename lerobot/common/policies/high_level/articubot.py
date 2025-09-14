@@ -426,10 +426,11 @@ class PointNet2(nn.Module):
 
 
 class PointNet2_super(nn.Module):
-    def __init__(self, num_classes, input_channel=3, keep_gripper_in_fps=False, use_text_embedding=False):
+    def __init__(self, num_classes, input_channel=3, keep_gripper_in_fps=False, use_text_embedding=False, use_dual_head=False):
         super(PointNet2_super, self).__init__()
 
         self.use_text_embedding = use_text_embedding
+        self.use_dual_head = use_dual_head
         self.encoded_text_dim = 128       
         if self.use_text_embedding:
             self.text_encoder = nn.Linear(
@@ -502,10 +503,23 @@ class PointNet2_super(nn.Module):
         self.fp1 = PointNetFeaturePropagation(128, [128, 128, 128])
         self.conv1 = nn.Conv1d(128, 128, 1)
         self.bn1 = nn.BatchNorm1d(128)
-        # self.drop1 = nn.Dropout(0.5)
-        self.conv2 = nn.Conv1d(128, num_classes, 1)
 
-    def forward(self, xyz, text_embedding=None):
+        # Dual head architecture
+        if self.use_dual_head:
+            # Human prediction head
+            self.human_conv = nn.Conv1d(128, 128, 1)
+            self.human_bn = nn.BatchNorm1d(128)
+            self.human_head = nn.Conv1d(128, num_classes, 1)
+
+            # Robot prediction head
+            self.robot_conv = nn.Conv1d(128, 128, 1)
+            self.robot_bn = nn.BatchNorm1d(128)
+            self.robot_head = nn.Conv1d(128, num_classes, 1)
+        else:
+            # Single head
+            self.conv2 = nn.Conv1d(128, num_classes, 1)
+
+    def forward(self, xyz, text_embedding=None, data_source=None):
         l0_points = xyz
         l0_xyz = xyz[:, :3, :]
 
@@ -536,12 +550,28 @@ class PointNet2_super(nn.Module):
         l1_points = self.fp2(l1_xyz, l2_xyz, l1_points, l2_points)  # (B, 128, 1024)
         l0_points = self.fp1(l0_xyz, l1_xyz, None, l1_points)  # (B, 128, num_point)
 
-        x = F.relu(self.bn1(self.conv1(l0_points)))
-        x = self.conv2(x)
-        # x = F.log_softmax(x, dim=1)
-        x = x.permute(0, 2, 1)
-        return x  # x shape: B, N, num_classes
+        # Shared backbone features
+        backbone_features = F.relu(self.bn1(self.conv1(l0_points)))  # (B, 128, N)
 
+        if self.use_dual_head:
+            assert data_source is not None
+            # Dual head prediction - Compute both and mask out.
+            human_features = F.relu(self.human_bn(self.human_conv(backbone_features)))
+            robot_features = F.relu(self.robot_bn(self.robot_conv(backbone_features)))
+
+            human_output = self.human_head(human_features)  # (B, num_classes, N)
+            robot_output = self.robot_head(robot_features)  # (B, num_classes, N)
+
+            # Create final output by selecting appropriate head for each batch item
+            human_mask = torch.tensor([ds == "human" for ds in data_source],
+                                    device=human_output.device, dtype=torch.bool)
+            human_mask = human_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1] for broadcasting
+            x = torch.where(human_mask, human_output, robot_output)
+        else:
+            x = self.conv2(backbone_features)  # (B, num_classes, N)
+
+        x = x.permute(0, 2, 1)  # (B, N, num_classes)
+        return x
 
 class PointNet2_superplus(nn.Module):
     def __init__(self, num_classes):
