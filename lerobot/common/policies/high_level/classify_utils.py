@@ -22,7 +22,10 @@ def setup_client(api_key):
 
 
 TASK_SPEC = {
-    "grasp mug and place mug on table": ["grasp mug", "place mug on table"],
+    "Grasp mug and place it on the platform.": ["grasp mug", "place mug on platform", "reset to base"],
+    "Grasp plate and place it on the platform.": ["grasp plate", "place plate on platform", "reset to base"],
+    "Grasp mug and place it in the bin.": ["grasp mug", "place mug in bin", "reset to base"],
+    "Grasp plate and place it in the bin.": ["grasp plate", "place plate in bin", "reset to base"],
 }
 EXAMPLES = load_incontext_examples(f"{os.path.dirname(__file__)}/incontext_examples")
 

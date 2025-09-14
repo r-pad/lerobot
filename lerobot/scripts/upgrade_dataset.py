@@ -10,6 +10,7 @@ import torch
 from tqdm import tqdm
 import numpy as np
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd
+from lerobot.common.policies.high_level.classify_utils import TASK_SPEC
 from PIL import Image
 from typing import List
 import argparse
@@ -266,6 +267,8 @@ def upgrade_dataset(
 
             if "next_event_idx" in new_features:
                 frame_data["next_event_idx"] = np.array([0], dtype=np.int32)
+            if "subgoal" in new_features:
+                frame_data["subgoal"] = ""
 
             # Add frame to new dataset
             target_dataset.add_frame(frame_data)
@@ -313,6 +316,16 @@ def upgrade_dataset(
                         target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
                     else:
                         target_dataset.episode_buffer["next_event_idx"][i] = episode_length - 1
+
+            if "subgoal" in new_features:
+                task = target_dataset.episode_buffer['task'][0]
+                for i in range(episode_length):
+                    if i < close_gripper_idx:
+                        target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][0]
+                    elif i < open_gripper_idx:
+                        target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][1]
+                    else:
+                        target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][2]
 
         # Save episode
         target_dataset.save_episode()
@@ -380,6 +393,14 @@ if __name__ == "__main__":
             'shape': (1,),
             'names': ['idx'],
             'info': 'Index of next event in the dataset'
+        }
+    if "subgoal" in args.new_features:
+        assert "next_event_idx" in args.new_features
+        new_features["subgoal"] = {
+            'dtype': 'string',
+            'shape': (1,),
+            'names': ['subgoal'],
+            'info': 'Caption for subgoal in dataset'
         }
     remove_features = []
     if "cam_wrist" in args.remove_features:
