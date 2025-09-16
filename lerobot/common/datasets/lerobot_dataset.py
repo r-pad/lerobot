@@ -1010,7 +1010,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 pix_fmt = "gray16le"
                 video_path = video_path.with_suffix(".mkv")
             elif dummy_image.mode == "RGB":
-                vcodec = "libsvtav1"
+                vcodec = "h264"
                 pix_fmt = "yuv420p"
             else:
                 raise NotImplementedError

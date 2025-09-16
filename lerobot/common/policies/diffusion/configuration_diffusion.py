@@ -131,7 +131,7 @@ class DiffusionConfig(PreTrainedConfig):
     pretrained_backbone_weights: str | None = None
     use_group_norm: bool = True
     spatial_softmax_num_keypoints: int = 32
-    use_separate_rgb_encoder_per_camera: bool = False
+    use_separate_rgb_encoder_per_camera: bool = True
     # Unet.
     down_dims: tuple[int, ...] = (512, 1024, 2048)
     kernel_size: int = 5
@@ -155,7 +155,7 @@ class DiffusionConfig(PreTrainedConfig):
     enable_goal_conditioning: bool = False
     hl_run_id: str | None = "ticsnohr"
     hl_max_depth: float = 1.5
-    hl_num_points: int = 4096
+    hl_num_points: int = 8192
     hl_is_gmm: bool = True
     hl_use_text_embedding: bool = True
     hl_use_dual_head: bool = False
