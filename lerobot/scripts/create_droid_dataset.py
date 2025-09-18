@@ -132,6 +132,7 @@ def load_camera_params(droid_raw_dir, fname, camera_intrinsics_dict, scale_facto
 
     # We work with camera-1 data across the dataset.
     cam_serial = metadata["ext1_cam_serial"]
+    wrist_cam_serial = metadata["wrist_cam_serial"]
     extrinsics_left = metadata["ext1_cam_extrinsics"]
     cam_to_world = get_cam_to_world(extrinsics_left)
     world_to_cam = np.linalg.inv(cam_to_world)
@@ -147,7 +148,8 @@ def load_camera_params(droid_raw_dir, fname, camera_intrinsics_dict, scale_facto
     K = K * scale_factor
     K[2, 2] = 1
     baseline = cam_params["baseline"] / 1000
-    return cam_serial, K, baseline, world_to_cam
+
+    return cam_serial, wrist_cam_serial, K, baseline, world_to_cam
 
 def gen_droid_dataset(
     droid_path: str,
@@ -199,13 +201,23 @@ def gen_droid_dataset(
                             total=(num_episodes - droid_dataset.meta.total_episodes)):
         index = dataset_indexes[episode_idx]
         fname = idx_to_fname_mapping[index]
-        cam_serial, K, baseline, world_to_cam = load_camera_params(droid_raw_dir, fname, camera_intrinsics_dict, scale_factor)
+        cam_serial, wrist_cam_serial, K, baseline, world_to_cam = load_camera_params(droid_raw_dir, fname, camera_intrinsics_dict, scale_factor)
 
         video_path = f"{droid_raw_dir}/1.0.1/{fname}/recordings/MP4/{cam_serial}.mp4"
         images = iio.imread(video_path)
         images = np.array(
             [cv2.resize(i, (0,0), fx=scale_factor, fy=scale_factor) for i in images]
         )
+
+        wrist_video_path = f"{droid_raw_dir}/1.0.1/{fname}/recordings/MP4/{wrist_cam_serial}.mp4"
+        wrist_images = iio.imread(wrist_video_path)
+        wrist_images = np.array(
+            [cv2.resize(i, (0,0), fx=scale_factor, fy=scale_factor) for i in wrist_images]
+        )
+
+        if images.shape != wrist_images.shape:
+            print(f"Mismatched shapes of wrist and external camera. Skipping {episode_idx}")
+            continue
 
         caption, subgoals = get_goal_text(event_dir, index)
         subgoal_indices = get_subgoal_indices(event_dir, index, subgoals)
@@ -219,10 +231,11 @@ def gen_droid_dataset(
         for frame_idx in range(subgoal_indices[-1]):
             frame_data = {}
             frame_data["task"] = caption
-            frame_data["observation.images.cam.color"] = images[frame_idx]
+            frame_data["observation.images.cam_azure_kinect.color"] = images[frame_idx]
+            frame_data["observation.images.cam_wrist"] = wrist_images[frame_idx]
+            frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = heatmap_images[frame_idx]
             frame_data["observation.right_eef_pose"] = obs[frame_idx]
             frame_data["action.right_eef_pose"] = actions[frame_idx]
-            frame_data["observation.images.cam.goal_gripper_proj"] = heatmap_images[frame_idx]
             frame_data["action"] = np.zeros(18, dtype=np.float32)
             frame_data["observation.state"] = np.zeros(18, dtype=np.float32)
 
@@ -255,6 +268,9 @@ if __name__ == "__main__":
     since existing code has the right_eef_pose key. Should probably rename both keys to just be eef_pose.
 
     Depth is available in this processed version of DROID with disparity from FoundationStereo, currently not saved.
+
+    The image keys are named "observation.images.cam_azure_kinect" but DROID isn't actually collected with a kinect.
+    The names are just for convenience to finetune without hassles, as LeRobot expects the same keys to be present.
     """
     features = {
         "observation.state": {
@@ -283,13 +299,19 @@ if __name__ == "__main__":
         #     'names': ['height', 'width', 'channels'],
         #     'info': 'Depth'
         # },
-        "observation.images.cam.color": {
+        "observation.images.cam_azure_kinect.color": {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
             'names': ['height', 'width', 'channels'],
             'info': 'RGB image'
         },
-        "observation.images.cam.goal_gripper_proj": {
+        "observation.images.cam_wrist": {
+            'dtype': 'video',
+            'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
+            'names': ['height', 'width', 'channels'],
+            'info': 'Wrist camera image'
+        },
+        "observation.images.cam_azure_kinect.goal_gripper_proj": {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
             'names': ['height', 'width', 'channels'],
