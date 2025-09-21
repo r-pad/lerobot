@@ -152,9 +152,36 @@ CUDA_VISIBLE_DEVICES=1 python lerobot/scripts/control_robot.py --robot.type=aloh
 BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clamping of extreme motions during teleop.
 
 ```py
-python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the onesie." --control.repo_id=sriramsk/fold_onesie_20250831 --control.num_episodes=20 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=false --robot.max_relative_target=null
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the onesie." --control.repo_id=sriramsk/fold_onesie_20250831 --control.num_episodes=20 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=true --robot.max_relative_target=null
 
 nohup python lerobot/scripts/train.py --dataset.repo_id=sriramsk/fold_onesie_20250831_subsampled --policy.type=diffusion --output_dir=outputs/train/diffPo_onesie_subsampled --job_name=diffPo_onesie_subsampled --policy.device=cuda --wandb.enable=true --policy.use_separate_rgb_encoder_per_camera=true --policy.use_text_embedding=true --steps=300_000 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --dataset.image_transforms.enable=true > diffpo_onesie_subsampled.out
 
+nohup python lerobot/scripts/train.py --dataset.repo_id=sriramsk/fold_onesie_20250831_subsampled_heatmapGoal --policy.type=diffusion --output_dir=outputs/train/diffPo_onesie_subsampled_heatmapGoal --job_name=diffPo_onesie_subsampled_heatmapGoal --wandb.enable=true --policy.use_text_embedding=true --steps=300_000 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.enable_goal_conditioning=true > diffpo_onesie_subsampled_heatmapGoal.out &
+
 CUDA_VISIBLE_DEVICES=1 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the onesie." --control.repo_id=sriramsk/eval_fold_onesie_specialist --control.num_episodes=1 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_onesie_subsampled/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
+```
+
+### Fold shirt (B)
+
+BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clamping of extreme motions during teleop.
+
+```py
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the shirt." --control.repo_id=sriramsk/fold_shirt_20250918 --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=true --robot.max_relative_target=null
+```
+
+### Fold towel (C)
+
+BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clamping of extreme motions during teleop.
+
+```py
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the towel." --control.repo_id=sriramsk/fold_towel_20250919 --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=8 --control.display_data=true --robot.max_relative_target=null
+```
+
+### Fold pants/skirt (D) - human demo
+
+BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clamping of extreme motions during teleop.
+Human demo, note that its collected at 15fps without wrist cam.
+
+```py
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the bottoms." --control.repo_id=sriramsk/fold_bottoms_20250919_human --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=8 --control.display_data=true
 ```

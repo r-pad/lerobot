@@ -45,15 +45,32 @@ def extract_events_with_gripper_pos(
     joint_states, close_thresh=15, open_thresh=25
 ):
     """
-    First event ends when gripper closes,
-    second events ends when gripper opens again.
-    Only valid for 2 subgoals following this decomposition.
+    Extract all gripper open/close events dynamically.
+    Each time the gripper closes and then opens constitutes one goal.
+    The last frame is also considered a goal.
+    Returns list of goal frame indices.
     """
     gripper_pos = joint_states[:, 17]
-    close_gripper_idx = np.where(gripper_pos < close_thresh)[0][0]
-    open_gripper_idx = close_gripper_idx + np.where(gripper_pos[close_gripper_idx:] > open_thresh)[0][0]
+    goal_indices = []
 
-    return close_gripper_idx, open_gripper_idx
+    # Track gripper state changes
+    is_closed = False
+
+    for i in range(len(gripper_pos)):
+        # Gripper closes (transition from open to closed)
+        if not is_closed and gripper_pos[i] < close_thresh:
+            is_closed = True
+            goal_indices.append(i)
+        # Gripper opens (transition from closed to open)
+        elif is_closed and gripper_pos[i] > open_thresh:
+            is_closed = False
+            goal_indices.append(i)
+
+    # Always add the last frame as a goal
+    if len(goal_indices) == 0 or goal_indices[-1] != len(gripper_pos) - 1:
+        goal_indices.append(len(gripper_pos) - 1)
+
+    return goal_indices
 
 def prep_eef_pose(eef_pos, eef_rot, eef_artic):
     REAL_GRIPPER_MIN, REAL_GRIPPER_MAX = 0., 99.
@@ -171,6 +188,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
     if phantomize:
         rgb_data = episode_extras['phantom_vid'][frame_idx]
+        wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
         depth_data = (episode_extras['phantom_depth_vid'][frame_idx][:, :, None] * 1000).to(torch.uint16)
         eef_data = episode_extras['phantom_eef_pose'][frame_idx]
         joint_state = episode_extras['phantom_joint_state'][frame_idx]
@@ -182,6 +200,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         # If human data without retargeting, we don't have any robot states/actions
         # and so we just copy over the original states/actions as a placeholder.
         rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
+        wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
         depth_data = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
         eef_data = frame_data["observation.right_eef_pose"]
         joint_state = frame_data["observation.state"]
@@ -189,6 +208,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         action = frame_data["action"]
 
     frame_data["observation.images.cam_azure_kinect.color"] = rgb_data
+    frame_data["observation.images.cam_wrist"] = wrist_rgb_data
     frame_data["observation.images.cam_azure_kinect.transformed_depth"] = depth_data
     frame_data["observation.right_eef_pose"] = eef_data
     frame_data["observation.state"] = joint_state
@@ -217,8 +237,10 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
     """Process goal projections, event indices, and subgoals for an episode."""
     if humanize:
         # Use events from JSON for human data
-        close_gripper_idx = episode_extras['episode_events']['event_idxs'][0]
-        open_gripper_idx = episode_extras['episode_events']['event_idxs'][1]
+        goal_indices = episode_extras['episode_events']['event_idxs']
+        # Ensure last frame is included as a goal
+        if goal_indices[-1] != episode_length - 1:
+            goal_indices = goal_indices + [episode_length - 1]
         episode_gripper_pcds = episode_extras['episode_gripper_pcds']
     else:
         joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
@@ -228,49 +250,50 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
         else:
             close_thresh, open_thresh = 25, 30
 
-        close_gripper_idx, open_gripper_idx = extract_events_with_gripper_pos(
+        goal_indices = extract_events_with_gripper_pos(
             joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
 
     if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
-        if humanize:
-            goal1 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[close_gripper_idx])
-            goal2 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[open_gripper_idx])
-            goal3 = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[-1])
-        else:
-            goal1 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[close_gripper_idx])
-            goal2 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[open_gripper_idx])
-            goal3 = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[-1])
+        # Generate goal images for each goal index
+        goal_images = []
+        for goal_idx in goal_indices:
+            if humanize:
+                goal_img = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[goal_idx])
+            else:
+                goal_img = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[goal_idx])
+            goal_images.append(Image.fromarray(goal_img).convert("RGB"))
 
-        goal1_img = Image.fromarray(goal1).convert("RGB")
-        for i in range(close_gripper_idx):
-            goal1_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+        # Assign goal images to frames based on segments
+        current_goal_idx = 0
+        for i in range(episode_length):
+            # Move to next goal if we've passed the current goal index
+            if current_goal_idx < len(goal_indices) - 1 and i >= goal_indices[current_goal_idx]:
+                current_goal_idx += 1
 
-        goal2_img = Image.fromarray(goal2).convert("RGB")
-        for i in range(close_gripper_idx, open_gripper_idx):
-            goal2_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
-
-        goal3_img = Image.fromarray(goal3).convert("RGB")
-        for i in range(open_gripper_idx, episode_length):
-            goal3_img.save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+            goal_images[current_goal_idx].save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
 
     if "next_event_idx" in new_features:
+        current_goal_idx = 0
         for i in range(episode_length):
-            if i < close_gripper_idx:
-                target_dataset.episode_buffer["next_event_idx"][i] = close_gripper_idx
-            elif i < open_gripper_idx:
-                target_dataset.episode_buffer["next_event_idx"][i] = open_gripper_idx
-            else:
-                target_dataset.episode_buffer["next_event_idx"][i] = episode_length - 1
+            # Find the next goal index for this frame
+            while current_goal_idx < len(goal_indices) - 1 and i >= goal_indices[current_goal_idx]:
+                current_goal_idx += 1
+
+            target_dataset.episode_buffer["next_event_idx"][i] = goal_indices[current_goal_idx]
 
     if "subgoal" in new_features:
         task = target_dataset.episode_buffer['task'][0]
+        # Assert that the number of tasks in spec matches the number of detected events
+        assert task in TASK_SPEC, f"Task '{task}' not found in TASK_SPEC"
+        assert len(TASK_SPEC[task]) == len(goal_indices), f"Task '{task}' has {len(TASK_SPEC[task])} subgoals in TASK_SPEC but {len(goal_indices)} goals were detected"
+
+        current_goal_idx = 0
         for i in range(episode_length):
-            if i < close_gripper_idx:
-                target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][0]
-            elif i < open_gripper_idx:
-                target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][1]
-            else:
-                target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][2]
+            # Move to next goal if we've passed the current goal index
+            if current_goal_idx < len(goal_indices) - 1 and i >= goal_indices[current_goal_idx]:
+                current_goal_idx += 1
+
+            target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][current_goal_idx]
 
 
 def upgrade_dataset(

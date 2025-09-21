@@ -982,10 +982,15 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def encode_episode_videos(self, episode_index: int) -> dict:
         """
         Use ffmpeg to convert frames stored as png into mp4 videos.
-        Note: `encode_video_frames` is a blocking call. Making it asynchronous shouldn't speedup encoding,
-        since video encoding with ffmpeg is already using multithreading.
+        Uses parallel processing for multiple videos to speed up encoding.
         """
+        from concurrent.futures import ProcessPoolExecutor
+        import multiprocessing as mp
+
         video_paths = {}
+        encoding_tasks = []
+
+        # Prepare all video encoding tasks
         for key in self.meta.video_keys:
             video_path = self.root / self.meta.get_video_file_path(episode_index, key)
             video_paths[key] = str(video_path)
@@ -1015,7 +1020,19 @@ class LeRobotDataset(torch.utils.data.Dataset):
             else:
                 raise NotImplementedError
 
-            encode_video_frames(img_dir, video_path, self.fps, overwrite=True, vcodec=vcodec, pix_fmt=pix_fmt)
+            encoding_tasks.append((img_dir, video_path, self.fps, vcodec, pix_fmt))
+
+        # Encode all videos in parallel
+        max_workers = min(len(encoding_tasks), mp.cpu_count())
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for img_dir, video_path, fps, vcodec, pix_fmt in encoding_tasks:
+                future = executor.submit(encode_video_frames, img_dir, video_path, fps, vcodec, pix_fmt, overwrite=True)
+                futures.append(future)
+
+            # Wait for all encodings to complete
+            for future in futures:
+                future.result()
 
         return video_paths
 
