@@ -5,7 +5,6 @@ import pytorch3d.transforms as transforms
 from torch import pi
 import torch
 import mujoco
-import open3d as o3d
 import trimesh
 from scipy.spatial.transform import Rotation as R
 import cv2
@@ -15,6 +14,8 @@ ALOHA_MODEL = load_robot_description("aloha_mj_description")
 ALOHA_CONFIGURATION = mink.Configuration(ALOHA_MODEL)
 ALOHA_REST_STATE = torch.tensor([[ 91.9336, 191.8652, 191.7773, 174.2871, 174.3750,   5.4492,  17.4023, -2.5488,  11.5245,  
                             92.1094, 193.5352, 193.0078, 169.6289, 169.6289, -3.7793,  21.0059,   2.2852, 100.7582]])
+
+
 
 def map_real2sim(Q):
     """
@@ -196,6 +197,7 @@ def get_right_gripper_mesh(mj_model, mj_data):
         List of open3d.geometry.TriangleMesh objects representing the right gripper's visual meshes
         in world coordinates.
     """
+    import open3d as o3d # Local import to avoid cluster install issues
     meshes = []
 
     # Define the bodies that make up the right gripper
@@ -271,6 +273,7 @@ def combine_meshes(meshes):
     Returns:
         combined_mesh: A single Open3D triangle mesh
     """
+    import open3d as o3d # Local import to avoid cluster install issues
     # Initialize vertices and triangles lists
     vertices = []
     triangles = []

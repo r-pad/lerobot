@@ -78,7 +78,6 @@ dependencies = [
     "setuptools",
     "wheel",
     "pybind11>=2.13.6,<3",
-    "open3d>=0.19.0,<0.20",
     "trimesh>=4.6.13,<5",
     "transformers==4.45.2",
     "sentencepiece>=0.2.0,<0.3",
@@ -191,6 +190,7 @@ default = { features = ["dynamixel"], solve-group = "default" }
 # xarm = { features = ["xarm"], solve-group = "default" }
 
 [tool.pixi.tasks]
+install-open3d = "pip install open3d==0.19.0"
 install-pytorch3d = """
 pip install git+https://github.com/facebookresearch/pytorch3d.git@stable --no-build-isolation
 """

@@ -8,7 +8,6 @@ from lerobot.common.policies.high_level.articubot import PointNet2_super, get_we
 import wandb
 from transformers import AutoModel, AutoProcessor
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd
-from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
 import os
 from google import genai
 from lerobot.common.policies.high_level.classify_utils import setup_client, generate_prompt_for_current_subtask, call_gemini_with_retry, TASK_SPEC, EXAMPLES
@@ -98,6 +97,7 @@ class HighLevelWrapper:
                 joint_state = robot_kwargs["observation.state"]
                 gripper_pcd = render_aloha_gripper_pcd(self.cam_to_world, joint_state)
             elif robot_type == "libero_franka":
+                from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
                 gripper_pcd = get_4_points_from_gripper_pos_orient(
                             gripper_pos=robot_kwargs["ee_pos"],
                             gripper_orn=robot_kwargs["ee_quat"],
