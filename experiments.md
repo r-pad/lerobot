@@ -180,8 +180,20 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 ### Fold pants/skirt (D) - human demo
 
 BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clamping of extreme motions during teleop.
-Human demo, note that its collected at 15fps without wrist cam.
+Human demo, note that its collected at 15fps.
 
 ```py
-python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the bottoms." --control.repo_id=sriramsk/fold_bottoms_20250919_human --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=8 --control.display_data=true
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the bottoms." --control.repo_id=sriramsk/fold_bottoms_20250919_human --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=8 --control.display_data=true
 ```
+
+### Multi-task folders
+
+```sh
+
+nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_20250831_subsampled", "sriramsk/fold_shirt_20250918_subsampled", "sriramsk/fold_towel_20250919_subsampled"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_multifold_subsampled --job_name=diffPo_multifold_subsampled --wandb.enable=true --policy.use_text_embedding=true --steps=300_000 "--policy.crop_shape=[600, 600]" --policy.crop_is_random=false &
+
+HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_20250831_subsampled_heatmapGoal", "sriramsk/fold_shirt_20250918_subsampled_heatmapGoal", "sriramsk/fold_towel_20250919_subsampled_heatmapGoal"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_multifold_subsampled_heatmapGoal --job_name=diffPo_multifold_subsampled_heatmapGoal --wandb.enable=true --policy.use_text_embedding=false --steps=300_000 "--policy.crop_shape=[600, 600]" --policy.crop_is_random=false > multifold_gc_diffpo.out &
+
+CUDA_VISIBLE_DEVICES=1 nohup python scripts/train.py model=articubot dataset=rpadLerobot dataset.repo_id="[sriramsk/fold_onesie_20250831_subsampled_heatmapGoal, sriramsk/fold_shirt_20250918_subsampled_heatmapGoal, sriramsk/fold_towel_20250919_subsampled_heatmapGoal, sriramsk/fold_bottoms_20250919_human_heatmapGoal]"  resources.num_workers=16 training.batch_size=8 training.check_val_every_n_epochs=3 dataset.cache_dir=/home/sriram/Desktop/lfd3d/multifold_cache model.use_rgb=True model.in_channels=7 model.use_dual_head=True > multifold.out &
+```
+

@@ -432,7 +432,8 @@ if __name__ == "__main__":
     parser.add_argument("--phantomize", default=False, action="store_true",
                         help="Prepare new data after retargeting human data with Phantom.")
     parser.add_argument("--path_to_extradata", type=str,
-                        help="Path to auxiliary data for Phantom or for human data")
+                        help="Path to auxiliary data for Phantom or for human data",
+                        default="/data/sriram/lerobot_extradata/")
     parser.add_argument("--push_to_hub", default=False, action="store_true",
                         help="Push upgraded dataset to HF Hub.")
     parser.add_argument("--remove_features", type=str, nargs='*', default=[],
@@ -475,7 +476,7 @@ if __name__ == "__main__":
 
     assert not (args.phantomize and args.humanize), "Cannot use both phantomize and humanize modes simultaneously"
     if args.phantomize or args.humanize:
-        path_to_extradata = args.path_to_extradata
+        path_to_extradata = f"{args.path_to_extradata}/{args.source_repo_id}"
     else:
         path_to_extradata = None
 

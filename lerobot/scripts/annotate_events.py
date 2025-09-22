@@ -6,6 +6,7 @@ from pathlib import Path
 
 TASK_SPEC = {
     "grasp mug and place mug on table": ["grasp mug", "place mug on table"],
+    "fold the bottoms": ["grasp 1", "fold 1", "grasp 2", "fold 2", "grasp 3", "fold 3"],
 }
 
 def main():
