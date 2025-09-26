@@ -335,6 +335,17 @@ def control_loop(
 
                 pcd_rgb = ((hl_wrapper.last_pcd_rgb + 1) * 255 / 2).astype(np.uint8)
 
+                white_bg = False
+                if white_bg:
+                    # Set white background for 3D view using blueprint
+                    blueprint = rr.blueprint.Blueprint(
+                        rr.blueprint.Spatial3DView(
+                            origin="high_level",
+                            background=[255, 255, 255]  # White background
+                        )
+                    )
+                    rr.send_blueprint(blueprint)
+
                 # Scene point cloud with colors
                 rr.log("high_level/scene_pointcloud", rr.Points3D(hl_wrapper.last_pcd_xyz, colors=pcd_rgb))
 

@@ -153,16 +153,16 @@ class DiffusionConfig(PreTrainedConfig):
 
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
-    hl_run_id: str | None = "ticsnohr"
+    hl_run_id: str | None = "bi04w82v"
     hl_max_depth: float = 1.5
     hl_num_points: int = 8192
     hl_is_gmm: bool = True
     hl_use_text_embedding: bool = True
-    hl_use_dual_head: bool = False
-    hl_use_rgb: bool = False
+    hl_use_dual_head: bool = True
+    hl_use_rgb: bool = True
     hl_use_gripper_pcd: bool = True
     hl_use_gemini: bool = False
-    hl_in_channels: int = 4
+    hl_in_channels: int = 7
     hl_intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
     hl_extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt"
 

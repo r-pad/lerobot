@@ -66,7 +66,7 @@ dependencies = [
     "pymunk>=6.6.0",
     "pynput>=1.7.7",
     "pyzmq>=26.2.1",
-    "rerun-sdk>=0.21.0",
+    "rerun-sdk>=0.21.0,<0.24.0",
     "termcolor>=2.4.0",
     "torch>=2.2.1,<2.7",
     "torchcodec==0.2.1; sys_platform != 'win32' and (sys_platform != 'linux' or (platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l')) and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
@@ -78,7 +78,6 @@ dependencies = [
     "setuptools",
     "wheel",
     "pybind11>=2.13.6,<3",
-    "open3d>=0.19.0,<0.20",
     "trimesh>=4.6.13,<5",
     "transformers==4.45.2",
     "sentencepiece>=0.2.0,<0.3",
@@ -191,6 +190,7 @@ default = { features = ["dynamixel"], solve-group = "default" }
 # xarm = { features = ["xarm"], solve-group = "default" }
 
 [tool.pixi.tasks]
+install-open3d = "pip install open3d==0.19.0"
 install-pytorch3d = """
 pip install git+https://github.com/facebookresearch/pytorch3d.git@stable --no-build-isolation
 """

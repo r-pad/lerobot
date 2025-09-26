@@ -8,6 +8,9 @@ Mixed bag of notes, tidbits and info with using LeRobot in our Kinect + Aloha st
 git@github.com:r-pad/lerobot.git
 pixi shell
 pixi run install-pytorch3d
+
+# only for robot control not for training
+pixi run install-open3d 
 pixi run install-k4a
 ```
 
