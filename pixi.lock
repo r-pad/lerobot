@@ -381,7 +381,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c1/b1/3baf80dc6d2b7bc27a95a67752d0208e410351e3feb4eb78de5f77454d8d/referencing-0.36.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bf/ce/0d0e61429f603bac433910d99ef1a02ce45a8967ffbe3cbee48599e62d88/regex-2024.11.6-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/f9/9b/335f9764261e915ed497fcdeb11df5dfd6f7bf257d4a6a2a686d80da4d54/requests-2.32.3-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/52/b3/05c25a8ae701b71b2bb5f61101bdd730ffb8d1027537de5ad97123b99735/rerun_sdk-0.25.1-cp39-abi3-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/13/5c/5c194619bbdc9545832f50bf94634fc9f548cf8f08eada76446dffce8d8d/rerun_sdk-0.23.4-cp39-abi3-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/2e/08/fe231064caaf2766d47818ca12fd8acf10dc4e762a33dabc6293e83bfead/robosuite-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/2b/4d/0826c43a3be0eb0c671b15a6ae3030f966fbe9c9ec86d6fbc2a543ce4396/robot_descriptions-1.17.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/34/a2/004c99936997bfc644d590a9defd9e9c93f8286568f9c16cdaf3e14429a7/rpds_py-0.26.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -3085,7 +3085,7 @@ packages:
 - pypi: .
   name: lerobot
   version: 0.1.0
-  sha256: 7ddd7690426b483510f6515e1ede2157ea1d3f0a9367fda0199e611d239ba5b2
+  sha256: 9528e96ecdfad76802521ff9cb7f5e204e7443468bb9c299ffb3684c8c405496
   requires_dist:
   - cmake>=3.29.0.1
   - datasets>=2.19.0
@@ -3108,7 +3108,7 @@ packages:
   - pymunk>=6.6.0
   - pynput>=1.7.7
   - pyzmq>=26.2.1
-  - rerun-sdk>=0.21.0
+  - rerun-sdk>=0.21.0,<0.24.0
   - termcolor>=2.4.0
   - torch>=2.2.1,<2.7
   - torchcodec==0.2.1 ; (platform_machine != 'aarch64' and platform_machine != 'arm64' and platform_machine != 'armv7l' and platform_machine != 'x86_64' and sys_platform != 'win32') or (platform_machine == 'aarch64' and sys_platform != 'linux' and sys_platform != 'win32') or (platform_machine == 'arm64' and sys_platform != 'linux' and sys_platform != 'win32') or (platform_machine == 'armv7l' and sys_platform != 'linux' and sys_platform != 'win32') or (platform_machine == 'x86_64' and sys_platform != 'darwin' and sys_platform != 'win32')
@@ -5111,21 +5111,18 @@ packages:
   - pysocks>=1.5.6,!=1.5.7 ; extra == 'socks'
   - chardet>=3.0.2,<6 ; extra == 'use-chardet-on-py3'
   requires_python: '>=3.8'
-- pypi: https://files.pythonhosted.org/packages/52/b3/05c25a8ae701b71b2bb5f61101bdd730ffb8d1027537de5ad97123b99735/rerun_sdk-0.25.1-cp39-abi3-manylinux_2_28_x86_64.whl
+- pypi: https://files.pythonhosted.org/packages/13/5c/5c194619bbdc9545832f50bf94634fc9f548cf8f08eada76446dffce8d8d/rerun_sdk-0.23.4-cp39-abi3-manylinux_2_28_x86_64.whl
   name: rerun-sdk
-  version: 0.25.1
-  sha256: 000c51f8b0faa3ed33800c62ed95249c527152e9615503ce8a81787acefd2361
+  version: 0.23.4
+  sha256: 229b5f12a4f6499e2575ace3a9bbc3d164245a65224789d7e3ebc5656b01538d
   requires_dist:
   - attrs>=23.1.0
   - numpy>=2
   - pillow>=8.0.0
   - pyarrow>=18.0.0
   - typing-extensions>=4.5
-  - pytest==8.4.1 ; extra == 'tests'
-  - rerun-notebook==0.25.1 ; extra == 'notebook'
-  - datafusion==48.0.0 ; extra == 'datafusion'
-  - rerun-sdk[notebook] ; extra == 'all'
-  - rerun-sdk[datafusion] ; extra == 'all'
+  - pytest==7.1.2 ; extra == 'tests'
+  - rerun-notebook==0.23.4 ; extra == 'notebook'
   requires_python: '>=3.9'
 - pypi: https://files.pythonhosted.org/packages/2e/08/fe231064caaf2766d47818ca12fd8acf10dc4e762a33dabc6293e83bfead/robosuite-1.4.0-py3-none-any.whl
   name: robosuite
