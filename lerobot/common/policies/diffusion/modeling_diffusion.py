@@ -47,6 +47,12 @@ from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapp
 from transformers import AutoModel, AutoProcessor
 
 
+def get_single_image_goal(batch, goal_key_name):
+    """Just repeat the first channel thrice."""
+    goal_img = batch[goal_key_name]
+    batch[goal_key_name] = batch[goal_key_name][:, :, 0:1].repeat(1, 1, 3, 1, 1)
+    return batch
+
 class DiffusionPolicy(PreTrainedPolicy):
     """
     Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
@@ -183,6 +189,7 @@ class DiffusionPolicy(PreTrainedPolicy):
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            batch = get_single_image_goal(batch, "observation.images.cam_azure_kinect.goal_gripper_proj")
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
