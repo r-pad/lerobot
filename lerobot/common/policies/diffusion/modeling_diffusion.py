@@ -43,13 +43,23 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, get_siglip_text_embedding
+from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, get_siglip_text_embedding
 from transformers import AutoModel, AutoProcessor
 
 
-def get_single_image_goal(batch, goal_key_name):
-    """Just repeat the first channel thrice."""
-    goal_img = batch[goal_key_name]
+def repeat_goal_first_channel_as_rgb(batch, goal_key_name):
+    """Repeat the first channel of a goal image thrice to create an RGB-compatible image.
+
+    This is useful when the high-level model produces a single-channel heatmap that needs
+    to be used as input to an RGB encoder.
+
+    Args:
+        batch: Dictionary containing image tensors
+        goal_key_name: Key name for the goal image tensor to transform
+
+    Returns:
+        batch: Updated batch dictionary with modified goal image
+    """
     batch[goal_key_name] = batch[goal_key_name][:, :, 0:1].repeat(1, 1, 3, 1, 1)
     return batch
 
@@ -98,7 +108,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         self.diffusion = DiffusionModel(config)
 
         if self.config.enable_goal_conditioning:
-            self.high_level = HighLevelWrapper(
+            hl_config = HighLevelConfig(
+                model_type=self.config.hl_model_type,
                 run_id=self.config.hl_run_id,
                 max_depth=self.config.hl_max_depth,
                 num_points=self.config.hl_num_points,
@@ -109,9 +120,11 @@ class DiffusionPolicy(PreTrainedPolicy):
                 use_rgb=self.config.hl_use_rgb,
                 use_gemini=self.config.hl_use_gemini,
                 is_gmm=self.config.hl_is_gmm,
+                dino_model=self.config.hl_dino_model,
                 intrinsics_txt=self.config.hl_intrinsics_txt,
                 extrinsics_txt=self.config.hl_extrinsics_txt,
             )
+            self.high_level = HighLevelWrapper(hl_config)
 
         self.renderer = None
         self.phantomize = self.config.phantomize
@@ -161,6 +174,8 @@ class DiffusionPolicy(PreTrainedPolicy):
 
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            if self.config.use_single_channel_goal and "observation.images.cam_azure_kinect.goal_gripper_proj" in batch:
+                batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.cam_azure_kinect.goal_gripper_proj")
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
@@ -189,7 +204,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch = get_single_image_goal(batch, "observation.images.cam_azure_kinect.goal_gripper_proj")
+            if self.config.use_single_channel_goal:
+                batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.cam_azure_kinect.goal_gripper_proj")
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
