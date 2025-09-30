@@ -5,7 +5,7 @@ import PIL
 import torch
 from pytorch3d.ops import sample_farthest_points
 from lerobot.common.policies.high_level.articubot import PointNet2_super, get_weighted_displacement, sample_from_gmm
-from lerobot.common.policies.high_level.dino_heatmap import DinoHeatmapNetwork
+from lerobot.common.policies.high_level.dino_heatmap import DinoHeatmapNetwork, sample_from_heatmap
 import wandb
 from transformers import AutoModel, AutoProcessor
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd
@@ -173,12 +173,10 @@ class HighLevelWrapper:
         if self.config.use_text_embedding:
             text_embed = self._get_text_embedding(text, rgb, robot_type, robot_kwargs)
 
-        # Run inference
-        heatmap = inference_dino_heatmap(self.model, rgb, gripper_pcd, text_embed, self.device)
-        # Store for rerun visualization
-        self.last_goal_prediction = heatmap
+        # Run inference - returns sampled 2D coord in 224x224 space
+        coord_2d = inference_dino_heatmap(self.model, rgb, gripper_pcd, text_embed, self.device)
 
-        return heatmap
+        return coord_2d
 
     def get_goal_text(self, text, rgb, robot_type, robot_kwargs):
         if not self.config.use_gemini:
@@ -207,7 +205,7 @@ class HighLevelWrapper:
         if self.config.model_type == "articubot":
             return self._project_articubot(goal_prediction, img_shape, goal_repr)
         elif self.config.model_type == "dino_heatmap":
-            return self._project_dino_heatmap(goal_prediction, img_shape)
+            return self._compute_dino_heatmap(goal_prediction, img_shape)
         else:
             raise ValueError(f"Unknown model_type: {self.config.model_type}")
 
@@ -234,26 +232,37 @@ class HighLevelWrapper:
             goal_gripper_proj = np.clip(goal_gripper_proj, 0, 255)
         return goal_gripper_proj.astype(np.uint8)
 
-    def _project_dino_heatmap(self, heatmap, img_shape):
-        """Process heatmap output from DINO model"""
-        # heatmap is (1, H, W) from model
-        # Return as single channel - low-level policy will repeat when use_single_channel_goal=True
-        import torch.nn.functional as F
-        if heatmap.shape[-2:] != (img_shape[0], img_shape[1]):
-            # heatmap is numpy (1, H, W), convert to torch for resize
-            heatmap_torch = torch.from_numpy(heatmap).unsqueeze(0)  # (1, 1, H, W)
-            heatmap_torch = F.interpolate(heatmap_torch, size=(img_shape[0], img_shape[1]),
-                                         mode='bilinear', align_corners=False)
-            heatmap = heatmap_torch.squeeze(0).numpy()  # (1, H, W)
+    def _compute_dino_heatmap(self, coord_2d_224, img_shape):
+        """Scale 2D coord from 224x224 to full image space and create distance-based heatmap"""
+        # coord_2d_224 is (2,) [x, y] in 224x224 space
+        # Scale to original image space (img_shape is (H, W, ...))
+        H, W = img_shape[0], img_shape[1]
 
-        # Normalize to 0-255 range and keep as single channel
-        heatmap = heatmap.squeeze(0)  # (H, W)
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
-        heatmap = (heatmap * 255).astype(np.uint8)
+        # Scale coordinates from 224x224 to HxW
+        scale_x = W / 224.0
+        scale_y = H / 224.0
+        coord_2d_full = np.array([
+            coord_2d_224[0] * scale_x,
+            coord_2d_224[1] * scale_y
+        ]).astype(int)
 
-        # Return single channel (H, W, 1) - low-level will handle repetition
-        goal_gripper_proj = heatmap[:, :, np.newaxis]  # (H, W, 1)
-        return goal_gripper_proj
+        # Clip to image bounds
+        coord_2d_full = np.clip(coord_2d_full, [0, 0], [W - 1, H - 1])
+
+        # Create single-channel distance-based heatmap using same logic as articubot
+        max_distance = np.sqrt(W**2 + H**2)
+        y_coords, x_coords = np.mgrid[0:H, 0:W]
+        pixel_coords = np.stack([x_coords, y_coords], axis=-1)
+
+        # Compute distances from target point
+        distances = np.linalg.norm(pixel_coords - coord_2d_full, axis=-1)  # (H, W)
+
+        # Apply square root transformation for steeper near-target gradients
+        heatmap = (np.sqrt(distances / max_distance) * 255)
+        heatmap = np.clip(heatmap, 0, 255).astype(np.uint8)
+
+        # Return 3-channel heatmap (repeat single channel)
+        return np.stack([heatmap, heatmap, heatmap], axis=-1)  # (H, W, 3)
 
     def predict_and_project(self, text, rgb, depth, robot_type, robot_kwargs):
         goal_prediction = self.predict(text, rgb, depth, robot_type, robot_kwargs)
@@ -295,17 +304,15 @@ def initialize_dino_heatmap_model(run_id, dino_model, use_gripper_pcd, use_text_
     model_cfg = ModelConfig(dino_model, use_gripper_pcd, use_text_embedding)
     model = DinoHeatmapNetwork(model_cfg)
 
-    # Load checkpoint if run_id provided
-    if run_id is not None:
-        artifact_dir = "wandb"
-        checkpoint_reference = f"r-pad/lfd3d/best_heatmap_model-{run_id}:best"
-        api = wandb.Api()
-        artifact = api.artifact(checkpoint_reference, type="model")
-        ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
-        ckpt = torch.load(ckpt_file)
-        # Remove the "network." prefix, since we're not using Lightning here.
-        state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
-        model.load_state_dict(state_dict)
+    artifact_dir = "wandb"
+    checkpoint_reference = f"r-pad/lfd3d/best_pix_dist_model-{run_id}:best"
+    api = wandb.Api()
+    artifact = api.artifact(checkpoint_reference, type="model")
+    ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
+    ckpt = torch.load(ckpt_file)
+    # Remove the "network." prefix, since we're not using Lightning here.
+    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
+    model.load_state_dict(state_dict)
 
     model = model.eval()
     model = model.to(device)
@@ -342,7 +349,7 @@ def inference_articubot(model, pcd, text_embedding, is_gmm, device):
 
 def inference_dino_heatmap(model, rgb, gripper_pcd, text_embedding, device):
     """
-    Run DINO heatmap model inference on RGB image.
+    Run DINO heatmap model inference on RGB image and sample a 2D coordinate.
 
     Args:
         model (DinoHeatmapNetwork): Trained model.
@@ -352,27 +359,29 @@ def inference_dino_heatmap(model, rgb, gripper_pcd, text_embedding, device):
         device (torch.device): Device for inference.
 
     Returns:
-        np.ndarray: Predicted heatmap (1, H, W).
+        np.ndarray: Sampled 2D coordinate in 224x224 space (2,) [x, y].
     """
     with torch.no_grad():
         # Convert gripper_pcd to torch if provided
-        gripper_pcd_torch = None
         if gripper_pcd is not None:
-            gripper_pcd_torch = torch.from_numpy(gripper_pcd.astype(np.float32)).unsqueeze(0).to(device)  # (1, N, 3)
+            gripper_pcd = torch.from_numpy(gripper_pcd.astype(np.float32)).unsqueeze(0).to(device)  # (1, N, 3)
 
         # Convert text_embedding to torch if provided
-        text_embed_torch = None
+        text_embed = None
         if text_embedding is not None:
-            text_embed_torch = torch.from_numpy(text_embedding.astype(np.float32)).unsqueeze(0).to(device)  # (1, D)
+            text_embed = torch.from_numpy(text_embedding.astype(np.float32)).unsqueeze(0).to(device)  # (1, D)
 
         # Model expects RGB image as list (for DINO processor)
-        heatmap = model(
+        score_map = model(
             image=[rgb],  # DinoHeatmapNetwork expects list of images
-            gripper_pcd=gripper_pcd_torch,
-            text_embedding=text_embed_torch
-        )  # (1, 1, H, W)
+            gripper_pcd=gripper_pcd,
+            text_embedding=text_embed
+        )  # (1, 1, 224, 224)
 
-        return heatmap.squeeze(0).cpu().numpy()  # (1, H, W)
+        # Sample a 2D coordinate from the score_map distribution
+        sampled_coord = sample_from_heatmap(score_map)  # (1, 2) [x, y]
+
+        return sampled_coord.squeeze(0).cpu().numpy()  # (2,) [x, y]
 
 def compute_pcd(rgb, depth, K, rgb_preprocess, depth_preprocess, device, rng, num_points, max_depth):
     """

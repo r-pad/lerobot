@@ -10,6 +10,35 @@ from torch import nn
 from transformers import AutoImageProcessor, AutoModel
 
 
+def sample_from_heatmap(heatmap):
+    """
+    Sample 2D pixel coordinates from heatmap using multinomial sampling.
+
+    Args:
+        heatmap: (B, 1, H, W) predicted heatmap
+
+    Returns:
+        coords: (B, 2) sampled pixel coordinates [x, y]
+    """
+    B, _, H, W = heatmap.shape
+
+    # Flatten spatial dimensions and apply softmax
+    logits = heatmap.squeeze(1).flatten(1)  # (B, H*W)
+    probs = F.softmax(logits, dim=1)
+
+    # Multinomial sampling
+    sampled_indices = torch.multinomial(probs, 1).squeeze(1)  # (B,)
+
+    # Convert flat indices back to 2D coordinates
+    y_coords = sampled_indices // W
+    x_coords = sampled_indices % W
+
+    # Stack to get (B, 2) [x, y] format
+    coords = torch.stack([x_coords, y_coords], dim=1)
+
+    return coords
+
+
 class SimplePointNet(nn.Module):
     """Simple PointNet encoder for 3D point clouds"""
 

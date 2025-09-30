@@ -223,3 +223,12 @@ HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --data
 
 nohup python scripts/train.py model=dino_heatmap dataset=rpadLerobot dataset.repo_id="[sriramsk/fold_onesie_20250831_subsampled_heatmapGoal, sriramsk/fold_shirt_20250918_subsampled_heatmapGoal, sriramsk/fold_towel_20250919_subsampled_heatmapGoal, sriramsk/fold_bottoms_20250919_human_heatmapGoal]"  resources.num_workers=32 dataset.augment_train=False dataset.cache_dir=/home/sriram/Desktop/lfd3d/dino_heatmap_multifold_cache training.epochs=500 > dino_heatmap_multifold.out &
 ```
+
+Eval:
+
+```sh
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the onesie." --control.repo_id=sriramsk/eval_fold_onesie_multiTask_gc_oneChannel --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_multifold_subsampled_heatmapGoal_oneChannel/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=240
+
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the bottoms." --control.repo_id=sriramsk/eval_fold_bottoms_multiTask_gc_oneChannel --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_multifold_subsampled_heatmapGoal_oneChannel/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=240
+```

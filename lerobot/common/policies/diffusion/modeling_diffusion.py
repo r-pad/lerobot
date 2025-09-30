@@ -60,7 +60,12 @@ def repeat_goal_first_channel_as_rgb(batch, goal_key_name):
     Returns:
         batch: Updated batch dictionary with modified goal image
     """
-    batch[goal_key_name] = batch[goal_key_name][:, :, 0:1].repeat(1, 1, 3, 1, 1)
+    if len(batch[goal_key_name].shape) == 5: # train
+        batch[goal_key_name] = batch[goal_key_name][:, :, 0:1].repeat(1, 1, 3, 1, 1)
+    elif len(batch[goal_key_name].shape) == 4: # inference, no history
+        batch[goal_key_name] = batch[goal_key_name][:, 0:1].repeat(1, 3, 1, 1)
+    else:
+        raise ValueError("unexpected tensor shape")
     return batch
 
 class DiffusionPolicy(PreTrainedPolicy):
