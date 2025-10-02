@@ -108,15 +108,16 @@ def save_images_from_cameras(
     else:
         import cv2
 
-    print("Connecting cameras")
+    print("Initializing cameras")
     cameras = []
+
+    # Create all camera objects
     for device_id in device_ids:
-        print(f"{device_id=}")
         config = AzureKinectCameraConfig(
-            device_id=device_id, 
-            fps=fps, 
-            width=width, 
-            height=height, 
+            device_id=device_id,
+            fps=fps,
+            width=width,
+            height=height,
             use_depth=use_depth,
             use_ir=use_ir,
             use_transformed_depth=use_transformed_depth,
@@ -125,12 +126,28 @@ def save_images_from_cameras(
             mock=mock
         )
         camera = AzureKinectCamera(config)
-        camera.connect()
+        cameras.append(camera)
+
+    # Phase 1: Open all cameras (don't start streaming yet)
+    for camera in cameras:
+        camera.connect(start_cameras=False)
+
+    # Phase 2: Start all cameras in parallel using threads (required for multiple cameras)
+    def start_camera_thread(cam):
+        cam.start()
+
+    threads = [threading.Thread(target=start_camera_thread, args=(cam,)) for cam in cameras]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Print info after all started
+    for camera in cameras:
         print(
             f"AzureKinectCamera({camera.device_id}, fps={camera.fps}, width={camera.capture_width}, "
             f"height={camera.capture_height}, color_mode={camera.color_mode}, use_depth={camera.use_depth})"
         )
-        cameras.append(camera)
 
     images_dir = Path(images_dir)
     if images_dir.exists():
@@ -295,7 +312,7 @@ class AzureKinectCamera:
         elif config.rotation == 180:
             self.rotation = cv2.ROTATE_180
 
-    def connect(self):
+    def connect(self, start_cameras=True):
         if self.is_connected:
             raise RobotDeviceAlreadyConnectedError(
                 f"AzureKinectCamera({self.device_id}) is already connected."
@@ -370,7 +387,8 @@ class AzureKinectCamera:
         try:
             self.camera = PyK4A(config=k4a_config, device_id=self.device_id, thread_safe=False)
             self.camera.open()
-            self.camera.start()
+            if start_cameras:
+                self.camera.start()
             is_camera_open = True
         except Exception:
             is_camera_open = False
@@ -397,15 +415,29 @@ class AzureKinectCamera:
             ColorResolution.RES_3072P: (3840, 2160),
         }
         actual_width, actual_height = resolution_map[k4a_color_res]
-        
+
         if (self.capture_width, self.capture_height) != (actual_width, actual_height):
             logging.warning(
                 f"Requested resolution {self.capture_width}x{self.capture_height} "
                 f"mapped to {actual_width}x{actual_height}"
             )
-        
+
         self.capture_width = actual_width
         self.capture_height = actual_height
+        self.is_connected = start_cameras
+
+    def start(self):
+        """Start the camera streaming. Only needed if connect() was called with start_cameras=False."""
+        if self.mock:
+            self.is_connected = True
+            return
+
+        if self.camera is None:
+            raise RobotDeviceNotConnectedError(
+                f"AzureKinectCamera({self.device_id}) camera not opened. Call connect() first."
+            )
+
+        self.camera.start()
         self.is_connected = True
 
     def read(self, temporary_color_mode: str | None = None) -> Union[np.ndarray, Dict[str, np.ndarray]]:

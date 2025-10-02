@@ -295,9 +295,28 @@ class ManipulatorRobot:
         for name in self.leader_arms:
             self.leader_arms[name].read("Present_Position")
 
-        # Connect the cameras
-        for name in self.cameras:
-            self.cameras[name].connect()
+        # Connect the cameras - use two-phase init for multi-Azure Kinect setups
+        from threading import Thread
+
+        # Phase 1: Open all cameras (don't start streaming yet)
+        azure_kinect_cameras = []
+        for name, camera in self.cameras.items():
+            if camera.__class__.__name__ == 'AzureKinectCamera':
+                camera.connect(start_cameras=False)
+                azure_kinect_cameras.append(camera)
+            else:
+                camera.connect()
+
+        # Phase 2: Start Azure Kinect cameras in parallel
+        if len(azure_kinect_cameras) > 0:
+            def start_camera(cam):
+                cam.start()
+
+            threads = [Thread(target=start_camera, args=(cam,)) for cam in azure_kinect_cameras]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
         self.is_connected = True
 
