@@ -219,7 +219,7 @@ Single-channel and with DinoHeatmapNetwork:
 
 HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_20250831_subsampled_heatmapGoal", "sriramsk/fold_shirt_20250918_subsampled_heatmapGoal", "sriramsk/fold_towel_20250919_subsampled_heatmapGoal"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_multifold_subsampled_heatmapGoal_oneChannel --job_name=diffPo_multifold_subsampled_heatmapGoal_oneChannel --wandb.enable=true --policy.use_text_embedding=false --steps=300_000 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.enable_goal_conditioning=true --policy.hl_model_type="dino_heatmap" --policy.use_single_channel_goal=true > multifold_gc_diffpo_oneChannel.out &
 
-# Important to set dataset.augment_train=False as its a pcd augmentation and we're training in image space! GT2 will be wrong if we apply pcd augmentations
+# Important to set dataset.augment_train=False as its a pcd augmentation and we're training in image space! GT will be wrong if we apply pcd augmentations
 
 nohup python scripts/train.py model=dino_heatmap dataset=rpadLerobot dataset.repo_id="[sriramsk/fold_onesie_20250831_subsampled_heatmapGoal, sriramsk/fold_shirt_20250918_subsampled_heatmapGoal, sriramsk/fold_towel_20250919_subsampled_heatmapGoal, sriramsk/fold_bottoms_20250919_human_heatmapGoal]"  resources.num_workers=32 dataset.augment_train=False dataset.cache_dir=/home/sriram/Desktop/lfd3d/dino_heatmap_multifold_cache training.epochs=500 > dino_heatmap_multifold.out &
 ```

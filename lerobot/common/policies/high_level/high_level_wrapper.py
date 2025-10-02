@@ -14,7 +14,7 @@ from google import genai
 from lerobot.common.policies.high_level.classify_utils import setup_client, generate_prompt_for_current_subtask, call_gemini_with_retry, TASK_SPEC, EXAMPLES
 from dataclasses import dataclass
 from typing import Optional
-
+from PIL import Image
 
 TARGET_SHAPE = 224
 rgb_preprocess = transforms.Compose(
@@ -238,13 +238,24 @@ class HighLevelWrapper:
         # Scale to original image space (img_shape is (H, W, ...))
         H, W = img_shape[0], img_shape[1]
 
-        # Scale coordinates from 224x224 to HxW
-        scale_x = W / 224.0
-        scale_y = H / 224.0
-        coord_2d_full = np.array([
-            coord_2d_224[0] * scale_x,
-            coord_2d_224[1] * scale_y
-        ]).astype(int)
+        # Inverse of the preprocessing: Resize (aspect-ratio preserving) + CenterCrop
+        # Step 1: Resize scales the shorter edge to 224
+        scale_factor = TARGET_SHAPE / min(H, W)
+        # After resize: (H * scale_factor, W * scale_factor)
+
+        # Step 2: CenterCrop takes 224x224 from center
+        # The crop offsets in the resized space
+        crop_offset_x = (W * scale_factor - TARGET_SHAPE) / 2
+        crop_offset_y = (H * scale_factor - TARGET_SHAPE) / 2
+
+        # Inverse transform: add back crop offset, then scale back to original size
+        coord_2d_resized = np.array([
+            coord_2d_224[0] + crop_offset_x,
+            coord_2d_224[1] + crop_offset_y
+        ])
+
+        coord_2d_full = coord_2d_resized / scale_factor
+        coord_2d_full = coord_2d_full.astype(int)
 
         # Clip to image bounds
         coord_2d_full = np.clip(coord_2d_full, [0, 0], [W - 1, H - 1])
@@ -365,6 +376,10 @@ def inference_dino_heatmap(model, rgb, gripper_pcd, text_embedding, device):
     Returns:
         np.ndarray: Sampled 2D coordinate in 224x224 space (2,) [x, y].
     """
+
+    rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb))).copy()
+    rgb_ = torch.from_numpy(rgb_).unsqueeze(0).permute(0,3,1,2)
+
     with torch.no_grad():
         # Convert gripper_pcd to torch if provided
         if gripper_pcd is not None:
@@ -375,9 +390,8 @@ def inference_dino_heatmap(model, rgb, gripper_pcd, text_embedding, device):
         if text_embedding is not None:
             text_embed = torch.from_numpy(text_embedding.astype(np.float32)).unsqueeze(0).to(device)  # (1, D)
 
-        # Model expects RGB image as list (for DINO processor)
         score_map = model(
-            image=[rgb],  # DinoHeatmapNetwork expects list of images
+            image=rgb_,
             gripper_pcd=gripper_pcd,
             text_embedding=text_embed
         )  # (1, 1, 224, 224)
