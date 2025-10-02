@@ -194,9 +194,11 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 
 nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_20250831_subsampled", "sriramsk/fold_shirt_20250918_subsampled", "sriramsk/fold_towel_20250919_subsampled"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_multifold_subsampled --job_name=diffPo_multifold_subsampled --wandb.enable=true --policy.use_text_embedding=true --steps=300_000 "--policy.crop_shape=[600, 600]" --policy.crop_is_random=false &
 
-HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_20250831_subsampled_heatmapGoal", "sriramsk/fold_shirt_20250918_subsampled_heatmapGoal", "sriramsk/fold_towel_20250919_subsampled_heatmapGoal"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_multifold_subsampled_heatmapGoal --job_name=diffPo_multifold_subsampled_heatmapGoal --wandb.enable=true --policy.use_text_embedding=false --steps=300_000 "--policy.crop_shape=[600, 600]" --policy.crop_is_random=false > multifold_gc_diffpo.out &
+HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_20250831_subsampled_heatmapGoal", "sriramsk/fold_shirt_20250918_subsampled_heatmapGoal", "sriramsk/fold_towel_20250919_subsampled_heatmapGoal"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_multifold_subsampled_heatmapGoal --job_name=diffPo_multifold_subsampled_heatmapGoal --wandb.enable=true --policy.use_text_embedding=false --steps=300_000 "--policy.crop_shape=[600, 600]" --policy.crop_is_random=false --policy.enable_goal_conditioning=true > multifold_gc_diffpo.out &
 
 CUDA_VISIBLE_DEVICES=1 nohup python scripts/train.py model=articubot dataset=rpadLerobot dataset.repo_id="[sriramsk/fold_onesie_20250831_subsampled_heatmapGoal, sriramsk/fold_shirt_20250918_subsampled_heatmapGoal, sriramsk/fold_towel_20250919_subsampled_heatmapGoal, sriramsk/fold_bottoms_20250919_human_heatmapGoal]"  resources.num_workers=16 training.batch_size=8 training.check_val_every_n_epochs=3 dataset.cache_dir=/home/sriram/Desktop/lfd3d/multifold_cache model.use_rgb=True model.in_channels=7 model.use_dual_head=True > multifold.out &
+
+NCCL_P2P_LEVEL=NVL HF_HOME="/scratch/sskrishn/lerobot" nohup torchrun --nproc_per_node=8 scripts/train.py model=articubot dataset=rpadLerobot dataset.repo_id="[sriramsk/fold_onesie_20250831_subsampled_heatmapGoal, sriramsk/fold_shirt_20250918_subsampled_heatmapGoal, sriramsk/fold_towel_20250919_subsampled_heatmapGoal, sriramsk/fold_bottoms_20250919_human_heatmapGoal]" resources.num_workers=16 training.batch_size=4 training.check_val_every_n_epochs=3 dataset.cache_dir=/scratch/sskrishn/multifold_cache model.use_rgb=True model.in_channels=7 resources.gpus=-1 > multifold.out &
 ```
 
 Eval:
@@ -209,4 +211,24 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the bottoms." --control.repo_id=sriramsk/eval_fold_bottoms_multiTask --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_multifold_subsampled/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
 
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the bottoms." --control.repo_id=sriramsk/eval_fold_bottoms_multiTask_gc --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_multifold_subsampled_heatmapGoal/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=240
+```
+
+Single-channel and with DinoHeatmapNetwork:
+
+```sh
+
+HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_20250831_subsampled_heatmapGoal", "sriramsk/fold_shirt_20250918_subsampled_heatmapGoal", "sriramsk/fold_towel_20250919_subsampled_heatmapGoal"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_multifold_subsampled_heatmapGoal_oneChannel --job_name=diffPo_multifold_subsampled_heatmapGoal_oneChannel --wandb.enable=true --policy.use_text_embedding=false --steps=300_000 --policy.crop_shape="[600, 600]" --policy.crop_is_random=false --policy.enable_goal_conditioning=true --policy.hl_model_type="dino_heatmap" --policy.use_single_channel_goal=true > multifold_gc_diffpo_oneChannel.out &
+
+# Important to set dataset.augment_train=False as its a pcd augmentation and we're training in image space! GT2 will be wrong if we apply pcd augmentations
+
+nohup python scripts/train.py model=dino_heatmap dataset=rpadLerobot dataset.repo_id="[sriramsk/fold_onesie_20250831_subsampled_heatmapGoal, sriramsk/fold_shirt_20250918_subsampled_heatmapGoal, sriramsk/fold_towel_20250919_subsampled_heatmapGoal, sriramsk/fold_bottoms_20250919_human_heatmapGoal]"  resources.num_workers=32 dataset.augment_train=False dataset.cache_dir=/home/sriram/Desktop/lfd3d/dino_heatmap_multifold_cache training.epochs=500 > dino_heatmap_multifold.out &
+```
+
+Eval:
+
+```sh
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the onesie." --control.repo_id=sriramsk/eval_fold_onesie_multiTask_gc_oneChannel --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_multifold_subsampled_heatmapGoal_oneChannel/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=240
+
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the bottoms." --control.repo_id=sriramsk/eval_fold_bottoms_multiTask_gc_oneChannel --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_multifold_subsampled_heatmapGoal_oneChannel/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=240
 ```

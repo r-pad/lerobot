@@ -5,12 +5,15 @@ import PIL
 import torch
 from pytorch3d.ops import sample_farthest_points
 from lerobot.common.policies.high_level.articubot import PointNet2_super, get_weighted_displacement, sample_from_gmm
+from lerobot.common.policies.high_level.dino_heatmap import DinoHeatmapNetwork, sample_from_heatmap
 import wandb
 from transformers import AutoModel, AutoProcessor
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd
 import os
 from google import genai
 from lerobot.common.policies.high_level.classify_utils import setup_client, generate_prompt_for_current_subtask, call_gemini_with_retry, TASK_SPEC, EXAMPLES
+from dataclasses import dataclass
+from typing import Optional
 
 
 TARGET_SHAPE = 224
@@ -33,45 +36,56 @@ depth_preprocess = transforms.Compose(
     ]
 )
 
-class HighLevelWrapper:
-    def __init__(self,
-                 run_id,
-                 max_depth=1.0,
-                 num_points=8192,
-                 in_channels=3,
-                 use_gripper_pcd=False,
-                 use_text_embedding=False,
-                 use_dual_head=False,
-                 use_rgb=False,
-                 use_gemini=False,
-                 is_gmm=False,
-                 intrinsics_txt=None,
-                 extrinsics_txt=None):
-        super().__init__()
 
-        #############################################
+@dataclass
+class HighLevelConfig:
+    """Configuration for HighLevelWrapper"""
+    model_type: str = "articubot"  # "articubot" or "dino_heatmap"
+    run_id: Optional[str] = None
+    max_depth: float = 1.0
+    num_points: int = 8192
+    in_channels: int = 3
+    use_gripper_pcd: bool = False
+    use_text_embedding: bool = False
+    use_dual_head: bool = False
+    use_rgb: bool = False
+    use_gemini: bool = False
+    is_gmm: bool = False
+    dino_model: str = "facebook/dinov2-base"
+    intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
+    extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt"
+
+
+class HighLevelWrapper:
+    def __init__(self, config: HighLevelConfig):
+        super().__init__()
+        self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.max_depth = max_depth
-        self.num_points = num_points
-        self.is_gmm = is_gmm
-        self.use_text_embedding = use_text_embedding
-        self.use_dual_head = use_dual_head
-        self.use_rgb = use_rgb
-        self.use_gripper_pcd = use_gripper_pcd
         self.text_embedding_cache = {}
 
-        self.use_gemini = use_gemini
-        if self.use_gemini:
+        if config.use_gemini:
             self.client = setup_client(os.environ.get("RPAD_GEMINI_API_KEY"))
             self.gemini_config = genai.types.GenerateContentConfig(temperature=0.0, candidate_count=1)
             self.model_name = "gemini-2.5-pro"
 
-        self.original_K = np.loadtxt(intrinsics_txt) # not scaled
+        self.original_K = np.loadtxt(config.intrinsics_txt) # not scaled
         self.scaled_K = None
-        self.cam_to_world = np.loadtxt(extrinsics_txt)
-        #############################################
+        self.cam_to_world = np.loadtxt(config.extrinsics_txt)
 
-        self.model = initialize_model(run_id, use_text_embedding, use_dual_head, in_channels, self.device)
+        # Initialize model based on type
+        if config.model_type == "articubot":
+            self.model = initialize_articubot_model(
+                config.run_id, config.use_text_embedding, config.use_dual_head,
+                config.in_channels, self.device
+            )
+        elif config.model_type == "dino_heatmap":
+            self.model = initialize_dino_heatmap_model(
+                config.run_id, config.dino_model, config.use_gripper_pcd,
+                config.use_text_embedding, self.device
+            )
+        else:
+            raise ValueError(f"Unknown model_type: {config.model_type}")
+
         self.rng = np.random.default_rng()
 
         # For rerun visualization
@@ -80,59 +94,92 @@ class HighLevelWrapper:
         self.last_gripper_pcd = None
         self.last_goal_prediction = None
 
+    def _get_gripper_pcd(self, robot_type, robot_kwargs):
+        """Extract gripper point cloud for different robot types"""
+        if robot_type == "aloha":
+            joint_state = robot_kwargs["observation.state"]
+            return render_aloha_gripper_pcd(self.cam_to_world, joint_state)
+        elif robot_type == "libero_franka":
+            from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
+            return get_4_points_from_gripper_pos_orient(
+                gripper_pos=robot_kwargs["ee_pos"],
+                gripper_orn=robot_kwargs["ee_quat"],
+                cur_joint_angle=robot_kwargs["gripper_angle"],
+                world_to_cam_mat=np.linalg.inv(self.cam_to_world),
+            )
+        else:
+            raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
+
+    def _get_text_embedding(self, text, rgb, robot_type, robot_kwargs):
+        """Get text embedding with optional Gemini preprocessing and caching"""
+        infer_text = self.get_goal_text(text, rgb, robot_type, robot_kwargs)
+        if infer_text not in self.text_embedding_cache:
+            self.text_embedding_cache[infer_text] = get_siglip_text_embedding(infer_text)
+        return self.text_embedding_cache[infer_text]
+
     def predict(self, text, rgb, depth, robot_type, robot_kwargs):
+        if self.config.model_type == "articubot":
+            return self._predict_articubot(text, rgb, depth, robot_type, robot_kwargs)
+        elif self.config.model_type == "dino_heatmap":
+            return self._predict_dino_heatmap(text, rgb, depth, robot_type, robot_kwargs)
+        else:
+            raise ValueError(f"Unknown model_type: {self.config.model_type}")
+
+    def _predict_articubot(self, text, rgb, depth, robot_type, robot_kwargs):
+        """Prediction using Articubot point cloud model"""
         if self.scaled_K is None:
             self.scaled_K = get_scaled_intrinsics(self.original_K, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
 
         pcd = compute_pcd(rgb, depth, self.scaled_K, rgb_preprocess,
                             depth_preprocess, self.device, self.rng,
-                            self.num_points, self.max_depth)
+                            self.config.num_points, self.config.max_depth)
         pcd_xyz, pcd_rgb = pcd[:,:3], pcd[:, 3:]
         # Store for rerun visualization
         self.last_pcd_xyz = pcd_xyz
         self.last_pcd_rgb = pcd_rgb
 
-        if self.use_gripper_pcd:
-            if robot_type == "aloha":
-                joint_state = robot_kwargs["observation.state"]
-                gripper_pcd = render_aloha_gripper_pcd(self.cam_to_world, joint_state)
-            elif robot_type == "libero_franka":
-                from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
-                gripper_pcd = get_4_points_from_gripper_pos_orient(
-                            gripper_pos=robot_kwargs["ee_pos"],
-                            gripper_orn=robot_kwargs["ee_quat"],
-                            cur_joint_angle=robot_kwargs["gripper_angle"],
-                            world_to_cam_mat=np.linalg.inv(self.cam_to_world),
-                        )
-            else:
-                raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
+        if self.config.use_gripper_pcd:
+            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
-            if self.use_rgb:
+            if self.config.use_rgb:
                 gripper_rgb = np.zeros((gripper_pcd.shape[0], 3))
                 pcd_rgb = np.concatenate([gripper_rgb, pcd_rgb], axis=0)
             self.last_gripper_pcd = gripper_pcd
 
-        if self.use_rgb:
+        if self.config.use_rgb:
             pcd = np.concatenate([pcd_xyz, pcd_rgb], axis=1)
         else:
             pcd = pcd_xyz
 
-        infer_text = self.get_goal_text(text, rgb, robot_type, robot_kwargs)
-        def get_cached_embedding(instruction):
-            if instruction not in self.text_embedding_cache:
-                self.text_embedding_cache[instruction] = get_siglip_text_embedding(instruction)
-            return self.text_embedding_cache[instruction]
-        text_embed = get_cached_embedding(infer_text)
+        text_embed = self._get_text_embedding(text, rgb, robot_type, robot_kwargs)
 
-        #### Run inference
-        goal_prediction = inference(self.model, pcd, text_embed, self.is_gmm, self.device)
+        # Run inference
+        goal_prediction = inference_articubot(self.model, pcd, text_embed, self.config.is_gmm, self.device)
         # Store for rerun visualization
         self.last_goal_prediction = goal_prediction
 
         return goal_prediction
 
+    def _predict_dino_heatmap(self, text, rgb, depth, robot_type, robot_kwargs):
+        """Prediction using DINO heatmap model"""
+        # Get gripper point cloud if needed
+        gripper_pcd = None
+        if self.config.use_gripper_pcd:
+            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            self.last_gripper_pcd = gripper_pcd
+
+        # Get text embedding if needed
+        text_embed = None
+        if self.config.use_text_embedding:
+            text_embed = self._get_text_embedding(text, rgb, robot_type, robot_kwargs)
+
+        # Run inference - returns sampled 2D coord in 224x224 space
+        coord_2d = inference_dino_heatmap(self.model, rgb, gripper_pcd, text_embed, self.device)
+
+        return coord_2d
+
     def get_goal_text(self, text, rgb, robot_type, robot_kwargs):
-        if not self.use_gemini:
+        if not self.config.use_gemini:
             return text
 
         if robot_type == "aloha":
@@ -154,6 +201,16 @@ class HighLevelWrapper:
         return goal_text
 
     def project(self, goal_prediction, img_shape, goal_repr="heatmap"):
+        """Project goal prediction to image space"""
+        if self.config.model_type == "articubot":
+            return self._project_articubot(goal_prediction, img_shape, goal_repr)
+        elif self.config.model_type == "dino_heatmap":
+            return self._compute_dino_heatmap(goal_prediction, img_shape)
+        else:
+            raise ValueError(f"Unknown model_type: {self.config.model_type}")
+
+    def _project_articubot(self, goal_prediction, img_shape, goal_repr="heatmap"):
+        """Project 3D points to 2D image space for Articubot"""
         assert goal_repr in ["mask", "heatmap"]
         urdf_proj_hom = (self.original_K @ goal_prediction.T).T
         urdf_proj = (urdf_proj_hom / urdf_proj_hom[:, 2:])[:, :2]
@@ -175,13 +232,46 @@ class HighLevelWrapper:
             goal_gripper_proj = np.clip(goal_gripper_proj, 0, 255)
         return goal_gripper_proj.astype(np.uint8)
 
+    def _compute_dino_heatmap(self, coord_2d_224, img_shape):
+        """Scale 2D coord from 224x224 to full image space and create distance-based heatmap"""
+        # coord_2d_224 is (2,) [x, y] in 224x224 space
+        # Scale to original image space (img_shape is (H, W, ...))
+        H, W = img_shape[0], img_shape[1]
+
+        # Scale coordinates from 224x224 to HxW
+        scale_x = W / 224.0
+        scale_y = H / 224.0
+        coord_2d_full = np.array([
+            coord_2d_224[0] * scale_x,
+            coord_2d_224[1] * scale_y
+        ]).astype(int)
+
+        # Clip to image bounds
+        coord_2d_full = np.clip(coord_2d_full, [0, 0], [W - 1, H - 1])
+
+        # Create single-channel distance-based heatmap using same logic as articubot
+        max_distance = np.sqrt(W**2 + H**2)
+        y_coords, x_coords = np.mgrid[0:H, 0:W]
+        pixel_coords = np.stack([x_coords, y_coords], axis=-1)
+
+        # Compute distances from target point
+        distances = np.linalg.norm(pixel_coords - coord_2d_full, axis=-1)  # (H, W)
+
+        # Apply square root transformation for steeper near-target gradients
+        heatmap = (np.sqrt(distances / max_distance) * 255)
+        heatmap = np.clip(heatmap, 0, 255).astype(np.uint8)
+
+        # Return 3-channel heatmap (repeat single channel)
+        return np.stack([heatmap, heatmap, heatmap], axis=-1)  # (H, W, 3)
+
     def predict_and_project(self, text, rgb, depth, robot_type, robot_kwargs):
         goal_prediction = self.predict(text, rgb, depth, robot_type, robot_kwargs)
         goal_gripper_proj = self.project(goal_prediction, rgb.shape)
         return goal_gripper_proj
 
 
-def initialize_model(run_id, use_text_embedding, use_dual_head, in_channels, device):
+def initialize_articubot_model(run_id, use_text_embedding, use_dual_head, in_channels, device):
+    """Initialize Articubot PointNet2 model from wandb artifact"""
     # Initialize WandB API and download artifact
     # Follows naming convention in lfd3d
     artifact_dir = "wandb"
@@ -201,14 +291,43 @@ def initialize_model(run_id, use_text_embedding, use_dual_head, in_channels, dev
 
     return model
 
-def inference(model, pcd, text_embedding, is_gmm, device):
+def initialize_dino_heatmap_model(run_id, dino_model, use_gripper_pcd, use_text_embedding, device):
+    """Initialize DINO heatmap model from wandb artifact"""
+
+    # Simple config object to match what DinoHeatmapNetwork expects
+    class ModelConfig:
+        def __init__(self, dino_model, use_gripper_pcd, use_text_embedding):
+            self.dino_model = dino_model
+            self.use_gripper_pcd = use_gripper_pcd
+            self.use_text_embedding = use_text_embedding
+
+    model_cfg = ModelConfig(dino_model, use_gripper_pcd, use_text_embedding)
+    model = DinoHeatmapNetwork(model_cfg)
+
+    artifact_dir = "wandb"
+    checkpoint_reference = f"r-pad/lfd3d/best_pix_dist_model-{run_id}:best"
+    api = wandb.Api()
+    artifact = api.artifact(checkpoint_reference, type="model")
+    ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
+    ckpt = torch.load(ckpt_file)
+    # Remove the "network." prefix, since we're not using Lightning here.
+    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
+    model.load_state_dict(state_dict)
+
+    model = model.eval()
+    model = model.to(device)
+
+    return model
+
+def inference_articubot(model, pcd, text_embedding, is_gmm, device):
     """
-    Run model inference on point cloud data.
+    Run Articubot model inference on point cloud data.
 
     Args:
         model (PointNet2_super): Trained model.
         pcd (np.ndarray): Point cloud coordinates (N, K) or batched.
         text_embedding (np.ndarray): Goal text embedding.
+        is_gmm (bool): Whether to use GMM sampling or weighted displacement.
         device (torch.device): Device for inference.
 
     Returns:
@@ -227,6 +346,42 @@ def inference(model, pcd, text_embedding, is_gmm, device):
         else:
             goal_prediction = sample_from_gmm(pcd.permute(0,2,1), outputs).squeeze().cpu().numpy() # [4, 3]
         return goal_prediction
+
+def inference_dino_heatmap(model, rgb, gripper_pcd, text_embedding, device):
+    """
+    Run DINO heatmap model inference on RGB image and sample a 2D coordinate.
+
+    Args:
+        model (DinoHeatmapNetwork): Trained model.
+        rgb (np.ndarray): RGB image (H, W, 3), uint8.
+        gripper_pcd (np.ndarray): Optional gripper point cloud (N, 3).
+        text_embedding (np.ndarray): Optional text embedding.
+        device (torch.device): Device for inference.
+
+    Returns:
+        np.ndarray: Sampled 2D coordinate in 224x224 space (2,) [x, y].
+    """
+    with torch.no_grad():
+        # Convert gripper_pcd to torch if provided
+        if gripper_pcd is not None:
+            gripper_pcd = torch.from_numpy(gripper_pcd.astype(np.float32)).unsqueeze(0).to(device)  # (1, N, 3)
+
+        # Convert text_embedding to torch if provided
+        text_embed = None
+        if text_embedding is not None:
+            text_embed = torch.from_numpy(text_embedding.astype(np.float32)).unsqueeze(0).to(device)  # (1, D)
+
+        # Model expects RGB image as list (for DINO processor)
+        score_map = model(
+            image=[rgb],  # DinoHeatmapNetwork expects list of images
+            gripper_pcd=gripper_pcd,
+            text_embedding=text_embed
+        )  # (1, 1, 224, 224)
+
+        # Sample a 2D coordinate from the score_map distribution
+        sampled_coord = sample_from_heatmap(score_map)  # (1, 2) [x, y]
+
+        return sampled_coord.squeeze(0).cpu().numpy()  # (2,) [x, y]
 
 def compute_pcd(rgb, depth, K, rgb_preprocess, depth_preprocess, device, rng, num_points, max_depth):
     """

@@ -149,10 +149,10 @@ class DiffusionConfig(PreTrainedConfig):
     clip_sample_range: float = 1.0
 
     use_text_embedding: bool = False
-    # text: str = "grasp mug and place mug on table" # Commented out for backwards compatability, can be deleted eventually
 
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
+    hl_model_type: str = "articubot"  # "articubot" or "dino_heatmap"
     hl_run_id: str | None = "bi04w82v"
     hl_max_depth: float = 1.5
     hl_num_points: int = 8192
@@ -165,6 +165,12 @@ class DiffusionConfig(PreTrainedConfig):
     hl_in_channels: int = 7
     hl_intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
     hl_extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt"
+
+    # dino_heatmap specific configs
+    hl_dino_model: str = "facebook/dinov2-base"
+
+    # Preprocess goal image to single channel (repeated thrice for RGB compatibility)
+    use_single_channel_goal: bool = False
 
     # Phantom - Overlay rendered robot at inference
     phantomize: bool = False

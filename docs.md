@@ -87,6 +87,7 @@ python lerobot/scripts/train.py --dataset.repo_id=sriramsk/droid_lerobot --polic
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=30 --control.single_task="Grasp mug and place it on the table." --control.repo_id=sriramsk/eval_aloha_eef_rgb_0709_heatmapGoal --control.num_episodes=1 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
 ```
 
+Some config parameters cannot be set at runtime and are instead saved in the config during training. To rollout with different high-level configs, modify `outputs/train/<model-name>/checkpoints/last/pretrained_model/config.json`
 
 ## Misc mapping stuff to align LeRobot Aloha and `robot_descriptions` Aloha
 
