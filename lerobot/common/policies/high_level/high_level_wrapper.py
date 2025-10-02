@@ -344,6 +344,10 @@ def inference_articubot(model, pcd, text_embedding, is_gmm, device):
         if not is_gmm:
             goal_prediction = get_weighted_displacement(pcd.permute(0,2,1), outputs).squeeze().cpu().numpy() # [4, 3]
         else:
+            viz_gmm = False
+            if viz_gmm:
+                # Visualize GMM predictions in rerun
+                visualize_gmm_predictions(pcd, outputs)
             goal_prediction = sample_from_gmm(pcd.permute(0,2,1), outputs).squeeze().cpu().numpy() # [4, 3]
         return goal_prediction
 
@@ -530,3 +534,85 @@ def get_siglip_text_embedding(
 
     return text_embedding.cpu().squeeze().numpy()
 
+def visualize_gmm_predictions(pcd, outputs):
+    """
+    Visualize GMM predictions in rerun.
+
+    Args:
+        pcd: torch.Tensor of shape [1, 7, N] where first 3 channels are xyz
+        outputs: torch.Tensor of shape [1, N, 13] containing 4 xyz vectors and 1 weight per point
+    """
+    import rerun as rr
+    # Extract point cloud xyz and convert to numpy
+    pcd_xyz = pcd[0, :3, :].permute(1, 0).cpu().numpy()  # [N, 3]
+
+    # Extract outputs: 4 displacement vectors (12 channels) + 1 weight (1 channel)
+    outputs_np = outputs[0].cpu().numpy()  # [N, 13]
+    displacements = outputs_np[:, :12].reshape(-1, 4, 3)  # [N, 4, 3]
+    weights = outputs_np[:, 12]  # [N]
+
+    # Softmax the weights over all points
+    weights_exp = np.exp(weights - np.max(weights))
+    weights_softmax = weights_exp / weights_exp.sum()  # [N]
+
+    # Random sample 1000 points for visualization
+    num_points = len(pcd_xyz)
+    sample_size = min(500, num_points)
+    sample_indices = np.random.choice(num_points, sample_size, replace=False)
+
+    pcd_xyz_sampled = pcd_xyz[sample_indices]
+    displacements_sampled = displacements[sample_indices]
+    weights_softmax_sampled = weights_softmax[sample_indices]
+
+    # Log original point cloud (sampled)
+    rr.log("gmm/point_cloud", rr.Points3D(pcd_xyz_sampled, radii=0.003))
+
+    # Show only one displacement vector per point (first one for simplicity)
+    vec_idx = 0
+    target_points = pcd_xyz_sampled + displacements_sampled[:, vec_idx, :]  # [sample_size, 3]
+
+    # Create line segments from each point to its target
+    positions = np.zeros((sample_size, 2, 3))
+    positions[:, 0, :] = pcd_xyz_sampled  # Start points
+    positions[:, 1, :] = target_points  # End points
+
+    # Create color map based on softmax weights
+    # Use log scale for better visualization since weights can be very skewed
+    weights_log = np.log(weights_softmax_sampled + 1e-10)
+    w_min = weights_log.min()
+    w_max = weights_log.max()
+    w_range = w_max - w_min
+    if w_range > 0:
+        weights_norm = (weights_log - w_min) / w_range
+    else:
+        weights_norm = np.ones_like(weights_log) * 0.5
+
+    colors = np.zeros((sample_size, 3), dtype=np.uint8)
+    for i, w in enumerate(weights_norm):
+        # Colormap: blue (low) -> cyan -> green -> yellow -> red (high)
+        if w < 0.25:
+            # Blue to cyan
+            t = w * 4
+            colors[i] = [0, int(t * 255), 255]
+        elif w < 0.5:
+            # Cyan to green
+            t = (w - 0.25) * 4
+            colors[i] = [0, 255, int((1 - t) * 255)]
+        elif w < 0.75:
+            # Green to yellow
+            t = (w - 0.5) * 4
+            colors[i] = [int(t * 255), 255, 0]
+        else:
+            # Yellow to red
+            t = (w - 0.75) * 4
+            colors[i] = [255, int((1 - t) * 255), 0]
+
+    # Log line strips
+    rr.log(
+        "gmm/displacement_vectors",
+        rr.LineStrips3D(
+            positions,  # [sample_size, 2, 3]
+            colors=colors,
+            radii=0.002
+        )
+    )
