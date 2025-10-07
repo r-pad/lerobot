@@ -44,6 +44,9 @@ class HighLevelConfig:
     """Configuration for HighLevelWrapper"""
     model_type: str = "articubot"  # "articubot", "dino_heatmap", or "dino_3dgp"
     run_id: Optional[str] = None
+    entity: str = "r-pad"
+    project: str = "lfd3d"
+    checkpoint_type: str = "pix_dist"
     max_depth: float = 1.0
     num_points: int = 8192
     in_channels: int = 3
@@ -90,7 +93,7 @@ class HighLevelWrapper:
                 config.in_channels, self.device
             )
         elif config.model_type == "dino_heatmap":
-            self.model = initialize_dino_heatmap_model(
+            self.model = initialize_dino_heatmap_model(config.entity, config.project, config.checkpoint_type,
                 config.run_id, config.dino_model, config.use_gripper_pcd,
                 config.use_text_embedding, self.device
             )
@@ -403,7 +406,7 @@ def initialize_articubot_model(run_id, use_text_embedding, use_dual_head, in_cha
 
     return model
 
-def initialize_dino_heatmap_model(run_id, dino_model, use_gripper_pcd, use_text_embedding, device):
+def initialize_dino_heatmap_model(entity, project, checkpoint_type, run_id, dino_model, use_gripper_pcd, use_text_embedding, device):
     """Initialize DINO heatmap model from wandb artifact"""
 
     # Simple config object to match what DinoHeatmapNetwork expects
@@ -417,7 +420,7 @@ def initialize_dino_heatmap_model(run_id, dino_model, use_gripper_pcd, use_text_
     model = DinoHeatmapNetwork(model_cfg)
 
     artifact_dir = "wandb"
-    checkpoint_reference = f"r-pad/lfd3d/best_pix_dist_model-{run_id}:best"
+    checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
     ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
