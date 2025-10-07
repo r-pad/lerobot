@@ -116,6 +116,9 @@ class DiffusionPolicy(PreTrainedPolicy):
             hl_config = HighLevelConfig(
                 model_type=self.config.hl_model_type,
                 run_id=self.config.hl_run_id,
+                entity=self.config.hl_entity,
+                project=self.config.hl_project,
+                checkpoint_type=self.config.hl_checkpoint_type,
                 max_depth=self.config.hl_max_depth,
                 num_points=self.config.hl_num_points,
                 in_channels=self.config.hl_in_channels,
