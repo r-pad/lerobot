@@ -152,7 +152,7 @@ class DiffusionConfig(PreTrainedConfig):
 
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
-    hl_model_type: str = "articubot"  # "articubot" or "dino_heatmap"
+    hl_model_type: str = "articubot"  # "articubot", "dino_heatmap", or "dino_3dgp"
     hl_run_id: str | None = "bi04w82v"
     hl_max_depth: float = 1.5
     hl_num_points: int = 8192
@@ -168,6 +168,15 @@ class DiffusionConfig(PreTrainedConfig):
 
     # dino_heatmap specific configs
     hl_dino_model: str = "facebook/dinov2-base"
+
+    # dino_3dgp specific configs
+    hl_use_fourier_pe: bool = False
+    hl_fourier_num_frequencies: int = 64
+    hl_fourier_include_input: bool = True
+    hl_num_transformer_layers: int = 4
+    hl_dropout: float = 0.1
+    hl_use_source_token: bool = False
+    hl_use_gripper_token: bool = True
 
     # Preprocess goal image to single channel (repeated thrice for RGB compatibility)
     use_single_channel_goal: bool = False

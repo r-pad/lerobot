@@ -128,6 +128,13 @@ class DiffusionPolicy(PreTrainedPolicy):
                 dino_model=self.config.hl_dino_model,
                 intrinsics_txt=self.config.hl_intrinsics_txt,
                 extrinsics_txt=self.config.hl_extrinsics_txt,
+                use_fourier_pe=self.config.hl_use_fourier_pe,
+                fourier_num_frequencies=self.config.hl_fourier_num_frequencies,
+                fourier_include_input=self.config.hl_fourier_include_input,
+                num_transformer_layers=self.config.hl_num_transformer_layers,
+                dropout=self.config.hl_dropout,
+                use_source_token=self.config.hl_use_source_token,
+                use_gripper_token=self.config.hl_use_gripper_token,
             )
             self.high_level = HighLevelWrapper(hl_config)
 
