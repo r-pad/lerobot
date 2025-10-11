@@ -248,23 +248,7 @@ class HighLevelWrapper:
         if self.scaled_K is None:
             self.scaled_K = get_scaled_intrinsics(self.original_K, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
 
-        # Get gripper point cloud if needed
-        gripper_pcd = None
-        gripper_token = None
-        if self.config.use_gripper_token:
-            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
-            self.last_gripper_pcd = gripper_pcd
-
-        # Convert gripper point cloud to gripper token if needed
-        if self.config.use_gripper_token:
-            gripper_token = self._gripper_pcd_to_token(gripper_pcd[self.aloha_gripper_idx])
-
-        # Get text embedding if needed
-        text_embed = None
-        if self.config.use_text_embedding:
-            text_embed = self._get_text_embedding(text, rgb, robot_type, robot_kwargs)
-
-        # Reconstruct full point cloud from RGB+depth for visualization
+        # Just for visualization, keep only 500 points
         pcd = compute_pcd(rgb, depth, self.scaled_K, rgb_preprocess,
                          depth_preprocess, self.device, self.rng,
                          500, self.config.max_depth)
@@ -273,23 +257,25 @@ class HighLevelWrapper:
         self.last_pcd_xyz = pcd_xyz
         self.last_pcd_rgb = pcd_rgb
 
-        # Run inference - returns (pred_points, gmm_outputs, patch_coords)
-        goal_prediction, gmm_outputs, patch_coords = inference_dino_3dgp(
+        # Get gripper point cloud if needed
+        gripper_token = None
+        if self.config.use_gripper_token:
+            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            self.last_gripper_pcd = gripper_pcd
+            gripper_token = self._gripper_pcd_to_token(gripper_pcd[self.aloha_gripper_idx])
+
+        # Get text embedding if needed
+        text_embed = None
+        if self.config.use_text_embedding:
+            text_embed = self._get_text_embedding(text, rgb, robot_type, robot_kwargs)
+
+        goal_prediction = inference_dino_3dgp(
             self.model, rgb, depth, self.scaled_K, gripper_token, text_embed,
             robot_type, self.config.is_gmm, self.config.max_depth, self.device
         )
 
         # Store for rerun visualization
         self.last_goal_prediction = goal_prediction
-
-        # Visualize GMM predictions (similar to articubot)
-        viz_gmm = False
-        if viz_gmm:
-            # Convert patch_coords and outputs to torch tensors in the expected format
-            # visualize_gmm_predictions expects pcd: [1, K, N] and outputs: [1, N, 13]
-            patch_coords_torch = torch.from_numpy(patch_coords).float().unsqueeze(0).permute(0, 2, 1)  # [1, 3, 256]
-            gmm_outputs_torch = torch.from_numpy(gmm_outputs).float().unsqueeze(0)  # [1, 256, 13]
-            visualize_gmm_predictions(patch_coords_torch, gmm_outputs_torch)
 
         return goal_prediction
 
@@ -578,10 +564,7 @@ def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embed
         device (torch.device): Device for inference.
 
     Returns:
-        tuple: (pred_points, outputs, patch_coords)
-            - pred_points: (4, 3) predicted 3D goal points
-            - outputs: (256, 13) GMM outputs for visualization
-            - patch_coords: (256, 3) patch center coordinates
+        pred_points: (4, 3) predicted 3D goal points
     """
     # Preprocess RGB
     rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb))).copy()
@@ -623,15 +606,15 @@ def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embed
 
         # Sample or get weighted prediction
         if is_gmm:
+            # Visualize GMM predictions
+            viz_gmm = False
+            if viz_gmm:
+                visualize_gmm_predictions(patch_coords, outputs)
             pred_points = sample_from_gmm_3dgp(outputs, patch_coords)  # (1, 4, 3)
         else:
             pred_points = get_weighted_prediction_3dgp(outputs, patch_coords)  # (1, 4, 3)
 
-        return (
-            pred_points.squeeze(0).cpu().numpy(),  # (4, 3)
-            outputs.squeeze(0).cpu().numpy(),  # (256, 13)
-            patch_coords.squeeze(0).cpu().numpy()  # (256, 3)
-        )
+        return pred_points.squeeze(0).cpu().numpy()  # (4, 3)
 
 def compute_pcd(rgb, depth, K, rgb_preprocess, depth_preprocess, device, rng, num_points, max_depth):
     """

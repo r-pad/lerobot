@@ -128,7 +128,7 @@ class Dino3DGPNetwork(nn.Module):
                 nn.Linear(256, self.hidden_dim),
             )
 
-        # Gripper token encoder (6DoF pose + gripper width = 7 dims, but we use 10 for rot6d)
+        # Gripper token encoder (6DoF pose + gripper width = xyz + 6D rot + width = 10dims)
         self.use_gripper_token = model_cfg.use_gripper_token
         if self.use_gripper_token:
             self.gripper_encoder = nn.Sequential(
