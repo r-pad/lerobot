@@ -4,8 +4,10 @@ from torchvision import transforms
 import PIL
 import torch
 from pytorch3d.ops import sample_farthest_points
+from pytorch3d.transforms import matrix_to_rotation_6d
 from lerobot.common.policies.high_level.articubot import PointNet2_super, get_weighted_displacement, sample_from_gmm
 from lerobot.common.policies.high_level.dino_heatmap import DinoHeatmapNetwork, sample_from_heatmap
+from lerobot.common.policies.high_level.dino_3dgp import Dino3DGPNetwork, sample_from_gmm_3dgp, get_weighted_prediction_3dgp
 import wandb
 from transformers import AutoModel, AutoProcessor
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd
@@ -40,7 +42,7 @@ depth_preprocess = transforms.Compose(
 @dataclass
 class HighLevelConfig:
     """Configuration for HighLevelWrapper"""
-    model_type: str = "articubot"  # "articubot" or "dino_heatmap"
+    model_type: str = "articubot"  # "articubot", "dino_heatmap", or "dino_3dgp"
     run_id: Optional[str] = None
     max_depth: float = 1.0
     num_points: int = 8192
@@ -54,6 +56,15 @@ class HighLevelConfig:
     dino_model: str = "facebook/dinov2-base"
     intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
     extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt"
+
+    # dino_3dgp specific configs
+    use_fourier_pe: bool = False
+    fourier_num_frequencies: int = 64
+    fourier_include_input: bool = True
+    num_transformer_layers: int = 4
+    dropout: float = 0.1
+    use_source_token: bool = False
+    use_gripper_token: bool = True
 
 
 class HighLevelWrapper:
@@ -83,10 +94,18 @@ class HighLevelWrapper:
                 config.run_id, config.dino_model, config.use_gripper_pcd,
                 config.use_text_embedding, self.device
             )
+        elif config.model_type == "dino_3dgp":
+            self.model = initialize_dino_3dgp_model(
+                config.run_id, config.dino_model, config.use_text_embedding,
+                config.use_gripper_token, config.use_source_token, config.use_fourier_pe,
+                config.fourier_num_frequencies, config.fourier_include_input,
+                config.num_transformer_layers, config.dropout, self.device
+            )
         else:
             raise ValueError(f"Unknown model_type: {config.model_type}")
 
         self.rng = np.random.default_rng()
+        self.aloha_gripper_idx = torch.tensor([6, 197, 174]) # Handpicked idxs for the aloha
 
         # For rerun visualization
         self.last_pcd_xyz = None
@@ -110,6 +129,50 @@ class HighLevelWrapper:
         else:
             raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
 
+    def _gripper_pcd_to_token(self, gripper_pcd):
+        """
+        Convert gripper point cloud (3 points) to gripper token (10-dim).
+        Token format: [3 position, 6 rotation (6d), 1 gripper width]
+
+        Args:
+            gripper_pcd: (3, 3) numpy array with gripper points
+
+        Returns:
+            gripper_token: (10,) numpy array
+        """
+        # Gripper position (center of first two points - fingertips)
+        gripper_pos = (gripper_pcd[0, :] + gripper_pcd[1, :]) / 2
+
+        # Gripper width (distance between fingertips)
+        gripper_width = np.linalg.norm(gripper_pcd[0, :] - gripper_pcd[1, :])
+
+        # Gripper orientation from the three points
+        # Use palm->center as primary axis
+        forward = gripper_pos - gripper_pcd[2, :]
+        x_axis = forward / np.linalg.norm(forward)
+
+        # Use finger direction for secondary axis
+        finger_vec = gripper_pos - gripper_pcd[0, :]
+
+        # Project finger vector onto plane perpendicular to forward
+        finger_projected = finger_vec - np.dot(finger_vec, x_axis) * x_axis
+        y_axis = finger_projected / np.linalg.norm(finger_projected)
+
+        # Z completes the frame
+        z_axis = np.cross(x_axis, y_axis)
+
+        # Create rotation matrix
+        rotation_matrix = np.stack([x_axis, y_axis, z_axis], axis=-1)
+
+        # Convert to 6D rotation representation
+        rotation_matrix_torch = torch.from_numpy(rotation_matrix).float()
+        rotation_6d = matrix_to_rotation_6d(rotation_matrix_torch).numpy()
+
+        # Combine into token
+        gripper_token = np.concatenate([gripper_pos, rotation_6d, [gripper_width]])
+
+        return gripper_token
+
     def _get_text_embedding(self, text, rgb, robot_type, robot_kwargs):
         """Get text embedding with optional Gemini preprocessing and caching"""
         infer_text = self.get_goal_text(text, rgb, robot_type, robot_kwargs)
@@ -122,6 +185,8 @@ class HighLevelWrapper:
             return self._predict_articubot(text, rgb, depth, robot_type, robot_kwargs)
         elif self.config.model_type == "dino_heatmap":
             return self._predict_dino_heatmap(text, rgb, depth, robot_type, robot_kwargs)
+        elif self.config.model_type == "dino_3dgp":
+            return self._predict_dino_3dgp(text, rgb, depth, robot_type, robot_kwargs)
         else:
             raise ValueError(f"Unknown model_type: {self.config.model_type}")
 
@@ -178,6 +243,42 @@ class HighLevelWrapper:
 
         return coord_2d
 
+    def _predict_dino_3dgp(self, text, rgb, depth, robot_type, robot_kwargs):
+        """Prediction using DINO 3D Goal Prediction model"""
+        if self.scaled_K is None:
+            self.scaled_K = get_scaled_intrinsics(self.original_K, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
+
+        # Just for visualization, keep only 500 points
+        pcd = compute_pcd(rgb, depth, self.scaled_K, rgb_preprocess,
+                         depth_preprocess, self.device, self.rng,
+                         1000, self.config.max_depth)
+        pcd_xyz, pcd_rgb = pcd[:, :3], pcd[:, 3:]
+        # Store for rerun visualization
+        self.last_pcd_xyz = pcd_xyz
+        self.last_pcd_rgb = pcd_rgb
+
+        # Get gripper point cloud if needed
+        gripper_token = None
+        if self.config.use_gripper_token:
+            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            self.last_gripper_pcd = gripper_pcd
+            gripper_token = self._gripper_pcd_to_token(gripper_pcd[self.aloha_gripper_idx])
+
+        # Get text embedding if needed
+        text_embed = None
+        if self.config.use_text_embedding:
+            text_embed = self._get_text_embedding(text, rgb, robot_type, robot_kwargs)
+
+        goal_prediction = inference_dino_3dgp(
+            self.model, rgb, depth, self.scaled_K, gripper_token, text_embed,
+            robot_type, self.config.is_gmm, self.config.max_depth, self.device
+        )
+
+        # Store for rerun visualization
+        self.last_goal_prediction = goal_prediction
+
+        return goal_prediction
+
     def get_goal_text(self, text, rgb, robot_type, robot_kwargs):
         if not self.config.use_gemini:
             return text
@@ -202,7 +303,7 @@ class HighLevelWrapper:
 
     def project(self, goal_prediction, img_shape, goal_repr="heatmap"):
         """Project goal prediction to image space"""
-        if self.config.model_type == "articubot":
+        if self.config.model_type == "articubot" or self.config.model_type == "dino_3dgp":
             return self._project_articubot(goal_prediction, img_shape, goal_repr)
         elif self.config.model_type == "dino_heatmap":
             return self._compute_dino_heatmap(goal_prediction, img_shape)
@@ -330,6 +431,50 @@ def initialize_dino_heatmap_model(run_id, dino_model, use_gripper_pcd, use_text_
 
     return model
 
+def initialize_dino_3dgp_model(
+    run_id, dino_model, use_text_embedding, use_gripper_token, use_source_token,
+    use_fourier_pe, fourier_num_frequencies, fourier_include_input,
+    num_transformer_layers, dropout, device
+):
+    """Initialize DINO 3D Goal Prediction model from wandb artifact"""
+
+    # Simple config object to match what Dino3DGPNetwork expects
+    class ModelConfig:
+        def __init__(self, dino_model, use_text_embedding, use_gripper_token,
+                     use_source_token, use_fourier_pe, fourier_num_frequencies,
+                     fourier_include_input, num_transformer_layers, dropout):
+            self.dino_model = dino_model
+            self.use_text_embedding = use_text_embedding
+            self.use_gripper_token = use_gripper_token
+            self.use_source_token = use_source_token
+            self.use_fourier_pe = use_fourier_pe
+            self.fourier_num_frequencies = fourier_num_frequencies
+            self.fourier_include_input = fourier_include_input
+            self.num_transformer_layers = num_transformer_layers
+            self.dropout = dropout
+
+    model_cfg = ModelConfig(
+        dino_model, use_text_embedding, use_gripper_token,
+        use_source_token, use_fourier_pe, fourier_num_frequencies,
+        fourier_include_input, num_transformer_layers, dropout
+    )
+    model = Dino3DGPNetwork(model_cfg)
+
+    artifact_dir = "wandb"
+    checkpoint_reference = f"r-pad/lfd3d/best_rmse_model-{run_id}:best"
+    api = wandb.Api()
+    artifact = api.artifact(checkpoint_reference, type="model")
+    ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
+    ckpt = torch.load(ckpt_file)
+    # Remove the "network." prefix, since we're not using Lightning here.
+    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
+    model.load_state_dict(state_dict)
+
+    model = model.eval()
+    model = model.to(device)
+
+    return model
+
 def inference_articubot(model, pcd, text_embedding, is_gmm, device):
     """
     Run Articubot model inference on point cloud data.
@@ -400,6 +545,76 @@ def inference_dino_heatmap(model, rgb, gripper_pcd, text_embedding, device):
         sampled_coord = sample_from_heatmap(score_map)  # (1, 2) [x, y]
 
         return sampled_coord.squeeze(0).cpu().numpy()  # (2,) [x, y]
+
+def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embedding,
+                        robot_type, is_gmm, max_depth, device):
+    """
+    Run DINO 3D Goal Prediction model inference on RGB+depth and predict 3D goal points.
+
+    Args:
+        model (Dino3DGPNetwork): Trained model.
+        rgb (np.ndarray): RGB image (H, W, 3), uint8.
+        depth (np.ndarray): Depth image (H, W), uint16 in mm.
+        intrinsics (np.ndarray): Camera intrinsics (3, 3), scaled to 224x224.
+        gripper_token (np.ndarray): Optional gripper token (10,).
+        text_embedding (np.ndarray): Optional text embedding (1152,).
+        robot_type (str): Robot type (e.g., "aloha", "robot").
+        is_gmm (bool): Whether to use GMM sampling or weighted average.
+        max_depth (float): Maximum depth threshold in meters.
+        device (torch.device): Device for inference.
+
+    Returns:
+        pred_points: (4, 3) predicted 3D goal points
+    """
+    # Preprocess RGB
+    rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb))).copy()
+    rgb_ = torch.from_numpy(rgb_).unsqueeze(0).permute(0, 3, 1, 2).float().to(device)  # (1, 3, 224, 224)
+
+    # Preprocess depth
+    depth_ = (depth / 1000.0).squeeze().astype(np.float32)  # Convert mm to meters
+    depth_ = PIL.Image.fromarray(depth_)
+    depth_ = np.asarray(depth_preprocess(depth_)).copy()
+    depth_[depth_ > max_depth] = 0  # Mask out far depths
+    depth_ = torch.from_numpy(depth_).unsqueeze(0).float().to(device)  # (1, 224, 224)
+
+    # Intrinsics to torch
+    intrinsics_ = torch.from_numpy(intrinsics.astype(np.float32)).unsqueeze(0).to(device)  # (1, 3, 3)
+
+    with torch.no_grad():
+        # Convert gripper_token to torch if provided
+        gripper_tok = None
+        if gripper_token is not None:
+            gripper_tok = torch.from_numpy(gripper_token.astype(np.float32)).unsqueeze(0).to(device)  # (1, 10)
+
+        # Convert text_embedding to torch if provided
+        text_embed = None
+        if text_embedding is not None:
+            text_embed = torch.from_numpy(text_embedding.astype(np.float32)).unsqueeze(0).to(device)  # (1, 1152)
+
+        # Determine source
+        source = [robot_type] if model.use_source_token else None
+
+        # Forward through network
+        outputs, patch_coords = model(
+            image=rgb_,
+            depth=depth_,
+            intrinsics=intrinsics_,
+            gripper_token=gripper_tok,
+            text_embedding=text_embed,
+            source=source
+        )  # outputs: (1, 256, 13), patch_coords: (1, 256, 3)
+
+        # Sample or get weighted prediction
+        if is_gmm:
+            # Visualize GMM predictions
+            viz_gmm = False
+            if viz_gmm:
+                visualize_gmm_predictions(patch_coords.permute(0,2,1), outputs)
+            pred_points = sample_from_gmm_3dgp(outputs, patch_coords)  # (1, 4, 3)
+        else:
+            pred_points = get_weighted_prediction_3dgp(outputs, patch_coords)  # (1, 4, 3)
+
+        return pred_points.squeeze(0).cpu().numpy()  # (4, 3)
 
 def compute_pcd(rgb, depth, K, rgb_preprocess, depth_preprocess, device, rng, num_points, max_depth):
     """
@@ -557,8 +772,11 @@ def visualize_gmm_predictions(pcd, outputs):
         outputs: torch.Tensor of shape [1, N, 13] containing 4 xyz vectors and 1 weight per point
     """
     import rerun as rr
+    import matplotlib.cm as cm
+
     # Extract point cloud xyz and convert to numpy
     pcd_xyz = pcd[0, :3, :].permute(1, 0).cpu().numpy()  # [N, 3]
+    pcd_size = pcd_xyz.shape[0]
 
     # Extract outputs: 4 displacement vectors (12 channels) + 1 weight (1 channel)
     outputs_np = outputs[0].cpu().numpy()  # [N, 13]
@@ -567,65 +785,35 @@ def visualize_gmm_predictions(pcd, outputs):
 
     # Softmax the weights over all points
     weights_exp = np.exp(weights - np.max(weights))
-    weights_softmax = weights_exp / weights_exp.sum()  # [N]
+    weights = weights_exp / weights_exp.sum()  # [N]
 
-    # Random sample 1000 points for visualization
-    num_points = len(pcd_xyz)
-    sample_size = min(500, num_points)
-    sample_indices = np.random.choice(num_points, sample_size, replace=False)
+    # Get top 10 weights
+    top_k = 10
+    top_indices = np.argsort(weights)[-top_k:]  # Get indices of top 10 weights
 
-    pcd_xyz_sampled = pcd_xyz[sample_indices]
-    displacements_sampled = displacements[sample_indices]
-    weights_softmax_sampled = weights_softmax[sample_indices]
-
-    # Log original point cloud (sampled)
-    rr.log("gmm/point_cloud", rr.Points3D(pcd_xyz_sampled, radii=0.003))
+    # Filter to only top 10
+    pcd_xyz_top = pcd_xyz[top_indices]
+    displacements_top = displacements[top_indices]
+    weights_top = weights[top_indices]
 
     # Show only one displacement vector per point (first one for simplicity)
     vec_idx = 0
-    target_points = pcd_xyz_sampled + displacements_sampled[:, vec_idx, :]  # [sample_size, 3]
+    target_points = pcd_xyz_top + displacements_top[:, vec_idx, :]  # [top_k, 3]
 
     # Create line segments from each point to its target
-    positions = np.zeros((sample_size, 2, 3))
-    positions[:, 0, :] = pcd_xyz_sampled  # Start points
+    positions = np.zeros((top_k, 2, 3))
+    positions[:, 0, :] = pcd_xyz_top  # Start points
     positions[:, 1, :] = target_points  # End points
 
-    # Create color map based on softmax weights
-    # Use log scale for better visualization since weights can be very skewed
-    weights_log = np.log(weights_softmax_sampled + 1e-10)
-    w_min = weights_log.min()
-    w_max = weights_log.max()
-    w_range = w_max - w_min
-    if w_range > 0:
-        weights_norm = (weights_log - w_min) / w_range
-    else:
-        weights_norm = np.ones_like(weights_log) * 0.5
-
-    colors = np.zeros((sample_size, 3), dtype=np.uint8)
-    for i, w in enumerate(weights_norm):
-        # Colormap: blue (low) -> cyan -> green -> yellow -> red (high)
-        if w < 0.25:
-            # Blue to cyan
-            t = w * 4
-            colors[i] = [0, int(t * 255), 255]
-        elif w < 0.5:
-            # Cyan to green
-            t = (w - 0.25) * 4
-            colors[i] = [0, 255, int((1 - t) * 255)]
-        elif w < 0.75:
-            # Green to yellow
-            t = (w - 0.5) * 4
-            colors[i] = [int(t * 255), 255, 0]
-        else:
-            # Yellow to red
-            t = (w - 0.75) * 4
-            colors[i] = [255, int((1 - t) * 255), 0]
+    # Use matplotlib colormap for weights (viridis is a nice perceptually uniform colormap)
+    colormap = cm.get_cmap('viridis')
+    colors = (colormap(weights_top)[:, :3] * 255).astype(np.uint8)  # [top_k, 3] in range [0, 255]
 
     # Log line strips
     rr.log(
         "gmm/displacement_vectors",
         rr.LineStrips3D(
-            positions,  # [sample_size, 2, 3]
+            positions,  # [top_k, 2, 3]
             colors=colors,
             radii=0.002
         )
