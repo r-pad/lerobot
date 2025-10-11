@@ -251,7 +251,7 @@ class HighLevelWrapper:
         # Just for visualization, keep only 500 points
         pcd = compute_pcd(rgb, depth, self.scaled_K, rgb_preprocess,
                          depth_preprocess, self.device, self.rng,
-                         500, self.config.max_depth)
+                         1000, self.config.max_depth)
         pcd_xyz, pcd_rgb = pcd[:, :3], pcd[:, 3:]
         # Store for rerun visualization
         self.last_pcd_xyz = pcd_xyz
@@ -609,7 +609,7 @@ def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embed
             # Visualize GMM predictions
             viz_gmm = False
             if viz_gmm:
-                visualize_gmm_predictions(patch_coords, outputs)
+                visualize_gmm_predictions(patch_coords.permute(0,2,1), outputs)
             pred_points = sample_from_gmm_3dgp(outputs, patch_coords)  # (1, 4, 3)
         else:
             pred_points = get_weighted_prediction_3dgp(outputs, patch_coords)  # (1, 4, 3)
@@ -772,8 +772,11 @@ def visualize_gmm_predictions(pcd, outputs):
         outputs: torch.Tensor of shape [1, N, 13] containing 4 xyz vectors and 1 weight per point
     """
     import rerun as rr
+    import matplotlib.cm as cm
+
     # Extract point cloud xyz and convert to numpy
     pcd_xyz = pcd[0, :3, :].permute(1, 0).cpu().numpy()  # [N, 3]
+    pcd_size = pcd_xyz.shape[0]
 
     # Extract outputs: 4 displacement vectors (12 channels) + 1 weight (1 channel)
     outputs_np = outputs[0].cpu().numpy()  # [N, 13]
@@ -782,65 +785,35 @@ def visualize_gmm_predictions(pcd, outputs):
 
     # Softmax the weights over all points
     weights_exp = np.exp(weights - np.max(weights))
-    weights_softmax = weights_exp / weights_exp.sum()  # [N]
+    weights = weights_exp / weights_exp.sum()  # [N]
 
-    # Random sample 1000 points for visualization
-    num_points = len(pcd_xyz)
-    sample_size = min(500, num_points)
-    sample_indices = np.random.choice(num_points, sample_size, replace=False)
+    # Get top 10 weights
+    top_k = 10
+    top_indices = np.argsort(weights)[-top_k:]  # Get indices of top 10 weights
 
-    pcd_xyz_sampled = pcd_xyz[sample_indices]
-    displacements_sampled = displacements[sample_indices]
-    weights_softmax_sampled = weights_softmax[sample_indices]
-
-    # Log original point cloud (sampled)
-    rr.log("gmm/point_cloud", rr.Points3D(pcd_xyz_sampled, radii=0.003))
+    # Filter to only top 10
+    pcd_xyz_top = pcd_xyz[top_indices]
+    displacements_top = displacements[top_indices]
+    weights_top = weights[top_indices]
 
     # Show only one displacement vector per point (first one for simplicity)
     vec_idx = 0
-    target_points = pcd_xyz_sampled + displacements_sampled[:, vec_idx, :]  # [sample_size, 3]
+    target_points = pcd_xyz_top + displacements_top[:, vec_idx, :]  # [top_k, 3]
 
     # Create line segments from each point to its target
-    positions = np.zeros((sample_size, 2, 3))
-    positions[:, 0, :] = pcd_xyz_sampled  # Start points
+    positions = np.zeros((top_k, 2, 3))
+    positions[:, 0, :] = pcd_xyz_top  # Start points
     positions[:, 1, :] = target_points  # End points
 
-    # Create color map based on softmax weights
-    # Use log scale for better visualization since weights can be very skewed
-    weights_log = np.log(weights_softmax_sampled + 1e-10)
-    w_min = weights_log.min()
-    w_max = weights_log.max()
-    w_range = w_max - w_min
-    if w_range > 0:
-        weights_norm = (weights_log - w_min) / w_range
-    else:
-        weights_norm = np.ones_like(weights_log) * 0.5
-
-    colors = np.zeros((sample_size, 3), dtype=np.uint8)
-    for i, w in enumerate(weights_norm):
-        # Colormap: blue (low) -> cyan -> green -> yellow -> red (high)
-        if w < 0.25:
-            # Blue to cyan
-            t = w * 4
-            colors[i] = [0, int(t * 255), 255]
-        elif w < 0.5:
-            # Cyan to green
-            t = (w - 0.25) * 4
-            colors[i] = [0, 255, int((1 - t) * 255)]
-        elif w < 0.75:
-            # Green to yellow
-            t = (w - 0.5) * 4
-            colors[i] = [int(t * 255), 255, 0]
-        else:
-            # Yellow to red
-            t = (w - 0.75) * 4
-            colors[i] = [255, int((1 - t) * 255), 0]
+    # Use matplotlib colormap for weights (viridis is a nice perceptually uniform colormap)
+    colormap = cm.get_cmap('viridis')
+    colors = (colormap(weights_top)[:, :3] * 255).astype(np.uint8)  # [top_k, 3] in range [0, 255]
 
     # Log line strips
     rr.log(
         "gmm/displacement_vectors",
         rr.LineStrips3D(
-            positions,  # [sample_size, 2, 3]
+            positions,  # [top_k, 2, 3]
             colors=colors,
             radii=0.002
         )
