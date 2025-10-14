@@ -164,7 +164,7 @@ class DiffusionConfig(PreTrainedConfig):
     hl_use_gemini: bool = False
     hl_in_channels: int = 7
     hl_intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
-    hl_extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt"
+    hl_extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v7_1013.txt"
 
     # dino_heatmap specific configs
     hl_dino_model: str = "facebook/dinov2-base"

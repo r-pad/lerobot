@@ -279,3 +279,28 @@ CC=/usr/bin/gcc CXX=/usr/bin/g++ pixi install
 # MY_TRAINING_SCRIPT is exactly the same python command you write when training locally.
 ./cluster/launch-slurm.py -J train --gpus 1 --sync-logs $MY_TRAINING_SCRIPT
 ```
+
+### Calibration Playbook
+
+- In lfd3d-system, in separate terminals:
+```
+pixi run ros2 launch aloha aloha_bringup.launch.py robot:=aloha_stationary use_cameras:=false
+pixi run python ros/src/aloha/scripts/teleop.py -r aloha_stationary
+pixi run ros2 launch azure_kinect_ros_driver driver.launch.py overwrite_robot_description:=False color_resolution:=720P fps:=30 depth_mode:=NFOV_UNBINNED point_cloud:=True rgb_point_cloud:=True
+pixi run ros2 run rviz2 rviz2 -d ros/src/lfd3d_ros/launch/rviz/4arms_pcd.rviz
+pixi run ros2 launch lfd3d_ros rgbd_pipeline_launch.py
+pixi run ros2 run lfd3d_ros broadcast_transform --transform_file captures/camera_left_v7_1013/T_world_from_camera_est.txt # or the latest calibration file
+```
+
+- Can verify quality of current calibration by checking robot pcd / robot urdf overlay quality. If not good enough, run in another terminal:
+`pixi run ros2 run lfd3d_ros camera_calibration_collect_ros`
+
+- Collect ~30 images where the aruco marker is detected in the camera by pressing 'c'.
+
+- After this, in `/home/sriram/Desktop/calibation`, run:
+```
+uv run scripts/calibrate.py --output-dir /home/sriram/Desktop/lfd3d-system/captures/output_20251011_195009 # the latest capture
+```
+- The aruco marker needs to be mounted on the corresponding link for which we record the pose from `camera_calibration_collect_ros`. Might need to play around with hyperparams a bit but typically I see a loss of around 0.025 with the default hyperparams, and a pretty good overlay in rviz.
+
+- After successful calibration, update `configuration_diffusion.py` and maybe the `config.json` files in the trained checkpoints.

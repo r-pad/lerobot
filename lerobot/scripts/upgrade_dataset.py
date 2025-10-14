@@ -421,7 +421,7 @@ if __name__ == "__main__":
                         help="Target dataset repository ID")
     parser.add_argument("--intrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/intrinsics.txt",
                         help="Path to the intrinsics.txt file")
-    parser.add_argument("--extrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt",
+    parser.add_argument("--extrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_est_v7_1013.txt",
                         help="Path to the extrinsics.txt file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")
