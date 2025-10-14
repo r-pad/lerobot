@@ -255,7 +255,14 @@ class DiffusionModel(nn.Module):
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
-        if self.config.image_features:
+
+        if self.config.use_depth and self.config.use_depth == "DP3":
+            self.rgbd_encoder = PointNetEncoderRGBD(in_channels=4, out_channels=1024,config=config)
+            self.rgb_encoder = DiffusionRgbEncoder(config) # wrist view
+            global_cond_dim += self.rgb_encoder.feature_dim
+            global_cond_dim += self.rgbd_encoder.feature_dim 
+
+        elif self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
                 encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
@@ -264,6 +271,16 @@ class DiffusionModel(nn.Module):
             else:
                 self.rgb_encoder = DiffusionRgbEncoder(config)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
+
+            if self.config.use_depth and self.config.use_depth == "fused":
+                self.depth_encoder = DiffusionRgbEncoder(config)
+                self.cross_attn = nn.MultiheadAttention(embed_dim=64, num_heads=8, batch_first=True)
+                self.norm = nn.LayerNorm(64)
+                self.ffn  = nn.Sequential(
+                    nn.Linear(64, 64*4), nn.ReLU(), nn.Linear(64*4, 64)
+                )
+                global_cond_dim += self.depth_encoder.feature_dim * num_images
+
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
         if self.use_text_embedding:
@@ -332,8 +349,29 @@ class DiffusionModel(nn.Module):
         """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[self.obs_key].shape[:2]
         global_cond_feats = [batch[self.obs_key]]
+        
         # Extract image features.
-        if self.config.image_features:
+        if self.config.use_depth and self.config.use_depth == "DP3":
+            agent_view = batch['observation.images.agentview']
+            depth = batch["observation.images.agentview_depth"]
+
+            rgbd = torch.cat([agent_view, depth], dim = 2) # b, s, C, H, W
+            rgbd = einops.rearrange(rgbd, "b s c h w -> (b s) (h w) c")
+            agent_view_features = self.rgbd_encoder(rgbd)
+            agent_view_features = einops.rearrange(
+                    agent_view_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
+            )# B, S, D=1024
+
+            wrist_view_features = self.rgb_encoder(
+                    einops.rearrange(batch['observation.images.agentview'], "b s ... -> (b s) ...")
+            )
+            wrist_view_features = einops.rearrange(
+                    wrist_view_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
+            )
+            img_features = torch.cat([agent_view_features, wrist_view_features], dim = -1)
+
+
+        elif self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
                 # Combine batch and sequence dims while rearranging to make the camera index dimension first.
                 images_per_camera = einops.rearrange(batch["observation.images"], "b s n ... -> n (b s) ...")
@@ -358,6 +396,35 @@ class DiffusionModel(nn.Module):
                 img_features = einops.rearrange(
                     img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
                 )
+
+            if self.config.use_depth and self.config.use_depth == "fused":
+                breakpoint()
+                if self.config.use_separate_rgb_encoder_per_camera:
+                    rgb_features = self.rgb_encoder[0](
+                        einops.rearrange(batch['observation.images.agentview'], "b s ... -> (b s) ...")
+                    )
+                else:
+                    rgb_features = self.rgb_encoder(
+                        einops.rearrange(batch['observation.images.agentview'], "b s ... -> (b s) ...")
+                    )
+                rgb_features = einops.rearrange(
+                        rgb_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
+                )
+                depth_features = self.depth_encoder(
+                        einops.rearrange(batch['observation.images.agentview_depth'], "b s ... -> (b s) ...")
+                )
+
+                rgb_q = self.norm(rgb_features)      
+                depth_kv = self.norm(depth_features)  
+                out, _ = self.attn(rgb_q, depth_kv, depth_kv)  # (B,N,D)
+
+                rgbd_features = rgb_features + out              # residual connection
+
+                # Pre-norm before feed-forward
+                rgbd_features = rgbd_features + self.ffn(self.norm(rgbd_features))
+
+                breakpoint()
+
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:
@@ -541,6 +608,72 @@ class SpatialSoftmax(nn.Module):
 
         return feature_keypoints
 
+class PointNetEncoderRGBD(nn.Module):
+    """Encoder for RGBD
+    """
+
+    def __init__(self,
+                 in_channels: int,
+                 out_channels: int,
+                 config: DiffusionConfig,
+                 ):
+
+        super().__init__()
+        # Set up optional preprocessing.
+        if config.crop_shape is not None:
+            self.do_crop = True
+            # Always use center crop for eval
+            self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
+            if config.crop_is_random:
+                self.maybe_random_crop = torchvision.transforms.RandomCrop(config.crop_shape)
+            else:
+                self.maybe_random_crop = self.center_crop
+        else:
+            self.do_crop = False
+
+        block_channel = [64, 128, 256, 512]
+
+        
+        self.mlp = nn.Sequential(
+            nn.Linear(in_channels, block_channel[0]),
+            nn.LayerNorm(block_channel[0]) ,
+            nn.ReLU(),
+            nn.Linear(block_channel[0], block_channel[1]),
+            nn.LayerNorm(block_channel[1]) ,
+            nn.ReLU(),
+            nn.Linear(block_channel[1], block_channel[2]),
+            nn.LayerNorm(block_channel[2]),
+            nn.ReLU(),
+            nn.Linear(block_channel[2], block_channel[3]),
+        )
+        
+        self.final_projection = nn.Sequential(
+                nn.Linear(block_channel[-1], out_channels),
+                nn.LayerNorm(out_channels)
+            )
+        self.feature_dim = out_channels
+        
+         
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C, H, W) image tensor with pixel values in [0, 1].
+        Returns:
+            (B, D) image feature.
+        """
+
+        if self.do_crop:
+            if self.training:  # noqa: SIM108
+                x = self.maybe_random_crop(x)
+            else:
+                # Always use center crop for eval.
+                x = self.center_crop(x)
+
+        x = self.mlp(x)
+        x = torch.max(x, 1)[0]
+        x = self.final_projection(x)
+        return x
+    
 
 class DiffusionRgbEncoder(nn.Module):
     """Encodes an RGB image into a 1D feature vector.
