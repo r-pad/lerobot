@@ -223,17 +223,56 @@ python lerobot/scripts/eval_suite.py \
     --eval.batch_size=10 --eval.n_episodes=20
 ```
 
+## Preparing human data
+
+After collecting human demos with the above commands or in `experiments.md`:
+
+- Process with [wilor](https://github.com/sriramsk1999/wilor):
+```
+python demo_lerobot_detectron2.py --input_folder "/home/sriram/.cache/huggingface/lerobot/sriramsk/fold_bottoms_20250919_human/videos/chunk-000/" --output_folder "/data/sriram/lerobot_extradata/sriramsk/fold_bottoms_20250919_human/wilor_hand_pose"
+```
+- Process with `upgrade_dataset.py` (`humanize` i.e. keep the human in the video):
+```
+python upgrade_dataset.py --source_repo_id sriramsk/fold_bottoms_20250919_human --target_repo_id sriramsk/fold_bottoms_20250919_human_heatmapGoal --humanize --new_features goal_gripper_proj gripper_pcds next_event_idx
+```
+- Alternatively, to use `phantomize` to retarget the human demo, first set up [GSAM-2](https://github.com/sriramsk1999/Grounded-SAM-2) and generate masks:
+```
+python gsam2_lerobot.py sriramsk/fold_bottoms_20250919_human
+```
+- [E2FGVI](https://github.com/sriramsk1999/Grounded-SAM-2) to generate inpainted videos using the gsam2 masks:
+```
+# Currently set up on autobot, only works on the 20-class gpus
+
+# Transfer data
+rsync -ravz --progress /home/sriram/.cache/huggingface/lerobot/sriramsk/fold_bottoms_20250919_human/videos/chunk-000/observation.images.cam_azure_kinect.color  sskrishn@autobot.vision.cs.cmu.edu:/project_data/held/sskrishn/E2FGVI/examples/fold_bottoms_20250919_human
+
+rsync -ravz --progress /data/sriram/lerobot_extradata/sriramsk/fold_bottoms_20250919_human/gsam2_masks  sskrishn@autobot.vision.cs.cmu.edu:/project_data/held/sskrishn/E2FGVI/examples/fold_bottoms_20250919_human
+
+# infinite loop because some weird memory issue I haven't had time to fix. 
+nohup bash -c 'while true; do python test_lerobot.py --lerobot_dir examples/fold_bottoms_20250919_human; done' &
+```
+- Generate Phantom videos from lfd3d:
+```
+python run_phantom_lerobot.py --calib_file ../../src/lfd3d/datasets/aloha_calibration/T_world_from_camera_est_left_v6_0709.txt --lerobot-extradata-path /data/sriram/lerobot_extradata/sriramsk/fold_bottoms_20250919_human
+```
+
+- And then:
+```
+python upgrade_dataset.py --source_repo_id sriramsk/fold_bottoms_20250919_human --target_repo_id sriramsk/fold_bottoms_20250919_phantom_heatmapGoal --phantomize --path_to_extradata /data/sriram/lerobot_extradata/ --new_features goal_gripper_proj gripper_pcds next_event_idx --extrinsics_txt /home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt
+```
+
+
 ## Scripts
 
 There are many scripts for manipulating LeRobotDatasets in `lerobot/scripts`. LeRobot doesn't provide a simple way to add new keys / modify existing keys to a dataset. Instead we take the blunt approach of creating a new dataset, copying required keys and modifying/adding other keys.
 
 ```
-python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718_heatmapGoal --discard_episodes 2 10 11 13 21 --phantomize --phantom_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718 --push_to_hub --new_features goal_gripper_proj
+python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718_heatmapGoal --discard_episodes 2 10 11 13 21 --phantomize --path_to_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718 --push_to_hub --new_features goal_gripper_proj
 ```
 
 `--source_repo_id` is the id of the existing dataset and `--target_repo_id` is the id of the new dataset being created. `--discard_episodes` skips problematic episodes which may exist in the source data, `--new_features` takes in a list of new features to be added (in this case, a heatmap image).
 
-`--phantomize` and `--phantom_extradata` are extra arguments only required when retargeting a human demonstration dataset following the approach in[Phantom](https://phantom-human-videos.github.io/).
+`--phantomize` and `--path_to_extradata` are extra arguments only required when retargeting a human demonstration dataset following the approach in[Phantom](https://phantom-human-videos.github.io/).
 
 **Merge datasets:**
 ```bash

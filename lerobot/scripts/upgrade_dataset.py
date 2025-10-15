@@ -369,7 +369,11 @@ def upgrade_dataset(
             continue
 
         # Load any extra data needed for this episode
-        episode_extras = _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata)
+        try:
+            episode_extras = _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata)
+        except AssertionError as e:
+            print(f"Could not find auxiliary data for episode {episode_idx}. Skipping")
+            continue
 
         # Get episode bounds
         episode_start = source_dataset.episode_data_index["from"][episode_idx].item()
