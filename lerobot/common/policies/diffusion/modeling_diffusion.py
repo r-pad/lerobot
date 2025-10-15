@@ -157,6 +157,9 @@ class DiffusionPolicy(PreTrainedPolicy):
         }
         if self.config.image_features:
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
+            if self.config.use_depth: #RGBD
+                self._queues["observation.images.agentview"] = deque(maxlen=self.config.n_obs_steps)
+                self._queues["observation.images.agentview_depth"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
 
