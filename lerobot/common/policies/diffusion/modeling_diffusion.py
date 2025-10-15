@@ -273,13 +273,8 @@ class DiffusionModel(nn.Module):
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
 
             if self.config.use_depth and self.config.use_depth == "fused":
-                self.depth_encoder = DiffusionRgbEncoder(config)
-                self.cross_attn = nn.MultiheadAttention(embed_dim=64, num_heads=8, batch_first=True)
-                self.norm = nn.LayerNorm(64)
-                self.ffn  = nn.Sequential(
-                    nn.Linear(64, 64*4), nn.ReLU(), nn.Linear(64*4, 64)
-                )
-                global_cond_dim += self.depth_encoder.feature_dim * num_images
+                self.rgbd_encoder = DiffusionRGBDEncoder(config)
+                global_cond_dim += self.rgbd_encoder.feature_dim 
 
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
@@ -398,32 +393,15 @@ class DiffusionModel(nn.Module):
                 )
 
             if self.config.use_depth and self.config.use_depth == "fused":
-                breakpoint()
-                if self.config.use_separate_rgb_encoder_per_camera:
-                    rgb_features = self.rgb_encoder[0](
-                        einops.rearrange(batch['observation.images.agentview'], "b s ... -> (b s) ...")
-                    )
-                else:
-                    rgb_features = self.rgb_encoder(
-                        einops.rearrange(batch['observation.images.agentview'], "b s ... -> (b s) ...")
-                    )
-                rgb_features = einops.rearrange(
-                        rgb_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
+                rgb = einops.rearrange(batch['observation.images.agentview'], "b s ... -> (b s) ...")
+                depth = einops.rearrange(batch['observation.images.agentview_depth'], "b s ... -> (b s) ...")
+                depth = depth.repeat(1, 3, 1, 1) # Repeat channel -> B, 3, H, W
+
+                rgbd_features = self.rgbd_encoder(rgb, depth)
+                rgbd_features = einops.rearrange(
+                    rgbd_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
                 )
-                depth_features = self.depth_encoder(
-                        einops.rearrange(batch['observation.images.agentview_depth'], "b s ... -> (b s) ...")
-                )
-
-                rgb_q = self.norm(rgb_features)      
-                depth_kv = self.norm(depth_features)  
-                out, _ = self.attn(rgb_q, depth_kv, depth_kv)  # (B,N,D)
-
-                rgbd_features = rgb_features + out              # residual connection
-
-                # Pre-norm before feed-forward
-                rgbd_features = rgbd_features + self.ffn(self.norm(rgbd_features))
-
-                breakpoint()
+                global_cond_feats.append(rgbd_features)
 
             global_cond_feats.append(img_features)
 
@@ -674,6 +652,96 @@ class PointNetEncoderRGBD(nn.Module):
         x = self.final_projection(x)
         return x
     
+class DiffusionRGBDEncoder(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        # Set up optional preprocessing.
+        if config.crop_shape is not None:
+            self.do_crop = True
+            # Always use center crop for eval
+            self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
+            if config.crop_is_random:
+                self.maybe_random_crop = torchvision.transforms.RandomCrop(config.crop_shape)
+            else:
+                self.maybe_random_crop = self.center_crop
+        else:
+            self.do_crop = False
+        
+        # Set up rgb backbone.
+        backbone_model = getattr(torchvision.models, config.vision_backbone)(
+            weights=config.pretrained_backbone_weights
+        )
+        # Note: This assumes that the layer4 feature map is children()[-3]
+        # TODO(alexander-soare): Use a safer alternative.
+        self.rgb_backbone = nn.Sequential(*(list(backbone_model.children())[:-2]), nn.AdaptiveAvgPool2d((1, 1)),)
+        self.depth_backbone = nn.Sequential(*(list(backbone_model.children())[:-2]), nn.AdaptiveAvgPool2d((1, 1)),)
+
+        if config.use_group_norm:
+            if config.pretrained_backbone_weights:
+                raise ValueError(
+                    "You can't replace BatchNorm in a pretrained model without ruining the weights!"
+                )
+            self.rgb_backbone = _replace_submodules(
+                root_module=self.rgb_backbone,
+                predicate=lambda x: isinstance(x, nn.BatchNorm2d),
+                func=lambda x: nn.GroupNorm(num_groups=x.num_features // 16, num_channels=x.num_features),
+            )
+
+        images_shape = next(iter(config.image_features.values())).shape
+        dummy_shape_h_w = config.crop_shape if config.crop_shape is not None else images_shape[1:]
+        dummy_shape = (1, images_shape[0], *dummy_shape_h_w)
+        feature_map_shape = get_output_shape(self.rgb_backbone, dummy_shape)[1:]
+        
+        self.cross_attn = nn.MultiheadAttention(embed_dim=64, num_heads=8, batch_first=True)
+        self.norm = nn.LayerNorm(64)
+        self.ffn  = nn.Sequential(
+            nn.Linear(64, 64*4), nn.ReLU(), nn.Linear(64*4, 64)
+            )
+
+        self.pool = SpatialSoftmax(feature_map_shape, num_kp=config.spatial_softmax_num_keypoints)
+        self.feature_dim = config.spatial_softmax_num_keypoints * 2
+        self.out = nn.Linear(config.spatial_softmax_num_keypoints * 2, self.feature_dim)
+        self.relu = nn.ReLU()
+        
+    def forward(self, rgb: Tensor, depth:Tensor) -> Tensor:
+        """
+        Args:
+            rgb: (B, C, H, W) image tensor with pixel values in [0, 1].
+            depth: (B, 1, H, W) image tensor with pixel values in [0, 1].
+        Returns:
+            (B, D) image feature.
+        """
+        # Preprocess: maybe crop (if it was set up in the __init__).
+        if self.do_crop:
+            if self.training:  # noqa: SIM108
+                rgb = self.maybe_random_crop(rgb)
+                depth = self.maybe_random_crop(depth)
+            else:
+                # Always use center crop for eval.
+                rgb = self.center_crop(rgb)
+                depth = self.center_crop(depth)
+        # Extract backbone feature.
+        rgb_features = self.rgb_backbone(rgb)#torch.flatten(self.rgb_backbone(rgb), start_dim=1)
+        depth_features = self.depth_backbone(depth)#torch.flatten(self.depth_backbone(depth), start_dim=1)
+
+        rgb_features = torch.flatten(self.pool(rgb_features), start_dim=1)
+        depth_features = torch.flatten(self.pool(depth_features), start_dim=1)
+
+        # Final linear layer with non-linearity.
+        rgb_features = self.relu(self.out(rgb_features))
+        depth_features = self.relu(self.out(depth_features))
+
+        rgb_q = self.norm(rgb_features)     # (B,D) 
+        depth_kv = self.norm(depth_features)  
+        out, _ = self.cross_attn(rgb_q, depth_kv, depth_kv)  
+
+        rgbd_features = rgb_features + out           
+
+        # Pre-norm before feed-forward
+        rgbd_features = rgbd_features + self.ffn(self.norm(rgbd_features))
+
+        return rgbd_features
+        
 
 class DiffusionRgbEncoder(nn.Module):
     """Encodes an RGB image into a 1D feature vector.

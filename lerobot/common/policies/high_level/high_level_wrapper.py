@@ -62,11 +62,11 @@ class HighLevelConfig:
 
     # dino_3dgp specific configs
     use_fourier_pe: bool = False
-    fourier_num_frequencies: int = 64
+    fourier_num_frequencies: int = 21
     fourier_include_input: bool = True
     num_transformer_layers: int = 4
     dropout: float = 0.1
-    use_source_token: bool = False
+    use_source_token: bool = True
     use_gripper_token: bool = True
 
 
@@ -98,7 +98,7 @@ class HighLevelWrapper:
                 config.use_text_embedding, self.device
             )
         elif config.model_type == "dino_3dgp":
-            self.model = initialize_dino_3dgp_model(
+            self.model = initialize_dino_3dgp_model(config.entity, config.project, config.checkpoint_type,
                 config.run_id, config.dino_model, config.use_text_embedding,
                 config.use_gripper_token, config.use_source_token, config.use_fourier_pe,
                 config.fourier_num_frequencies, config.fourier_include_input,
@@ -434,7 +434,7 @@ def initialize_dino_heatmap_model(entity, project, checkpoint_type, run_id, dino
 
     return model
 
-def initialize_dino_3dgp_model(
+def initialize_dino_3dgp_model(entity, project, checkpoint_type,
     run_id, dino_model, use_text_embedding, use_gripper_token, use_source_token,
     use_fourier_pe, fourier_num_frequencies, fourier_include_input,
     num_transformer_layers, dropout, device
@@ -464,14 +464,14 @@ def initialize_dino_3dgp_model(
     model = Dino3DGPNetwork(model_cfg)
 
     artifact_dir = "wandb"
-    checkpoint_reference = f"r-pad/lfd3d/best_rmse_model-{run_id}:best"
+    checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
     ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
     ckpt = torch.load(ckpt_file)
     # Remove the "network." prefix, since we're not using Lightning here.
-    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
-    model.load_state_dict(state_dict)
+    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items() if "source_embeddings.weight" not in k}
+    model.load_state_dict(state_dict, strict=False)
 
     model = model.eval()
     model = model.to(device)
