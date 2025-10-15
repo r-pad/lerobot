@@ -256,13 +256,8 @@ class DiffusionModel(nn.Module):
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
 
-        if self.config.use_depth and self.config.use_depth == "DP3":
-            self.rgbd_encoder = PointNetEncoderRGBD(in_channels=4, out_channels=1024,config=config)
-            self.rgb_encoder = DiffusionRgbEncoder(config) # wrist view
-            global_cond_dim += self.rgb_encoder.feature_dim
-            global_cond_dim += self.rgbd_encoder.feature_dim 
 
-        elif self.config.image_features:
+        if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
                 encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
@@ -274,6 +269,9 @@ class DiffusionModel(nn.Module):
 
             if self.config.use_depth and self.config.use_depth == "fused":
                 self.rgbd_encoder = DiffusionRGBDEncoder(config)
+                global_cond_dim += self.rgbd_encoder.feature_dim 
+            elif self.config.use_depth and self.config.use_depth == "DP3":
+                self.rgbd_encoder = PointNetEncoderRGBD(in_channels=4, out_channels=64,config=config)
                 global_cond_dim += self.rgbd_encoder.feature_dim 
 
         if self.config.env_state_feature:
@@ -345,28 +343,7 @@ class DiffusionModel(nn.Module):
         batch_size, n_obs_steps = batch[self.obs_key].shape[:2]
         global_cond_feats = [batch[self.obs_key]]
         
-        # Extract image features.
-        if self.config.use_depth and self.config.use_depth == "DP3":
-            agent_view = batch['observation.images.agentview']
-            depth = batch["observation.images.agentview_depth"]
-
-            rgbd = torch.cat([agent_view, depth], dim = 2) # b, s, C, H, W
-            rgbd = einops.rearrange(rgbd, "b s c h w -> (b s) (h w) c")
-            agent_view_features = self.rgbd_encoder(rgbd)
-            agent_view_features = einops.rearrange(
-                    agent_view_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
-            )# B, S, D=1024
-
-            wrist_view_features = self.rgb_encoder(
-                    einops.rearrange(batch['observation.images.agentview'], "b s ... -> (b s) ...")
-            )
-            wrist_view_features = einops.rearrange(
-                    wrist_view_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
-            )
-            img_features = torch.cat([agent_view_features, wrist_view_features], dim = -1)
-
-
-        elif self.config.image_features:
+        if self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
                 # Combine batch and sequence dims while rearranging to make the camera index dimension first.
                 images_per_camera = einops.rearrange(batch["observation.images"], "b s n ... -> n (b s) ...")
@@ -402,6 +379,19 @@ class DiffusionModel(nn.Module):
                     rgbd_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
                 )
                 global_cond_feats.append(rgbd_features)
+            # Extract image features.
+            elif self.config.use_depth and self.config.use_depth == "DP3":
+                agent_view = batch['observation.images.agentview']
+                depth = batch["observation.images.agentview_depth"]
+
+                rgbd = torch.cat([agent_view, depth], dim = 2) # b, s, C, H, W
+                rgbd = einops.rearrange(rgbd, "b s c h w -> (b s) (h w) c")
+                agent_view_features = self.rgbd_encoder(rgbd)
+                agent_view_features = einops.rearrange(
+                        agent_view_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
+                )# B, S, D=64
+
+                global_cond_feats.append(agent_view_features)
 
             global_cond_feats.append(img_features)
 
@@ -609,7 +599,7 @@ class PointNetEncoderRGBD(nn.Module):
         else:
             self.do_crop = False
 
-        block_channel = [64, 128, 256, 512]
+        block_channel = [64, 128, 256, 128]
 
         
         self.mlp = nn.Sequential(
