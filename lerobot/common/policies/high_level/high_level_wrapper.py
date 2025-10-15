@@ -109,6 +109,7 @@ class HighLevelWrapper:
 
         self.rng = np.random.default_rng()
         self.aloha_gripper_idx = torch.tensor([6, 197, 174]) # Handpicked idxs for the aloha
+        self.libero_franka_idx = torch.tensor([0,1,2]) # I think it should be 1 2 0, but consistent with lfd3d
 
         # For rerun visualization
         self.last_pcd_xyz = None
@@ -265,7 +266,13 @@ class HighLevelWrapper:
         if self.config.use_gripper_token:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
             self.last_gripper_pcd = gripper_pcd
-            gripper_token = self._gripper_pcd_to_token(gripper_pcd[self.aloha_gripper_idx])
+            if robot_type == "aloha":
+                gripper_pcd = gripper_pcd[self.aloha_gripper_idx]
+            elif robot_type == "libero_franka":
+                gripper_pcd = gripper_pcd[self.libero_franka_idx]
+            else:
+                raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
+            gripper_token = self._gripper_pcd_to_token(gripper_pcd)
 
         # Get text embedding if needed
         text_embed = None
