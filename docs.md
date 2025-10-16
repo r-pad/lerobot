@@ -231,6 +231,7 @@ After collecting human demos with the above commands or in `experiments.md`:
 ```
 python demo_lerobot_detectron2.py --input_folder "/home/sriram/.cache/huggingface/lerobot/sriramsk/fold_bottoms_20250919_human/videos/chunk-000/" --output_folder "/data/sriram/lerobot_extradata/sriramsk/fold_bottoms_20250919_human/wilor_hand_pose"
 ```
+- Annotate GT events (manually) using `lerobot/scripts/annotate_events.py`
 - Process with `upgrade_dataset.py` (`humanize` i.e. keep the human in the video):
 ```
 python upgrade_dataset.py --source_repo_id sriramsk/fold_bottoms_20250919_human --target_repo_id sriramsk/fold_bottoms_20250919_human_heatmapGoal --humanize --new_features goal_gripper_proj gripper_pcds next_event_idx

@@ -1,4 +1,4 @@
-# Basic Transfer Experiment
+# Experiment / Command Log
 
 Just a small log of commands to keep track of things ...
 
@@ -179,12 +179,18 @@ BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clampin
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the towel." --control.repo_id=sriramsk/fold_towel_20250919 --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=8 --control.display_data=true --robot.max_relative_target=null
 ```
 
-### Fold pants/skirt (D) - human demo
+### Fold onesie, shirt, towel, pants/skirt (A/B/C/D) - human demo
 
-BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clamping of extreme motions during teleop.
 Human demo, note that its collected at 15fps.
 
 ```py
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the onesie." --control.repo_id=sriramsk/fold_onesie_20251015_human --control.num_episodes=10 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=8 --control.display_data=true
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the shirt." --control.repo_id=sriramsk/fold_shirt_20251015_human --control.num_episodes=10 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=8 --control.display_data=true
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the towel." --control.repo_id=sriramsk/fold_towel_20251015_human --control.num_episodes=10 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=8 --control.display_data=true
+
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the bottoms." --control.repo_id=sriramsk/fold_bottoms_20250919_human --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=8 --control.display_data=true
 ```
 
