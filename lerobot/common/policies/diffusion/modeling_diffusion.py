@@ -400,7 +400,7 @@ class DiffusionModel(nn.Module):
                 global_cond_feats.append(agent_view_features)
 
             elif self.config.use_depth and self.config.use_depth == "cat":
-                depth = batch["observation.images.agentview_depth"]
+                depth = einops.rearrange(batch['observation.images.agentview_depth'], "b s ... -> (b s) ...")
                 depth = depth.repeat(1, 3, 1, 1) # Repeat channel -> B, 3, H, W
                 
                 depth_features = self.depth_encoder(depth)
