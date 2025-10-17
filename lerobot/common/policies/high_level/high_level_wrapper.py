@@ -109,7 +109,7 @@ class HighLevelWrapper:
 
         self.rng = np.random.default_rng()
         self.aloha_gripper_idx = torch.tensor([6, 197, 174]) # Handpicked idxs for the aloha
-        self.libero_franka_idx = torch.tensor([0, 1, 2]) # I think it should be 1 2 0
+        self.libero_franka_idx = torch.tensor([1, 2, 0]) # I think it should be 1 2 0
 
         # For rerun visualization
         self.last_pcd_xyz = None
