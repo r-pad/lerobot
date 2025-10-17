@@ -405,7 +405,7 @@ class DiffusionModel(nn.Module):
                 
                 depth_features = self.depth_encoder(depth)
                 depth_features = einops.rearrange(
-                    rgbd_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
+                    depth_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
                 )
                 global_cond_feats.append(depth_features)
 
