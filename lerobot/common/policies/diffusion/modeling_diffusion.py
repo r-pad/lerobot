@@ -276,6 +276,9 @@ class DiffusionModel(nn.Module):
             elif self.config.use_depth and self.config.use_depth == "DP3":
                 self.rgbd_encoder = PointNetEncoderRGBD(in_channels=4, out_channels=64,config=config)
                 global_cond_dim += self.rgbd_encoder.feature_dim 
+            elif self.config.use_depth and self.config.use_depth == "cat":
+                self.depth_encoder = DiffusionRgbEncoder(config)
+                global_cond_dim += self.depth_encoder.feature_dim 
 
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
@@ -395,6 +398,16 @@ class DiffusionModel(nn.Module):
                 )# B, S, D=64
 
                 global_cond_feats.append(agent_view_features)
+
+            elif self.config.use_depth and self.config.use_depth == "cat":
+                depth = batch["observation.images.agentview_depth"]
+                depth = depth.repeat(1, 3, 1, 1) # Repeat channel -> B, 3, H, W
+                
+                depth_features = self.depth_encoder(depth)
+                depth_features = einops.rearrange(
+                    rgbd_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
+                )
+                global_cond_feats.append(depth_features)
 
             global_cond_feats.append(img_features)
 
