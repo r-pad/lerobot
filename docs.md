@@ -223,17 +223,57 @@ python lerobot/scripts/eval_suite.py \
     --eval.batch_size=10 --eval.n_episodes=20
 ```
 
+## Preparing human data
+
+After collecting human demos with the above commands or in `experiments.md`:
+
+- Process with [wilor](https://github.com/sriramsk1999/wilor):
+```
+python demo_lerobot_detectron2.py --input_folder "/home/sriram/.cache/huggingface/lerobot/sriramsk/fold_bottoms_20250919_human/videos/chunk-000/" --output_folder "/data/sriram/lerobot_extradata/sriramsk/fold_bottoms_20250919_human/wilor_hand_pose"
+```
+- Annotate GT events (manually) using `lerobot/scripts/annotate_events.py`
+- Process with `upgrade_dataset.py` (`humanize` i.e. keep the human in the video):
+```
+python upgrade_dataset.py --source_repo_id sriramsk/fold_bottoms_20250919_human --target_repo_id sriramsk/fold_bottoms_20250919_human_heatmapGoal --humanize --new_features goal_gripper_proj gripper_pcds next_event_idx
+```
+- Alternatively, to use `phantomize` to retarget the human demo, first set up [GSAM-2](https://github.com/sriramsk1999/Grounded-SAM-2) and generate masks:
+```
+python gsam2_lerobot.py sriramsk/fold_bottoms_20250919_human
+```
+- [E2FGVI](https://github.com/sriramsk1999/Grounded-SAM-2) to generate inpainted videos using the gsam2 masks:
+```
+# Currently set up on autobot, only works on the 20-class gpus
+
+# Transfer data
+rsync -ravz --progress /home/sriram/.cache/huggingface/lerobot/sriramsk/fold_bottoms_20250919_human/videos/chunk-000/observation.images.cam_azure_kinect.color  sskrishn@autobot.vision.cs.cmu.edu:/project_data/held/sskrishn/E2FGVI/examples/fold_bottoms_20250919_human
+
+rsync -ravz --progress /data/sriram/lerobot_extradata/sriramsk/fold_bottoms_20250919_human/gsam2_masks  sskrishn@autobot.vision.cs.cmu.edu:/project_data/held/sskrishn/E2FGVI/examples/fold_bottoms_20250919_human
+
+# infinite loop because some weird memory issue I haven't had time to fix. 
+nohup bash -c 'while true; do python test_lerobot.py --lerobot_dir examples/fold_bottoms_20250919_human; done' &
+```
+- Generate Phantom videos from lfd3d:
+```
+python run_phantom_lerobot.py --calib_file ../../src/lfd3d/datasets/aloha_calibration/T_world_from_camera_est_left_v6_0709.txt --lerobot-extradata-path /data/sriram/lerobot_extradata/sriramsk/fold_bottoms_20250919_human
+```
+
+- And then:
+```
+python upgrade_dataset.py --source_repo_id sriramsk/fold_bottoms_20250919_human --target_repo_id sriramsk/fold_bottoms_20250919_phantom_heatmapGoal --phantomize --path_to_extradata /data/sriram/lerobot_extradata/ --new_features goal_gripper_proj gripper_pcds next_event_idx --extrinsics_txt /home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt
+```
+
+
 ## Scripts
 
 There are many scripts for manipulating LeRobotDatasets in `lerobot/scripts`. LeRobot doesn't provide a simple way to add new keys / modify existing keys to a dataset. Instead we take the blunt approach of creating a new dataset, copying required keys and modifying/adding other keys.
 
 ```
-python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718_heatmapGoal --discard_episodes 2 10 11 13 21 --phantomize --phantom_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718 --push_to_hub --new_features goal_gripper_proj
+python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718_heatmapGoal --discard_episodes 2 10 11 13 21 --phantomize --path_to_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718 --push_to_hub --new_features goal_gripper_proj
 ```
 
 `--source_repo_id` is the id of the existing dataset and `--target_repo_id` is the id of the new dataset being created. `--discard_episodes` skips problematic episodes which may exist in the source data, `--new_features` takes in a list of new features to be added (in this case, a heatmap image).
 
-`--phantomize` and `--phantom_extradata` are extra arguments only required when retargeting a human demonstration dataset following the approach in[Phantom](https://phantom-human-videos.github.io/).
+`--phantomize` and `--path_to_extradata` are extra arguments only required when retargeting a human demonstration dataset following the approach in[Phantom](https://phantom-human-videos.github.io/).
 
 **Merge datasets:**
 ```bash
@@ -279,3 +319,28 @@ CC=/usr/bin/gcc CXX=/usr/bin/g++ pixi install
 # MY_TRAINING_SCRIPT is exactly the same python command you write when training locally.
 ./cluster/launch-slurm.py -J train --gpus 1 --sync-logs $MY_TRAINING_SCRIPT
 ```
+
+### Calibration Playbook
+
+- In lfd3d-system, in separate terminals:
+```
+pixi run ros2 launch aloha aloha_bringup.launch.py robot:=aloha_stationary use_cameras:=false
+pixi run python ros/src/aloha/scripts/teleop.py -r aloha_stationary
+pixi run ros2 launch azure_kinect_ros_driver driver.launch.py overwrite_robot_description:=False color_resolution:=720P fps:=30 depth_mode:=NFOV_UNBINNED point_cloud:=True rgb_point_cloud:=True
+pixi run ros2 run rviz2 rviz2 -d ros/src/lfd3d_ros/launch/rviz/4arms_pcd.rviz
+pixi run ros2 launch lfd3d_ros rgbd_pipeline_launch.py
+pixi run ros2 run lfd3d_ros broadcast_transform --transform_file captures/camera_left_v7_1013/T_world_from_camera_est.txt # or the latest calibration file
+```
+
+- Can verify quality of current calibration by checking robot pcd / robot urdf overlay quality. If not good enough, run in another terminal:
+`pixi run ros2 run lfd3d_ros camera_calibration_collect_ros`
+
+- Collect ~30 images where the aruco marker is detected in the camera by pressing 'c'.
+
+- After this, in `/home/sriram/Desktop/calibation`, run:
+```
+uv run scripts/calibrate.py --output-dir /home/sriram/Desktop/lfd3d-system/captures/output_20251011_195009 # the latest capture
+```
+- The aruco marker needs to be mounted on the corresponding link for which we record the pose from `camera_calibration_collect_ros`. Might need to play around with hyperparams a bit but typically I see a loss of around 0.025 with the default hyperparams, and a pretty good overlay in rviz.
+
+- After successful calibration, update `configuration_diffusion.py` and maybe the `config.json` files in the trained checkpoints.

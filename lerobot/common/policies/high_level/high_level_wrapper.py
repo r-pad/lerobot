@@ -55,7 +55,7 @@ class HighLevelConfig:
     is_gmm: bool = False
     dino_model: str = "facebook/dinov2-base"
     intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
-    extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt"
+    extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v7_1013.txt"
 
     # dino_3dgp specific configs
     use_fourier_pe: bool = False

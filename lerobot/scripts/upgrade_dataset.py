@@ -369,7 +369,11 @@ def upgrade_dataset(
             continue
 
         # Load any extra data needed for this episode
-        episode_extras = _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata)
+        try:
+            episode_extras = _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata)
+        except AssertionError as e:
+            print(f"Could not find auxiliary data for episode {episode_idx}. Skipping")
+            continue
 
         # Get episode bounds
         episode_start = source_dataset.episode_data_index["from"][episode_idx].item()
@@ -421,7 +425,7 @@ if __name__ == "__main__":
                         help="Target dataset repository ID")
     parser.add_argument("--intrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/intrinsics.txt",
                         help="Path to the intrinsics.txt file")
-    parser.add_argument("--extrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_est_v6_0709.txt",
+    parser.add_argument("--extrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_est_v7_1013.txt",
                         help="Path to the extrinsics.txt file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")
