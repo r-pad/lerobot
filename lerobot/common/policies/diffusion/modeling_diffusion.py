@@ -203,8 +203,10 @@ class DiffusionPolicy(PreTrainedPolicy):
             else:
                 if len(batch[["observation.images.agentview_goal_gripper_proj"]].shape) == 5:
                     batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, :, [1, 2, 0], :, : ] # top, left, right -> left, right, top
-                else:
+                elif len(batch[["observation.images.agentview_goal_gripper_proj"]].shape) == 4:
                     batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, [1, 2, 0], :, : ] # top, left, right -> left, right, top
+                else:
+                    raise ValueError("unexpected tensor shape")
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
@@ -238,8 +240,10 @@ class DiffusionPolicy(PreTrainedPolicy):
             else:
                 if len(batch[["observation.images.agentview_goal_gripper_proj"]].shape) == 5:
                     batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, :, [1, 2, 0], :, : ] # top, left, right -> left, right, top
-                else:
+                elif len(batch[["observation.images.agentview_goal_gripper_proj"]].shape) == 4:
                     batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, [1, 2, 0], :, : ] # top, left, right -> left, right, top
+                else:
+                    raise ValueError("unexpected tensor shape")
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
