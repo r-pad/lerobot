@@ -200,6 +200,8 @@ class DiffusionPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             if self.config.use_single_channel_goal and "observation.images.agentview_goal_gripper_proj" in batch:
                 batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.agentview_goal_gripper_proj")
+            else:
+                batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][..., [1, 2, 0]] # top, left, right -> left, right, top
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
@@ -230,6 +232,8 @@ class DiffusionPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             if self.config.use_single_channel_goal:
                 batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.agentview_goal_gripper_proj")
+            else:
+                batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][..., [1, 2, 0]] # top, left, right -> left, right, top
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
