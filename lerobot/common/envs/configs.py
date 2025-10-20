@@ -167,8 +167,8 @@ class LiberoEnv(EnvConfig):
     episode_length: int = 300
     obs_type: str = "pixels_agent_pos"
     render_mode: str = "rgb_array"
-    camera_heights: int = 128
-    camera_widths: int = 128
+    camera_heights: int = 256
+    camera_widths: int = 256
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
             "action": PolicyFeature(type=FeatureType.ACTION, shape=(7,)),
