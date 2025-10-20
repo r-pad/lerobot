@@ -164,7 +164,7 @@ if __name__ == "__main__":
         raise ValueError("No files")
 
 
-    IMG_SHAPE = (128, 128)
+    IMG_SHAPE = (256, 256)
     features = {
         "observation.state": {
             'dtype': 'float32',

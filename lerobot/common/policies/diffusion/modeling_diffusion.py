@@ -61,9 +61,15 @@ def repeat_goal_first_channel_as_rgb(batch, goal_key_name):
         batch: Updated batch dictionary with modified goal image
     """
     if len(batch[goal_key_name].shape) == 5: # train
-        batch[goal_key_name] = batch[goal_key_name][:, :, 0:1].repeat(1, 1, 3, 1, 1)
+        if goal_key_name == "observation.images.agentview_goal_gripper_proj": # top, left gripper, right gripper
+            batch[goal_key_name] = batch[goal_key_name][:, :, 1:2].repeat(1, 1, 3, 1, 1) # Use left gripper ... 
+        else:
+            batch[goal_key_name] = batch[goal_key_name][:, :, 0:1].repeat(1, 1, 3, 1, 1)
     elif len(batch[goal_key_name].shape) == 4: # inference, no history
-        batch[goal_key_name] = batch[goal_key_name][:, 0:1].repeat(1, 3, 1, 1)
+        if goal_key_name == "observation.images.agentview_goal_gripper_proj":
+            batch[goal_key_name] = batch[goal_key_name][:, :, 1:2].repeat(1, 1, 3, 1, 1)
+        else:
+            batch[goal_key_name] = batch[goal_key_name][:, 0:1].repeat(1, 3, 1, 1)
     else:
         raise ValueError("unexpected tensor shape")
     return batch
