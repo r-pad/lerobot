@@ -159,6 +159,10 @@ class AzureKinectCameraConfig(CameraConfig):
     AzureKinectCameraConfig(0, 30, 1280, 720)
     AzureKinectCameraConfig(0, 15, 1920, 1080, use_depth=True)
     AzureKinectCameraConfig(0, 30, 1920, 1080, rotation=90)
+
+    # For synchronized multi-camera setups:
+    AzureKinectCameraConfig(0, 30, 1280, 720, wired_sync_mode="master")
+    AzureKinectCameraConfig(1, 30, 1280, 720, wired_sync_mode="subordinate", subordinate_delay_off_master_usec=200)
     ```
     """
     device_id: int
@@ -173,6 +177,8 @@ class AzureKinectCameraConfig(CameraConfig):
     use_point_cloud: bool = False
     use_transformed_color: bool = False
     rotation: int | None = None
+    wired_sync_mode: str | None = None  # None, "master", or "subordinate"
+    subordinate_delay_off_master_usec: int = 200  # Delay in microseconds for subordinate cameras
     mock: bool = False
 
     def __post_init__(self):
@@ -223,6 +229,12 @@ class AzureKinectCameraConfig(CameraConfig):
         if self.use_point_cloud and not self.use_depth:
             raise ValueError(
                 "use_point_cloud requires depth data. Enable use_depth."
+            )
+
+        # Validate wired sync mode
+        if self.wired_sync_mode is not None and self.wired_sync_mode not in ["master", "subordinate"]:
+            raise ValueError(
+                f"wired_sync_mode must be None, 'master', or 'subordinate', got {self.wired_sync_mode}"
             )
         
     def get_feature_specs(self, cam_key: str) -> dict[str, dict]:

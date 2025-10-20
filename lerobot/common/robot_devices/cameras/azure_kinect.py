@@ -93,26 +93,47 @@ def save_images_from_cameras(
     use_transformed_depth=False,
     use_point_cloud=False,
     use_transformed_color=False,
+    wired_sync_modes: list[str] | None = None,
+    subordinate_delay_off_master_usec: int = 200,
     mock=False,
 ):
     """
     Initializes all the cameras and saves images to the directory. Useful to visually identify the camera
     associated to a given device ID.
+
+    For synchronized multi-camera setups:
+    - wired_sync_modes must match the length and order of device_ids
+    - The order should correspond to the real-world hardware configuration
+    - Example: device_ids=[1, 0], wired_sync_modes=["subordinate", "master"] means device 1 is subordinate, device 0 is master
     """
     if device_ids is None or len(device_ids) == 0:
-        camera_infos = find_cameras(mock=mock)
-        device_ids = [cam["device_id"] for cam in camera_infos]
+        device_ids = [0]
 
     if mock:
         import tests.cameras.mock_cv2 as cv2
     else:
         import cv2
 
+    # Validate wired_sync_modes if provided
+    if wired_sync_modes is not None and len(wired_sync_modes) != len(device_ids):
+        raise ValueError(
+            f"If wired_sync_modes is provided, it must match the length of device_ids. "
+            f"Got {len(wired_sync_modes)} sync modes for {len(device_ids)} devices."
+        )
+
     print("Initializing cameras")
     cameras = []
 
     # Create all camera objects
-    for device_id in device_ids:
+    for i, device_id in enumerate(device_ids):
+        # Get the wired sync mode for this camera
+        wired_sync_mode = None
+        if wired_sync_modes is not None:
+            sync_mode_str = wired_sync_modes[i]
+            # Handle string "None" or actual None
+            if sync_mode_str and sync_mode_str.lower() != "none":
+                wired_sync_mode = sync_mode_str
+
         config = AzureKinectCameraConfig(
             device_id=device_id,
             fps=fps,
@@ -123,30 +144,38 @@ def save_images_from_cameras(
             use_transformed_depth=use_transformed_depth,
             use_point_cloud=use_point_cloud,
             use_transformed_color=use_transformed_color,
+            wired_sync_mode=wired_sync_mode,
+            subordinate_delay_off_master_usec=subordinate_delay_off_master_usec,
             mock=mock
         )
         camera = AzureKinectCamera(config)
         cameras.append(camera)
 
-    # Phase 1: Open all cameras (don't start streaming yet)
     for camera in cameras:
         camera.connect(start_cameras=False)
 
-    # Phase 2: Start all cameras in parallel using threads (required for multiple cameras)
-    def start_camera_thread(cam):
+    # Subordinate cameras must start first, then master cameras
+    subordinate_cameras = [cam for cam in cameras if cam.wired_sync_mode == "subordinate"]
+    master_cameras = [cam for cam in cameras if cam.wired_sync_mode == "master"]
+    standalone_cameras = [cam for cam in cameras if cam.wired_sync_mode is None]
+
+    # Start subordinate cameras first
+    for cam in subordinate_cameras:
+        cam.start()
+    # Then start master camera
+    for cam in master_cameras:
         cam.start()
 
-    threads = [threading.Thread(target=start_camera_thread, args=(cam,)) for cam in cameras]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    # Or standalone camera
+    for cam in standalone_cameras:
+        cam.start()
 
     # Print info after all started
     for camera in cameras:
+        sync_info = f", sync_mode={camera.wired_sync_mode}" if camera.wired_sync_mode else ""
         print(
             f"AzureKinectCamera({camera.device_id}, fps={camera.fps}, width={camera.capture_width}, "
-            f"height={camera.capture_height}, color_mode={camera.color_mode}, use_depth={camera.use_depth})"
+            f"height={camera.capture_height}, color_mode={camera.color_mode}, use_depth={camera.use_depth}{sync_info})"
         )
 
     images_dir = Path(images_dir)
@@ -221,8 +250,9 @@ class AzureKinectCamera:
     The AzureKinectCamera class provides an interface for Azure Kinect cameras with features:
     - Uses device ID for camera identification
     - Supports color, depth, IR, transformed depth (RGB-aligned), point clouds, and transformed color
+    - Supports wired synchronized multi-camera setups (master/subordinate mode)
     - Compatible with the LeRobot camera interface pattern
-    
+
     To find available cameras, run:
     ```bash
     python lerobot/common/robot_devices/cameras/azurekinect.py --images-dir outputs/images_from_kinect_cameras
@@ -242,28 +272,64 @@ class AzureKinectCamera:
     Advanced usage (multiple data types):
     ```python
     config = AzureKinectCameraConfig(
-        device_id=0, 
-        use_depth=True, 
+        device_id=0,
+        use_depth=True,
         use_transformed_depth=True,
         use_point_cloud=True
     )
     camera = AzureKinectCamera(config)
     camera.connect()
-    
+
     result = camera.read()  # Returns dict with keys: 'color', 'depth', 'transformed_depth', 'point_cloud'
     color_image = result['color']              # (H, W, 3) uint8
     depth_map = result['depth']                # (H, W) uint16 in mm
     aligned_depth = result['transformed_depth'] # (H, W) uint16 aligned to color camera
     point_cloud = result['point_cloud']        # (H, W, 3) float32 in meters (X, Y, Z)
-    
+
     camera.disconnect()
+    ```
+
+    Synchronized multi-camera usage:
+    ```python
+    # Configure master and subordinate cameras
+    # Note: The device IDs and sync modes must match your real-world hardware setup
+    master_config = AzureKinectCameraConfig(
+        device_id=0,  # This device is physically configured as master
+        fps=15,
+        width=1280,
+        height=720,
+        wired_sync_mode="master"
+    )
+    subordinate_config = AzureKinectCameraConfig(
+        device_id=1,  # This device is physically configured as subordinate
+        fps=15,
+        width=1280,
+        height=720,
+        wired_sync_mode="subordinate",
+        subordinate_delay_off_master_usec=200
+    )
+
+    master_cam = AzureKinectCamera(master_config)
+    subordinate_cam = AzureKinectCamera(subordinate_config)
+
+    # Connect cameras (but don't start yet)
+    subordinate_cam.connect(start_cameras=False)
+    master_cam.connect(start_cameras=False)
+
+    # IMPORTANT: Start subordinate first, then master (required for proper sync!)
+    subordinate_cam.start()
+    master_cam.start()
+
+    # Now both cameras are synchronized
+    master_img = master_cam.read()
+    subordinate_img = subordinate_cam.read()
     ```
     """
 
     def __init__(self, config: AzureKinectCameraConfig):
         self.config = config
         self.device_id = config.device_id
-        
+
         # Store the raw (capture) resolution from the config
         self.capture_width = config.width
         self.capture_height = config.height
@@ -284,6 +350,8 @@ class AzureKinectCamera:
         self.use_transformed_depth = config.use_transformed_depth
         self.use_point_cloud = config.use_point_cloud
         self.use_transformed_color = config.use_transformed_color
+        self.wired_sync_mode = config.wired_sync_mode
+        self.subordinate_delay_off_master_usec = config.subordinate_delay_off_master_usec
         self.mock = config.mock
 
         self.camera = None
@@ -328,7 +396,7 @@ class AzureKinectCamera:
 
         try:
             import pyk4a
-            from pyk4a import Config, PyK4A, ColorResolution, DepthMode, FPS
+            from pyk4a import Config, PyK4A, ColorResolution, DepthMode, FPS, WiredSyncMode
         except ImportError:
             raise ImportError(
                 "pyk4a is required for Azure Kinect support. Install it with: pip install pyk4a"
@@ -367,22 +435,30 @@ class AzureKinectCamera:
         else:
             color_format = None
 
-        # Create configuration
+        # Map wired sync mode string to enum
+        k4a_wired_sync = None
+        if self.wired_sync_mode == "master":
+            k4a_wired_sync = WiredSyncMode.MASTER
+        elif self.wired_sync_mode == "subordinate":
+            k4a_wired_sync = WiredSyncMode.SUBORDINATE
+
+        # Create configuration dictionary
+        config_params = {
+            "color_resolution": k4a_color_res,
+            "depth_mode": k4a_depth_mode,
+            "camera_fps": k4a_fps,
+            "synchronized_images_only": needs_depth,
+        }
+
         if color_format:
-            k4a_config = Config(
-                color_resolution=k4a_color_res,
-                color_format=color_format,
-                depth_mode=k4a_depth_mode,
-                camera_fps=k4a_fps,
-                synchronized_images_only=needs_depth,
-            )
-        else:
-            k4a_config = Config(
-                color_resolution=k4a_color_res,
-                depth_mode=k4a_depth_mode,
-                camera_fps=k4a_fps,
-                synchronized_images_only=needs_depth,
-            )
+            config_params["color_format"] = color_format
+
+        if k4a_wired_sync is not None:
+            config_params["wired_sync_mode"] = k4a_wired_sync
+            if self.wired_sync_mode == "subordinate":
+                config_params["subordinate_delay_off_master_usec"] = self.subordinate_delay_off_master_usec
+
+        k4a_config = Config(**config_params)
 
         try:
             self.camera = PyK4A(config=k4a_config, device_id=self.device_id, thread_safe=False)
@@ -725,6 +801,21 @@ if __name__ == "__main__":
         "--use-transformed-color",
         action="store_true",
         help="Enable transformed color (aligned to depth camera).",
+    )
+    parser.add_argument(
+        "--wired-sync-modes",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Wired sync mode for each camera (None, 'master', or 'subordinate'). "
+             "Must match length and order of --device-ids. The order should match the real-world hardware setup. "
+             "Example: --device-ids 1 0 --wired-sync-modes subordinate master (device 1 is subordinate, device 0 is master)",
+    )
+    parser.add_argument(
+        "--subordinate-delay-off-master-usec",
+        type=int,
+        default=200,
+        help="Delay in microseconds for subordinate cameras (default: 200).",
     )
     parser.add_argument(
         "--images-dir",
