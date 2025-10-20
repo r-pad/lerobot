@@ -89,6 +89,11 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 
 Some config parameters cannot be set at runtime and are instead saved in the config during training. To rollout with different high-level configs, modify `outputs/train/<model-name>/checkpoints/last/pretrained_model/config.json`
 
+Visualize:
+```
+python lerobot/scripts/visualize_goal_gripper_proj.py --repo-id sriramsk/eval_fold_bottoms_multiTask_gc_dino3dgp_moreHuman
+```
+
 ## Misc mapping stuff to align LeRobot Aloha and `robot_descriptions` Aloha
 
 - In configuration.q of the mink configuration object
