@@ -122,8 +122,8 @@ def gen_libero_dataset(
                 if "observation.images.agentview_goal_gripper_proj" in features:
                     # Generate gripper projection heatmap for agentview camera
                     gripper_pcd_cam = all_obs[next_event_idx]["gripper_pcd"]  # Already in camera frame
-                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat)
-                    frame_data["observation.images.agentview_goal_gripper_proj"] = generate_heatmap_from_points(points_2d, img_shape)
+                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat) # top, left, right, grasp center
+                    frame_data["observation.images.agentview_goal_gripper_proj"] = generate_heatmap_from_points(points_2d[[1,2,0,3],:], img_shape)
 
                 libero_dataset.add_frame(frame_data)
 
