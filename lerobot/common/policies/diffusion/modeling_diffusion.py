@@ -67,7 +67,7 @@ def repeat_goal_first_channel_as_rgb(batch, goal_key_name):
             batch[goal_key_name] = batch[goal_key_name][:, :, 0:1].repeat(1, 1, 3, 1, 1)
     elif len(batch[goal_key_name].shape) == 4: # inference, no history
         if goal_key_name == "observation.images.agentview_goal_gripper_proj":
-            batch[goal_key_name] = batch[goal_key_name][:, 1:2].repeat(1, 3, 1, 1)
+            batch[goal_key_name] = batch[goal_key_name][:, 0:1].repeat(1, 3, 1, 1)
         else:
             batch[goal_key_name] = batch[goal_key_name][:, 0:1].repeat(1, 3, 1, 1)
     else:
@@ -204,7 +204,7 @@ class DiffusionPolicy(PreTrainedPolicy):
                 if len(batch["observation.images.agentview_goal_gripper_proj"].shape) == 5:
                     batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, :, [1, 2, 0], :, : ] # top, left, right -> left, right, top
                 elif len(batch["observation.images.agentview_goal_gripper_proj"].shape) == 4:
-                    batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, [1, 2, 0], :, : ] # top, left, right -> left, right, top
+                    batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, [0, 1, 2], :, : ] #When eval, order is correct
                 else:
                     raise ValueError("unexpected tensor shape")
             batch["observation.images"] = torch.stack(
@@ -241,7 +241,7 @@ class DiffusionPolicy(PreTrainedPolicy):
                 if len(batch["observation.images.agentview_goal_gripper_proj"].shape) == 5:
                     batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, :, [1, 2, 0], :, : ] # top, left, right -> left, right, top
                 elif len(batch["observation.images.agentview_goal_gripper_proj"].shape) == 4:
-                    batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, [1, 2, 0], :, : ] # top, left, right -> left, right, top
+                    batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, [0, 1, 2], :, : ] # When eval, order is correct
                 else:
                     raise ValueError("unexpected tensor shape")
             batch["observation.images"] = torch.stack(
