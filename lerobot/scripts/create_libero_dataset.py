@@ -42,7 +42,7 @@ def extract_obs_from_demo(demo, task_bddl_file, img_shape):
             obs['robot0_eef_quat'],
             obs['robot0_gripper_qpos'][0],
             np.linalg.inv(agentview_ext_mat),  # Transform to camera frame
-        )
+        )[[1, 2, 0, 3], : ] # swap gripper pcd
         all_obs.append(obs)
 
     env.close()
@@ -122,8 +122,8 @@ def gen_libero_dataset(
                 if "observation.images.agentview_goal_gripper_proj" in features:
                     # Generate gripper projection heatmap for agentview camera
                     gripper_pcd_cam = all_obs[next_event_idx]["gripper_pcd"]  # Already in camera frame
-                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat) # top, left, right, grasp center
-                    frame_data["observation.images.agentview_goal_gripper_proj"] = generate_heatmap_from_points(points_2d[[1,2,0,3],:], img_shape)
+                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat) # left, right, top, grasp center
+                    frame_data["observation.images.agentview_goal_gripper_proj"] = generate_heatmap_from_points(points_2d, img_shape)
 
                 libero_dataset.add_frame(frame_data)
 
