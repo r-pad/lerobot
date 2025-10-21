@@ -61,14 +61,8 @@ def repeat_goal_first_channel_as_rgb(batch, goal_key_name):
         batch: Updated batch dictionary with modified goal image
     """
     if len(batch[goal_key_name].shape) == 5: # train
-        if goal_key_name == "observation.images.agentview_goal_gripper_proj": # top, left gripper, right gripper
-            batch[goal_key_name] = batch[goal_key_name][:, :, 1:2].repeat(1, 1, 3, 1, 1) # Use left gripper ... 
-        else:
             batch[goal_key_name] = batch[goal_key_name][:, :, 0:1].repeat(1, 1, 3, 1, 1)
     elif len(batch[goal_key_name].shape) == 4: # inference, no history
-        if goal_key_name == "observation.images.agentview_goal_gripper_proj":
-            batch[goal_key_name] = batch[goal_key_name][:, 0:1].repeat(1, 3, 1, 1)
-        else:
             batch[goal_key_name] = batch[goal_key_name][:, 0:1].repeat(1, 3, 1, 1)
     else:
         raise ValueError("unexpected tensor shape")
@@ -200,13 +194,6 @@ class DiffusionPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             if self.config.use_single_channel_goal and "observation.images.agentview_goal_gripper_proj" in batch:
                 batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.agentview_goal_gripper_proj")
-            else:
-                if len(batch["observation.images.agentview_goal_gripper_proj"].shape) == 5:
-                    batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, :, [1, 2, 0], :, : ] # top, left, right -> left, right, top
-                elif len(batch["observation.images.agentview_goal_gripper_proj"].shape) == 4:
-                    batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, [0, 1, 2], :, : ] #When eval, order is correct
-                else:
-                    raise ValueError("unexpected tensor shape")
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
@@ -237,13 +224,6 @@ class DiffusionPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             if self.config.use_single_channel_goal:
                 batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.agentview_goal_gripper_proj")
-            else:
-                if len(batch["observation.images.agentview_goal_gripper_proj"].shape) == 5:
-                    batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, :, [1, 2, 0], :, : ] # top, left, right -> left, right, top
-                elif len(batch["observation.images.agentview_goal_gripper_proj"].shape) == 4:
-                    batch["observation.images.agentview_goal_gripper_proj"] = batch["observation.images.agentview_goal_gripper_proj"][:, [0, 1, 2], :, : ] # When eval, order is correct
-                else:
-                    raise ValueError("unexpected tensor shape")
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
