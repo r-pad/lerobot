@@ -210,6 +210,12 @@ class HighLevelWrapper:
 
         if self.config.use_gripper_pcd:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            if robot_type == "aloha":
+                gripper_pcd = gripper_pcd[self.aloha_gripper_idx]
+            elif robot_type == "libero_franka":
+                gripper_pcd = gripper_pcd[self.libero_franka_idx]
+            else:
+                raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
             if self.config.use_rgb:
                 gripper_rgb = np.zeros((gripper_pcd.shape[0], 3))
@@ -236,6 +242,12 @@ class HighLevelWrapper:
         gripper_pcd = None
         if self.config.use_gripper_pcd:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            if robot_type == "aloha":
+                gripper_pcd = gripper_pcd[self.aloha_gripper_idx]
+            elif robot_type == "libero_franka":
+                gripper_pcd = gripper_pcd[self.libero_franka_idx]
+            else:
+                raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
             self.last_gripper_pcd = gripper_pcd
 
         # Get text embedding if needed
@@ -266,13 +278,13 @@ class HighLevelWrapper:
         gripper_token = None
         if self.config.use_gripper_token:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
-            self.last_gripper_pcd = gripper_pcd
             if robot_type == "aloha":
                 gripper_pcd = gripper_pcd[self.aloha_gripper_idx]
             elif robot_type == "libero_franka":
                 gripper_pcd = gripper_pcd[self.libero_franka_idx]
             else:
                 raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
+            self.last_gripper_pcd = gripper_pcd
             gripper_token = self._gripper_pcd_to_token(gripper_pcd)
 
         # Get text embedding if needed
