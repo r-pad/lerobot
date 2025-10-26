@@ -222,7 +222,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
     frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
     camera_names = list(calibrations.keys())
-    rgb_data, depth_data = {}
+    rgb_data, depth_data = {}, {}
 
     if phantomize:
         raise NotImplementedError("Multiview not yet supported for phantom mode")
@@ -241,8 +241,8 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         # If human data without retargeting, we don't have any robot states/actions
         # and so we just copy over the original states/actions as a placeholder.
         for cam_name in camera_names:
-            rgb_data = (frame_data[f"observation.images.{cam_name}.color"].permute(1,2,0) * 255).to(torch.uint8)
-            depth_data = (frame_data[f"observation.images.{cam_name}.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
+            rgb_data[cam_name] = (frame_data[f"observation.images.{cam_name}.color"].permute(1,2,0) * 255).to(torch.uint8)
+            depth_data[cam_name]= (frame_data[f"observation.images.{cam_name}.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
         eef_data = frame_data["observation.right_eef_pose"]
         joint_state = frame_data["observation.state"]
         action_eef = frame_data["action.right_eef_pose"]
@@ -496,11 +496,11 @@ if __name__ == "__main__":
     --calibration_config /path/to/calibration_multiview.json --new_features gripper_pcds goal_gripper_proj
     """
     parser = argparse.ArgumentParser(description="Upgrade dataset with new keys and calibration.")
-    parser.add_argument("--source_repo_id", type=str, default="sriramsk/human_mug_0718",
+    parser.add_argument("--source_repo_id", type=str, default="sriramsk/fold_onesie_20250831_subsampled",
                         help="Source dataset repository ID")
-    parser.add_argument("--target_repo_id", type=str, default="sriramsk/phantom_mug_0718",
+    parser.add_argument("--target_repo_id", type=str, default="sriramsk/fold_onesie_20250831_subsampled_heatmapGoal",
                         help="Target dataset repository ID")
-    parser.add_argument("--calibration_config", type=str, default="lerobot/scripts/aloha_calibration/calibration_single.json",
+    parser.add_argument("--calibration_config", type=str, default="aloha_calibration/calibration_single.json",
                         help="Path to calibration JSON config file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")

@@ -44,10 +44,19 @@ def merge_datasets(dataset_repo_ids: list[str], target_repo_id: str):
                     if k not in AUTO_FIELDS and k in source_dataset.features
                 }
                 frame_data["task"] = source_meta.tasks[frame["task_index"].item()]
-                frame_data["observation.images.cam_azure_kinect.color"] = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
-                frame_data["observation.images.cam_azure_kinect.transformed_depth"] = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
-                if "observation.images.cam_azure_kinect.goal_gripper_proj" in frame_data:
-                    frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = (frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"].permute(1,2,0) * 255).to(torch.uint8)
+
+                # Apply transformations to all camera fields
+                for key in list(frame_data.keys()):
+                    if key.startswith("observation.images.") and ".color" in key:
+                        # RGB images: convert to uint8
+                        frame_data[key] = (frame_data[key].permute(1,2,0) * 255).to(torch.uint8)
+                    elif key.startswith("observation.images.") and ".transformed_depth" in key:
+                        # Depth images: convert to uint16
+                        frame_data[key] = (frame_data[key].permute(1,2,0) * 1000).to(torch.uint16)
+                    elif key.startswith("observation.images.") and ".goal_gripper_proj" in key:
+                        # Goal gripper projection: convert to uint8
+                        frame_data[key] = (frame_data[key].permute(1,2,0) * 255).to(torch.uint8)
+
                 if "next_event_idx" in frame_data:
                     frame_data["next_event_idx"] = frame_data["next_event_idx"].int().unsqueeze(0)
                 merged_dataset.add_frame(frame_data)
