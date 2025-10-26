@@ -169,7 +169,7 @@ class DiffusionConfig(PreTrainedConfig):
     hl_use_gripper_pcd: bool = True
     hl_use_gemini: bool = False
     hl_in_channels: int = 7
-    hl_intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
+    hl_intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics_000077925212.txt"
     hl_extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v7_1013.txt"
 
     # dino_heatmap specific configs
