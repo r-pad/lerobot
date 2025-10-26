@@ -12,7 +12,7 @@ import numpy as np
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd, retarget_aloha_gripper_pcd
 from lerobot.common.policies.high_level.classify_utils import TASK_SPEC
 from PIL import Image
-from typing import List
+from typing import List, Dict
 import argparse
 import os
 import imageio.v3 as iio
@@ -20,6 +20,36 @@ import pytorch3d.transforms as transforms
 import json
 from typing import Optional
 import av
+from pathlib import Path
+
+
+def load_calibrations(calibration_config_path: str) -> Dict[str, Dict[str, np.ndarray]]:
+    """
+    Load camera calibrations from JSON config.
+
+    JSON format:
+    {
+        "cam_azure_kinect": {
+            "intrinsics": "path/to/intrinsics.txt",
+            "extrinsics": "path/to/extrinsics.txt"
+        }
+    }
+
+    Returns: Dict mapping camera names to {"K": intrinsics, "T_world_cam": extrinsics}
+    """
+    with open(calibration_config_path, 'r') as f:
+        config = json.load(f)
+
+    calibrations = {}
+    for cam_name, cam_config in config.items():
+        calibrations[cam_name] = {
+            "K": np.loadtxt(cam_config["intrinsics"]),
+            "T_world_cam": np.loadtxt(cam_config["extrinsics"])
+        }
+
+    print(f"Loaded calibrations for {len(calibrations)} camera(s): {list(calibrations.keys())}")
+    return calibrations
+
 
 def read_depth_video(video_path):
     # Open video with PyAV directly
@@ -178,7 +208,7 @@ def _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata):
 
 def _process_frame_data(original_frame, source_dataset, expanded_features, source_meta,
                        phantomize, humanize, episode_extras, frame_idx, episode_length,
-                       new_features, cam_to_world):
+                       new_features, calibrations):
     """Process a single frame's data with additional features."""
     frame_data = {}
 
@@ -191,11 +221,14 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
             frame_data[key] = original_frame[key]
 
     frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
+    camera_names = list(calibrations.keys())
+    rgb_data, depth_data = {}
 
     if phantomize:
-        rgb_data = episode_extras['phantom_vid'][frame_idx]
-        wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
-        depth_data = (episode_extras['phantom_depth_vid'][frame_idx][:, :, None] * 1000).to(torch.uint16)
+        raise NotImplementedError("Multiview not yet supported for phantom mode")
+        for cam_name in camera_names:
+            rgb_data[cam_name] = episode_extras[f'phantom_vid_{cam_name}'][frame_idx]
+            depth_data[cam_name] = (episode_extras[f'phantom_depth_vid_{cam_name}'][frame_idx][:, :, None] * 1000).to(torch.uint16)
         eef_data = episode_extras['phantom_eef_pose'][frame_idx]
         joint_state = episode_extras['phantom_joint_state'][frame_idx]
         next_idx = (frame_idx + 1) if (frame_idx + 1) < episode_length else frame_idx
@@ -203,20 +236,23 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         action = episode_extras['phantom_joint_state'][next_idx]
         goal_indices = episode_extras['episode_events']['event_idxs']
     else:
+        if humanize: raise NotImplementedError("Multiview not yet supported for humanize mode")
         # If robot data, we copy over the original robot states/actions
         # If human data without retargeting, we don't have any robot states/actions
         # and so we just copy over the original states/actions as a placeholder.
-        rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
-        wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
-        depth_data = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
+        for cam_name in camera_names:
+            rgb_data = (frame_data[f"observation.images.{cam_name}.color"].permute(1,2,0) * 255).to(torch.uint8)
+            depth_data = (frame_data[f"observation.images.{cam_name}.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
         eef_data = frame_data["observation.right_eef_pose"]
         joint_state = frame_data["observation.state"]
         action_eef = frame_data["action.right_eef_pose"]
         action = frame_data["action"]
 
-    frame_data["observation.images.cam_azure_kinect.color"] = rgb_data
+    for cam_name in camera_names:
+        frame_data[f"observation.images.{cam_name}.color"] = rgb_data[cam_name]
+        frame_data[f"observation.images.{cam_name}.transformed_depth"] = depth_data[cam_name]
+    wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
     frame_data["observation.images.cam_wrist"] = wrist_rgb_data
-    frame_data["observation.images.cam_azure_kinect.transformed_depth"] = depth_data
     frame_data["observation.right_eef_pose"] = eef_data
     frame_data["observation.state"] = joint_state
     frame_data["action.right_eef_pose"] = action_eef
@@ -224,16 +260,22 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
     if "observation.points.gripper_pcds" in new_features:
         if humanize:
-            frame_data["observation.points.gripper_pcds"] = episode_extras['episode_gripper_pcds'][frame_idx]
+            raise NotImplementedError("Multiview not yet supported for humanize mode")
+            # We've made the switch to keeping gripper_pcds in robot frame, so the detected hand pcd also needs to be transformed to the robot frame.
+            # frame_data["observation.points.gripper_pcds"] = episode_extras['episode_gripper_pcds'][frame_idx]
         elif phantomize:
+            # Keep in world frame
             if frame_idx in goal_indices:
-                frame_data["observation.points.gripper_pcds"] = retarget_aloha_gripper_pcd(cam_to_world, eef_data, sample_n_points=500)
+                frame_data["observation.points.gripper_pcds"] = retarget_aloha_gripper_pcd(np.eye(4), eef_data, sample_n_points=500)
             else:
-                frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
-                
+                frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=np.eye(4), joint_state=joint_state).astype(np.float32)
+
     # Dummy values, replaced at the end of the episode
-    if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
-        frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = torch.zeros_like(frame_data["observation.images.cam_azure_kinect.color"])
+    for cam_name in camera_names:
+        goal_key = f"observation.images.{cam_name}.goal_gripper_proj"
+        if goal_key in new_features:
+            frame_data[goal_key] = torch.zeros_like(frame_data[f"observation.images.{cam_name}.color"])
+
     if "next_event_idx" in new_features:
         frame_data["next_event_idx"] = np.array([0], dtype=np.int32)
     if "subgoal" in new_features:
@@ -243,9 +285,10 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
 
 def _process_episode_goals(target_dataset, episode_length, new_features, humanize,
-                          episode_extras, phantomize, K, width, height, cam_to_world):
+                          episode_extras, phantomize, calibrations, width, height):
     """Process goal projections, event indices, and subgoals for an episode."""
     if humanize:
+        raise NotImplementedError("Multiview not yet supported for humanize mode. Make sure episode_gripper_pcds is in the right coord frame.")
         # Use events from JSON for human data
         goal_indices = episode_extras['episode_events']['event_idxs']
         # Ensure last frame is included as a goal
@@ -263,24 +306,35 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
         goal_indices = extract_events_with_gripper_pos(
             joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
 
-    if "observation.images.cam_azure_kinect.goal_gripper_proj" in new_features:
-        # Generate goal images for each goal index
-        goal_images = []
-        for goal_idx in goal_indices:
-            if humanize:
-                goal_img = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[goal_idx])
-            else:
-                goal_img = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[goal_idx])
-            goal_images.append(Image.fromarray(goal_img).convert("RGB"))
+    camera_names = list(calibrations.keys())
 
-        # Assign goal images to frames based on segments
-        current_goal_idx = 0
-        for i in range(episode_length):
-            # Move to next goal if we've passed the current goal index
-            if current_goal_idx < len(goal_indices) - 1 and i >= goal_indices[current_goal_idx]:
-                current_goal_idx += 1
+    # Check if any camera has goal_gripper_proj feature
+    has_goal_proj = any(f"observation.images.{cam_name}.goal_gripper_proj" in new_features
+                        for cam_name in camera_names)
 
-            goal_images[current_goal_idx].save(target_dataset.episode_buffer["observation.images.cam_azure_kinect.goal_gripper_proj"][i])
+    if has_goal_proj:
+        # Generate goal images for each camera at each goal index
+        for cam_name in camera_names:
+            goal_key = f"observation.images.{cam_name}.goal_gripper_proj"
+            K = calibrations[cam_name]["K"]
+            cam_to_world = calibrations[cam_name]["T_world_cam"]
+
+            goal_images = []
+            for goal_idx in goal_indices:
+                if humanize:
+                    goal_img = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[goal_idx])
+                else:
+                    goal_img = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[goal_idx])
+                goal_images.append(Image.fromarray(goal_img).convert("RGB"))
+
+            # Assign goal images to frames based on segments
+            current_goal_idx = 0
+            for i in range(episode_length):
+                # Move to next goal if we've passed the current goal index
+                if current_goal_idx < len(goal_indices) - 1 and i >= goal_indices[current_goal_idx]:
+                    current_goal_idx += 1
+
+                goal_images[current_goal_idx].save(target_dataset.episode_buffer[goal_key][i])
 
     if "next_event_idx" in new_features:
         current_goal_idx = 0
@@ -311,8 +365,7 @@ def upgrade_dataset(
     target_repo_id: str,
     new_features: dict,
     remove_features: List,
-    intrinsics_txt: str,
-    extrinsics_txt: str,
+    calibrations: Dict[str, Dict[str, np.ndarray]],
     discard_episodes: List[int],
     phantomize: bool,
     humanize: bool,
@@ -326,23 +379,29 @@ def upgrade_dataset(
         target_repo_id: Repository ID for the new dataset
         remove_features: List of features to remove from the schema
         new_features: Dictionary of new features to add to the schema
-        intrinsics_txt: Path to intrinsics txt
-        extrinsics_txt: Path to extrinsics txt
+        calibrations: Dict of camera calibrations from load_calibrations()
         discard_episodes: Episodes to be discarded when upgrading
         phantomize: Source data is from human demos, upgrade to robot using output from Phantom
         humanize: Source data is from human demos, use directly without phantom retargeting
         path_to_extradata: Auxiliary data for phantomize / humanize
     """
     tolerance_s = 0.0004
-    cam_to_world = np.loadtxt(extrinsics_txt)
-    K = np.loadtxt(intrinsics_txt)
+
+    # Validate multiview constraints
+    if len(calibrations) > 1 and (phantomize or humanize):
+        raise NotImplementedError("Multiview not yet supported for phantom/humanize modes")
 
     # 1. Load the existing dataset
     print(f"Loading source dataset: {source_repo_id}")
     source_dataset = LeRobotDataset(source_repo_id, tolerance_s=tolerance_s)
     source_meta = LeRobotDatasetMetadata(source_repo_id)
 
-    height, width, _ = source_dataset.features["observation.images.cam_azure_kinect.color"]["shape"]
+    # Get camera names from calibrations
+    camera_names = list(calibrations.keys())
+
+    # Get image dimensions from first camera
+    first_cam = camera_names[0]
+    height, width, _ = source_dataset.features[f"observation.images.{first_cam}.color"]["shape"]
 
     # 2. Create expanded feature schema
     print("Creating expanded feature schema...")
@@ -397,7 +456,7 @@ def upgrade_dataset(
             frame_data = _process_frame_data(
                 original_frame, source_dataset, expanded_features, source_meta,
                 phantomize, humanize, episode_extras, frame_idx, episode_length,
-                new_features, cam_to_world
+                new_features, calibrations
             )
 
             target_dataset.add_frame(frame_data)
@@ -405,7 +464,7 @@ def upgrade_dataset(
         # Process episode-level goals and events
         _process_episode_goals(
             target_dataset, episode_length, new_features, humanize,
-            episode_extras, phantomize, K, width, height, cam_to_world
+            episode_extras, phantomize, calibrations, width, height
         )
 
         # Save episode
@@ -427,16 +486,22 @@ if __name__ == "__main__":
     # Direct human data mode
     python upgrade_dataset.py --source_repo_id sriramsk/mug_on_platform_20250830_human --target_repo_id sriramsk/mug_on_platform_20250830_human_heatmapGoal --new_features gripper_pcds goal_gripper_proj next_event_idx subgoal \
     --humanize --path_to_extradata /data/sriram/lerobot_extradata/sriramsk/mug_on_platform_20250830_human
+
+    # Single camera mode
+    python upgrade_dataset.py --source_repo_id sriramsk/robot_data --target_repo_id sriramsk/robot_data_upgraded \
+    --calibration_config /path/to/calibration_single.json --new_features gripper_pcds goal_gripper_proj
+
+    # Multiview mode
+    python upgrade_dataset.py --source_repo_id sriramsk/robot_multiview --target_repo_id sriramsk/robot_multiview_upgraded \
+    --calibration_config /path/to/calibration_multiview.json --new_features gripper_pcds goal_gripper_proj
     """
-    parser = argparse.ArgumentParser(description="Upgrade dataset with new keys and optional intrinsics/extrinsics transformation.")
+    parser = argparse.ArgumentParser(description="Upgrade dataset with new keys and calibration.")
     parser.add_argument("--source_repo_id", type=str, default="sriramsk/human_mug_0718",
                         help="Source dataset repository ID")
     parser.add_argument("--target_repo_id", type=str, default="sriramsk/phantom_mug_0718",
                         help="Target dataset repository ID")
-    parser.add_argument("--intrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/intrinsics.txt",
-                        help="Path to the intrinsics.txt file")
-    parser.add_argument("--extrinsics_txt", type=str, default="/home/sriram/Desktop/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_est_v7_1013.txt",
-                        help="Path to the extrinsics.txt file")
+    parser.add_argument("--calibration_config", type=str, default="lerobot/scripts/aloha_calibration/calibration_single.json",
+                        help="Path to calibration JSON config file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")
     parser.add_argument("--new_features", type=str, nargs='*', default=[],
@@ -454,14 +519,20 @@ if __name__ == "__main__":
                         help="Names of features to be removed")
     args = parser.parse_args()
 
+    # Load calibrations
+    calibrations = load_calibrations(args.calibration_config)
+    camera_names = list(calibrations.keys())
+
     new_features = {}
     if "goal_gripper_proj" in args.new_features:
-        new_features["observation.images.cam_azure_kinect.goal_gripper_proj"] = {
-            'dtype': 'video',
-            'shape': (720, 1280, 3),
-            'names': ['height', 'width', 'channels'],
-            'info': 'Projection of gripper pcd at goal position onto image'
-        }
+        # Create goal_gripper_proj feature for each camera
+        for cam_name in camera_names:
+            new_features[f"observation.images.{cam_name}.goal_gripper_proj"] = {
+                'dtype': 'video',
+                'shape': (720, 1280, 3),
+                'names': ['height', 'width', 'channels'],
+                'info': 'Projection of gripper pcd at goal position onto image'
+            }
     if "gripper_pcds" in args.new_features:
         new_features["observation.points.gripper_pcds"] = {
             'dtype': 'pcd',
@@ -500,8 +571,7 @@ if __name__ == "__main__":
         target_repo_id=args.target_repo_id,
         new_features=new_features,
         remove_features=remove_features,
-        intrinsics_txt=args.intrinsics_txt,
-        extrinsics_txt=args.extrinsics_txt,
+        calibrations=calibrations,
         discard_episodes=args.discard_episodes,
         phantomize=args.phantomize,
         humanize=args.humanize,
