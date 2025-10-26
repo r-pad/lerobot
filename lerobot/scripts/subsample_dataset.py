@@ -45,18 +45,23 @@ def subsample_dataset(source_repo_id: str, target_repo_id: str, target_fps: int 
 
             frame_data["task"] = source_meta.tasks[frame["task_index"].item()]
 
-            frame_data["observation.images.cam_azure_kinect.color"] = (
-                frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255
-            ).to(torch.uint8)
-            frame_data["observation.images.cam_azure_kinect.transformed_depth"] = (
-                frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000
-            ).to(torch.uint16)
+            # Handle all Azure Kinect cameras (with cam_azure_kinect prefix)
+            for key in list(frame_data.keys()):
+                if key.startswith("observation.images.cam_azure_kinect"):
+                    if key.endswith(".color"):
+                        frame_data[key] = (
+                            frame_data[key].permute(1,2,0) * 255
+                        ).to(torch.uint8)
+                    elif key.endswith(".transformed_depth"):
+                        frame_data[key] = (
+                            frame_data[key].permute(1,2,0) * 1000
+                        ).to(torch.uint16)
+                    elif key.endswith(".goal_gripper_proj"):
+                        frame_data[key] = (
+                            frame_data[key].permute(1,2,0) * 255
+                        ).to(torch.uint8)
 
-            if "observation.images.cam_azure_kinect.goal_gripper_proj" in frame_data:
-                frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = (
-                    frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"].permute(1,2,0) * 255
-                ).to(torch.uint8)
-
+            # Handle wrist camera if present
             if "observation.images.cam_wrist" in frame_data:
                 frame_data["observation.images.cam_wrist"] = (
                     frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255
