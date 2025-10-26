@@ -67,7 +67,9 @@ class DiffusionConfig(PreTrainedConfig):
         crop_shape: (H, W) shape to crop images to as a preprocessing step for the vision backbone. Must fit
             within the image size. If None, no cropping is done.
         crop_is_random: Whether the crop should be random at training time (it's always a center crop in eval
-            mode).
+            mode). When True, uses center-jittered random cropping.
+        crop_jitter: Maximum pixel offset from center for random cropping. The crop center will be randomly
+            offset by up to ±crop_jitter pixels in both x and y directions. Only used when crop_is_random=True.
         pretrained_backbone_weights: Pretrained weights from torchvision to initialize the backbone.
             `None` means no pretrained weights.
         use_group_norm: Whether to replace batch normalization with group normalization in the backbone.
@@ -128,6 +130,7 @@ class DiffusionConfig(PreTrainedConfig):
     vision_backbone: str = "resnet18"
     crop_shape: tuple[int, int] | None = None
     crop_is_random: bool = True
+    crop_jitter: int = 30
     pretrained_backbone_weights: str | None = None
     use_group_norm: bool = True
     spatial_softmax_num_keypoints: int = 32
