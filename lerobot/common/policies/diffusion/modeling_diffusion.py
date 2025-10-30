@@ -107,8 +107,7 @@ class DiffusionPolicy(PreTrainedPolicy):
 
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
         self._queues = None
-
-        self.latest_gripper_proj = None
+        self.latest_gripper_proj = {}
 
         self.diffusion = DiffusionModel(config)
 

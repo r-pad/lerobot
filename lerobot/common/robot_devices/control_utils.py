@@ -283,14 +283,37 @@ def control_loop(
                     # Generate new goal prediction when queue is empty
                     # This code is specific to diffusion policy / kinect :(
                     if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
-                        rgb = observation["observation.images.cam_azure_kinect.color"].numpy()
-                        depth = observation["observation.images.cam_azure_kinect.transformed_depth"].numpy().squeeze()
-                        gripper_proj = policy.high_level.predict_and_project(single_task, rgb, depth, robot_type=policy.config.robot_type,
-                                                                             robot_kwargs={
-                                                                                 "observation.state": observation["observation.state"]
-                                                                             })
-                        policy.latest_gripper_proj = torch.from_numpy(gripper_proj)
-                    observation["observation.images.cam_azure_kinect.goal_gripper_proj"] = policy.latest_gripper_proj
+                        # Gather observations from all configured cameras
+                        camera_obs = {}
+                        for cam_name in policy.high_level.camera_names:
+                            rgb_key = f"observation.images.{cam_name}.color"
+                            depth_key = f"observation.images.{cam_name}.transformed_depth"
+
+                            # Validate camera data exists
+                            if rgb_key not in observation or depth_key not in observation:
+                                raise ValueError(
+                                    f"Required camera observation '{cam_name}' not found. "
+                                    f"Available keys: {policy.high_level.camera_names}"
+                                )
+                            camera_obs[cam_name] = {
+                                "rgb": observation[rgb_key].numpy(),
+                                "depth": observation[depth_key].numpy().squeeze()
+                            }
+
+                        # Get dict of projections for all cameras
+                        gripper_projs = policy.high_level.predict_and_project(
+                            single_task, camera_obs,
+                            robot_type=policy.config.robot_type,
+                            robot_kwargs={"observation.state": observation["observation.state"]}
+                        )  # Returns dict[str, np.ndarray]
+
+                        # Store as dict of tensors
+                        for cam_name, proj in gripper_projs.items():
+                            policy.latest_gripper_proj[cam_name] = torch.from_numpy(proj)
+
+                    # Add goal projection to each camera observation
+                    for cam_name in policy.high_level.camera_names:
+                        observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
 
                 observation["task"] = single_task
                 pred_action, pred_action_eef = predict_action(
