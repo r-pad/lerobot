@@ -292,17 +292,6 @@ def control_loop(
                         policy.latest_gripper_proj = torch.from_numpy(gripper_proj)
                     observation["observation.images.cam_azure_kinect.goal_gripper_proj"] = policy.latest_gripper_proj
 
-                if hasattr(policy.config, "phantomize") and policy.config.phantomize:
-                    # Overlay RGB with rendered robot when phantomize is set
-                    # This code is specific to the Aloha
-                    rgb = observation["observation.images.cam_azure_kinect.color"].numpy()
-                    state = observation["observation.state"].numpy()
-                    if policy.renderer is None:
-                        height, width, _ = rgb.shape
-                        policy.renderer = setup_renderer(ALOHA_MODEL, policy.config.hl_intrinsics_txt, policy.config.hl_extrinsics_txt, policy.downsample_factor, width, height)
-                    phantomized_img = render_and_overlay(policy.renderer, ALOHA_MODEL, state, rgb, policy.downsample_factor)
-                    observation['observation.images.cam_azure_kinect.color'] = torch.from_numpy(phantomized_img)
-
                 observation["task"] = single_task
                 pred_action, pred_action_eef = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp

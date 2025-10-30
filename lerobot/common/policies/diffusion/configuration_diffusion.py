@@ -184,9 +184,9 @@ class DiffusionConfig(PreTrainedConfig):
     hl_use_source_token: bool = False
     hl_use_gripper_token: bool = True
 
+    # DEPRECATED
     # Preprocess goal image to single channel (repeated thrice for RGB compatibility)
     use_single_channel_goal: bool = False
-
     # Phantom - Overlay rendered robot at inference
     phantomize: bool = False
     phantom_downsample_factor: float = 0.25
