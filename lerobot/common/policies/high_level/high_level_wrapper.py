@@ -62,11 +62,11 @@ class HighLevelConfig:
 
     # dino_3dgp specific configs
     use_fourier_pe: bool = False
-    fourier_num_frequencies: int = 21
+    fourier_num_frequencies: int = 64
     fourier_include_input: bool = True
     num_transformer_layers: int = 4
     dropout: float = 0.1
-    use_source_token: bool = True
+    use_source_token: bool = False
     use_gripper_token: bool = True
 
 
@@ -490,8 +490,8 @@ def initialize_dino_3dgp_model(entity, project, checkpoint_type,
     ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
     ckpt = torch.load(ckpt_file)
     # Remove the "network." prefix, since we're not using Lightning here.
-    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items() if "source_embeddings.weight" not in k}
-    model.load_state_dict(state_dict, strict=False)
+    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
+    model.load_state_dict(state_dict)
 
     model = model.eval()
     model = model.to(device)

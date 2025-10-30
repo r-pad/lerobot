@@ -346,7 +346,7 @@ class DiffusionModel(nn.Module):
         """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[self.obs_key].shape[:2]
         global_cond_feats = [batch[self.obs_key]]
-        
+        # Extract image features.
         if self.config.image_features:
             if self.config.use_separate_rgb_encoder_per_camera:
                 # Combine batch and sequence dims while rearranging to make the camera index dimension first.
