@@ -162,6 +162,11 @@ def rollout(
         observation = add_envs_task(env, observation)
 
         if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
+            raise NotImplementedError(
+                "Interface for predict_and_project has changed. "
+                "See control_utils.py for reference implementation with camera_obs dict."
+            )
+
             # Generate new goal prediction when queue is empty
             # This code is specific to diffusion policy and LIBERO :(
             if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
