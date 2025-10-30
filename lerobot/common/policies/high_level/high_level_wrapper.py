@@ -144,7 +144,7 @@ class HighLevelWrapper:
         """Extract gripper point cloud for different robot types"""
         if robot_type == "aloha":
             joint_state = robot_kwargs["observation.state"]
-            return render_aloha_gripper_pcd(self.cam_to_world, joint_state)
+            return render_aloha_gripper_pcd(np.eye(4), joint_state) # render in world frame
         elif robot_type == "libero_franka":
             from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
             return get_4_points_from_gripper_pos_orient(
@@ -386,7 +386,7 @@ class HighLevelWrapper:
 
     def project(self, goal_prediction, camera_obs, goal_repr="heatmap"):
         """Project goal prediction to image space"""
-        if self.config.model_type == "articubot" or self.config.model_type == "dino_3dgp":
+        if self.config.model_type == "articubot":
             raise NotImplementedError("Not updated after multiview changes.")
         elif self.config.model_type == "dino_3dgp":
             # Project to each camera
@@ -676,16 +676,17 @@ def inference_dino_heatmap(model, rgb, gripper_pcd, text_embedding, device):
 
         return sampled_coord.squeeze(0).cpu().numpy()  # (2,) [x, y]
 
-def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embedding,
-                        robot_type, is_gmm, max_depth, device):
+def inference_dino_3dgp(model, rgbs, depths, intrinsics_list, extrinsics_list,
+                        gripper_token, text_embedding, robot_type, is_gmm, max_depth, device):
     """
     Run DINO 3D Goal Prediction model inference on RGB+depth and predict 3D goal points.
 
     Args:
         model (Dino3DGPNetwork): Trained model.
-        rgb (np.ndarray): RGB image (H, W, 3), uint8.
-        depth (np.ndarray): Depth image (H, W), uint16 in mm.
-        intrinsics (np.ndarray): Camera intrinsics (3, 3), scaled to 224x224.
+        rgbs (list): List of RGB images [(H, W, 3), ...], uint8, one per camera.
+        depths (list): List of depth images [(H, W), ...], uint16 in mm, one per camera.
+        intrinsics_list (list): List of camera intrinsics [(3, 3), ...], scaled to 224x224.
+        extrinsics_list (list): List of camera extrinsics [(4, 4), ...], T_world_from_camera.
         gripper_token (np.ndarray): Optional gripper token (10,).
         text_embedding (np.ndarray): Optional text embedding (1152,).
         robot_type (str): Robot type (e.g., "aloha", "robot").
@@ -696,19 +697,40 @@ def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embed
     Returns:
         pred_points: (4, 3) predicted 3D goal points
     """
-    # Preprocess RGB
-    rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb))).copy()
-    rgb_ = torch.from_numpy(rgb_).unsqueeze(0).permute(0, 3, 1, 2).float().to(device)  # (1, 3, 224, 224)
+    N = len(rgbs)  # Number of cameras
 
-    # Preprocess depth
-    depth_ = (depth / 1000.0).squeeze().astype(np.float32)  # Convert mm to meters
-    depth_ = PIL.Image.fromarray(depth_)
-    depth_ = np.asarray(depth_preprocess(depth_)).copy()
-    depth_[depth_ > max_depth] = 0  # Mask out far depths
-    depth_ = torch.from_numpy(depth_).unsqueeze(0).float().to(device)  # (1, 224, 224)
+    # Preprocess all RGBs
+    rgbs_processed = []
+    for rgb in rgbs:
+        rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb))).copy()
+        rgb_ = torch.from_numpy(rgb_).permute(2, 0, 1).float()  # (3, 224, 224)
+        rgbs_processed.append(rgb_)
 
-    # Intrinsics to torch
-    intrinsics_ = torch.from_numpy(intrinsics.astype(np.float32)).unsqueeze(0).to(device)  # (1, 3, 3)
+    # Stack into (1, N, 3, 224, 224)
+    rgbs_tensor = torch.stack(rgbs_processed, dim=0).unsqueeze(0).to(device)
+
+    # Preprocess all depths
+    depths_processed = []
+    for depth in depths:
+        depth_ = (depth / 1000.0).squeeze().astype(np.float32)  # Convert mm to meters
+        depth_ = PIL.Image.fromarray(depth_)
+        depth_ = np.asarray(depth_preprocess(depth_)).copy()
+        depth_[depth_ > max_depth] = 0  # Mask out far depths
+        depth_ = torch.from_numpy(depth_).float()  # (224, 224)
+        depths_processed.append(depth_)
+
+    # Stack into (1, N, 224, 224)
+    depths_tensor = torch.stack(depths_processed, dim=0).unsqueeze(0).to(device)
+
+    # Stack intrinsics into (1, N, 3, 3)
+    intrinsics_tensor = torch.stack([
+        torch.from_numpy(K.astype(np.float32)) for K in intrinsics_list
+    ], dim=0).unsqueeze(0).to(device)
+
+    # Stack extrinsics into (1, N, 4, 4)
+    extrinsics_tensor = torch.stack([
+        torch.from_numpy(T.astype(np.float32)) for T in extrinsics_list
+    ], dim=0).unsqueeze(0).to(device)
 
     with torch.no_grad():
         # Convert gripper_token to torch if provided
@@ -726,13 +748,14 @@ def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embed
 
         # Forward through network
         outputs, patch_coords = model(
-            image=rgb_,
-            depth=depth_,
-            intrinsics=intrinsics_,
+            image=rgbs_tensor,
+            depth=depths_tensor,
+            intrinsics=intrinsics_tensor,
+            extrinsics=extrinsics_tensor,
             gripper_token=gripper_tok,
             text_embedding=text_embed,
             source=source
-        )  # outputs: (1, 256, 13), patch_coords: (1, 256, 3)
+        )  # outputs: (1, N*256, 13), patch_coords: (1, N*256, 3) in WORLD frame
 
         # Sample or get weighted prediction
         if is_gmm:
