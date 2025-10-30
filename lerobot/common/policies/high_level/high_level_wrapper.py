@@ -17,6 +17,7 @@ from lerobot.common.policies.high_level.classify_utils import setup_client, gene
 from dataclasses import dataclass
 from typing import Optional
 from PIL import Image
+import json
 
 TARGET_SHAPE = 224
 rgb_preprocess = transforms.Compose(
@@ -57,8 +58,7 @@ class HighLevelConfig:
     use_gemini: bool = False
     is_gmm: bool = False
     dino_model: str = "facebook/dinov2-base"
-    intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
-    extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v7_1013.txt"
+    calibration_json: str = "lerobot/scripts/aloha_calibration/calibration_multiview.json"
 
     # dino_3dgp specific configs
     use_fourier_pe: bool = False
@@ -82,17 +82,37 @@ class HighLevelWrapper:
             self.gemini_config = genai.types.GenerateContentConfig(temperature=0.0, candidate_count=1)
             self.model_name = "gemini-2.5-pro"
 
-        self.original_K = np.loadtxt(config.intrinsics_txt) # not scaled
-        self.scaled_K = None
-        self.cam_to_world = np.loadtxt(config.extrinsics_txt)
+        # Load camera calibration from JSON
+        with open(config.calibration_json, 'r') as f:
+            calibration_data = json.load(f)
+
+        # Extract camera configurations
+        self.camera_names = list(calibration_data.keys())
+        self.num_cameras = len(self.camera_names)
+
+        # Load intrinsics and extrinsics for all cameras
+        self.original_Ks = []  # List of intrinsics matrices
+        self.cam_to_worlds = []  # List of extrinsics matrices (T_world_from_camera)
+
+        for cam_name in self.camera_names:
+            cam_config = calibration_data[cam_name]
+            intrinsics_path = os.path.join("lerobot/scripts/", cam_config["intrinsics"])
+            extrinsics_path = os.path.join("lerobot/scripts/", cam_config["extrinsics"])
+
+            self.original_Ks.append(np.loadtxt(intrinsics_path))
+            self.cam_to_worlds.append(np.loadtxt(extrinsics_path))
+
+        self.scaled_Ks = [None] * self.num_cameras  # Will be set during inference
 
         # Initialize model based on type
         if config.model_type == "articubot":
+            raise NotImplementedError("articubot model type is not yet supported for multiview inference")
             self.model = initialize_articubot_model(
                 config.run_id, config.use_text_embedding, config.use_dual_head,
                 config.in_channels, self.device
             )
         elif config.model_type == "dino_heatmap":
+            raise NotImplementedError("dino_heatmap model type is not yet supported for multiview inference")
             self.model = initialize_dino_heatmap_model(config.entity, config.project, config.checkpoint_type,
                 config.run_id, config.dino_model, config.use_gripper_pcd,
                 config.use_text_embedding, self.device

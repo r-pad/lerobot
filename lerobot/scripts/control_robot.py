@@ -137,6 +137,7 @@ python lerobot/scripts/control_robot.py \
 import logging
 import os
 import time
+import json
 from dataclasses import asdict
 from pprint import pformat
 
@@ -263,10 +264,13 @@ def record(
         sanity_check_dataset_name(cfg.repo_id, cfg.policy)
 
         if cfg.policy is not None and cfg.policy.enable_goal_conditioning:
-            extra_features = {"observation.images.cam_azure_kinect.goal_gripper_proj": 
+            with open(cfg.policy.hl_calibration_json) as f:
+                calibration_data = json.load(f)
+            cam_names = calibration_data.keys()
+            extra_features = {f"observation.images.{cam}.goal_gripper_proj":
                               {'dtype': 'video', 'shape': (720, 1280, 3), 
                                'names': ['height', 'width', 'channels'], 
-                               'info': 'Projection of gripper pcd at goal position onto image'}}
+                               'info': 'Projection of gripper pcd at goal position onto image'} for cam in cam_names}
         else:
             extra_features = {}
 
