@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Third party repo
+Grounded-SAM-2
+WiLoR
+
 # Logging
 logs
 tmp
