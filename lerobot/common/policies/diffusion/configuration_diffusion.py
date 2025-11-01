@@ -156,7 +156,7 @@ class DiffusionConfig(PreTrainedConfig):
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
     hl_model_type: str = "dino_3dgp"  # "articubot", "dino_heatmap", or "dino_3dgp"
-    hl_run_id: str | None = "v9kg5vgh"
+    hl_run_id: str | None = "5s0w1tg7"
     hl_entity: str = "r-pad"
     hl_project: str = "lfd3d"
     hl_checkpoint_type: str = "rmse"
