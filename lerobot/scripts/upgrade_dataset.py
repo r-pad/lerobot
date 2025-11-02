@@ -117,7 +117,7 @@ def get_goal_image(K, width, height, four_points=True, goal_repr="heatmap", huma
     Generate goal image from robot/human hand point cloud data
 
     Robot: Render gripper pcd in camera frame, project the full point cloud or 4 handpicked points to a mask
-    Hand: Extracted with WiLoR and postprocessed to be in camera frame
+    Hand: Extracted with WiLoR and postprocessed to be in world frame
     """
     if not humanize:
         mesh = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
@@ -125,6 +125,12 @@ def get_goal_image(K, width, height, four_points=True, goal_repr="heatmap", huma
     else:
         mesh = gripper_pcd
         gripper_idx = np.array([343, 763, 60]) # Handpicked idxs
+
+        mesh_hom = np.concatenate(
+            [mesh, np.ones((mesh.shape[0], 1))], axis=-1
+        )[:, :, None]
+        world_to_cam = np.linalg.inv(cam_to_world)
+        mesh = (world_to_cam @ mesh_hom)[:, :3].squeeze(2)
 
     assert goal_repr in ["mask", "heatmap"]
 
@@ -236,7 +242,6 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         action = episode_extras['phantom_joint_state'][next_idx]
         goal_indices = episode_extras['episode_events']['event_idxs']
     else:
-        if humanize: raise NotImplementedError("Multiview not yet supported for humanize mode")
         # If robot data, we copy over the original robot states/actions
         # If human data without retargeting, we don't have any robot states/actions
         # and so we just copy over the original states/actions as a placeholder.
@@ -260,10 +265,9 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
     if "observation.points.gripper_pcds" in new_features:
         if humanize:
-            raise NotImplementedError("Multiview not yet supported for humanize mode")
             # We've made the switch to keeping gripper_pcds in robot frame, so the detected hand pcd also needs to be transformed to the robot frame.
-            # frame_data["observation.points.gripper_pcds"] = episode_extras['episode_gripper_pcds'][frame_idx]
-        elif phantomize:
+            frame_data["observation.points.gripper_pcds"] = episode_extras['episode_gripper_pcds'][frame_idx]
+        else:
             # Keep in world frame
             if frame_idx in goal_indices:
                 frame_data["observation.points.gripper_pcds"] = retarget_aloha_gripper_pcd(np.eye(4), eef_data, sample_n_points=500)
@@ -288,7 +292,6 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
                           episode_extras, phantomize, calibrations, width, height):
     """Process goal projections, event indices, and subgoals for an episode."""
     if humanize:
-        raise NotImplementedError("Multiview not yet supported for humanize mode. Make sure episode_gripper_pcds is in the right coord frame.")
         # Use events from JSON for human data
         goal_indices = episode_extras['episode_events']['event_idxs']
         # Ensure last frame is included as a goal
@@ -322,7 +325,7 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
             goal_images = []
             for goal_idx in goal_indices:
                 if humanize:
-                    goal_img = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[goal_idx])
+                    goal_img = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[goal_idx], cam_to_world=cam_to_world)
                 else:
                     goal_img = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[goal_idx])
                 goal_images.append(Image.fromarray(goal_img).convert("RGB"))
@@ -387,9 +390,8 @@ def upgrade_dataset(
     """
     tolerance_s = 0.0004
 
-    # Validate multiview constraints
-    if len(calibrations) > 1 and (phantomize or humanize):
-        raise NotImplementedError("Multiview not yet supported for phantom/humanize modes")
+    if len(calibrations) > 1 and (phantomize):
+        raise NotImplementedError("Multiview not yet supported for phantomize mode. Some minor changes and checking needed.")
 
     # 1. Load the existing dataset
     print(f"Loading source dataset: {source_repo_id}")
