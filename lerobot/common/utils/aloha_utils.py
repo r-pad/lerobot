@@ -14,7 +14,9 @@ ALOHA_MODEL = load_robot_description("aloha_mj_description")
 ALOHA_CONFIGURATION = mink.Configuration(ALOHA_MODEL)
 ALOHA_REST_STATE = torch.tensor([[ 91.9336, 191.8652, 191.7773, 174.2871, 174.3750,   5.4492,  17.4023, -2.5488,  11.5245,  
                             92.1094, 193.5352, 193.0078, 169.6289, 169.6289, -3.7793,  21.0059,   2.2852, 100.7582]])
-
+ALOHA_REST_QPOS = np.array(
+    [0, -1.73, 1.49, 0, 0, 0, 0, 0, 0, -1.73, 1.49, 0, 0, 0, 0, 0]
+)
 
 
 def map_real2sim(Q):
@@ -162,6 +164,57 @@ def inverse_kinematics(configuration, ee_pose):
     return vec
 
 
+def get_rest_aloha_mesh(sample_n_points=500):
+    """
+    Aloha mesh when resting, rest eef pos, rest eef rot
+    """
+
+    site = "right/gripper"
+    site_id = mujoco.mj_name2id(ALOHA_MODEL, mujoco.mjtObj.mjOBJ_SITE, site)
+
+    data = mujoco.MjData(ALOHA_MODEL)
+    data.qpos = ALOHA_REST_QPOS
+
+    mujoco.mj_forward(ALOHA_MODEL, data)
+
+    rest_pos = data.site_xpos[site_id].copy()
+    rest_rot = data.site_xmat[site_id].reshape(3, 3).copy()
+
+    meshes = get_right_gripper_mesh(ALOHA_MODEL, data)
+    mesh = combine_meshes(meshes)
+    mesh_ = trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.triangles)
+    )
+    rest_mesh, _ = trimesh.sample.sample_surface(mesh_, sample_n_points, seed=42)
+
+    return rest_pos, rest_rot, rest_mesh
+
+
+def retarget_aloha_gripper_pcd(cam_to_world, eef_data, sample_n_points=500):
+    """
+    For goal gripper pcd, retarget gripper instead of ik
+    """
+    gripper_rot = transforms.rotation_6d_to_matrix(eef_data[:6])
+    gripper_eef_pos = eef_data[6:9] # world frame
+
+    rest_pos, rest_rot, rest_mesh = get_rest_aloha_mesh(sample_n_points)
+    
+    H_rest_to_world = np.eye(4)
+    H_rest_to_world[:3,:3] = gripper_rot @ rest_rot.T
+    H_rest_to_world[:3,3] = gripper_eef_pos - (gripper_rot @ rest_rot.T) @ rest_pos
+
+    world_to_cam = np.linalg.inv(cam_to_world)
+    homo_rest_mesh = np.concatenate(
+        [rest_mesh, np.ones((sample_n_points, 1))], axis=-1
+    )[:, :, None]
+    
+    home_retarget_mesh = H_rest_to_world @ homo_rest_mesh
+    
+    urdf_cam3dcoords = (world_to_cam @ home_retarget_mesh)[:, :3].squeeze(2)
+
+    return urdf_cam3dcoords.astype(np.float32)
+
+
 def render_aloha_gripper_pcd(cam_to_world, joint_state, sample_n_points=500):
     """
     Run FK, extract gripper pcd from robot URDF, transform to camera frame
@@ -183,7 +236,7 @@ def render_aloha_gripper_pcd(cam_to_world, joint_state, sample_n_points=500):
         [points_, np.ones((sample_n_points, 1))], axis=-1
     )[:, :, None]
     urdf_cam3dcoords = (world_to_cam @ gripper_urdf_3d_pos)[:, :3].squeeze(2)
-    return urdf_cam3dcoords
+    return urdf_cam3dcoords.astype(np.float32)
 
 def get_right_gripper_mesh(mj_model, mj_data):
     """
