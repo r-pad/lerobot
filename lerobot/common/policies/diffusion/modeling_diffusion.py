@@ -157,9 +157,6 @@ class DiffusionPolicy(PreTrainedPolicy):
         }
         if self.config.image_features:
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
-            if self.config.use_depth: #RGBD
-                self._queues["observation.images.agentview"] = deque(maxlen=self.config.n_obs_steps)
-                self._queues["observation.images.agentview_depth"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
 
@@ -192,10 +189,6 @@ class DiffusionPolicy(PreTrainedPolicy):
 
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            if self.config.use_single_channel_goal and "observation.images.agentview_goal_gripper_proj" in batch:
-                batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.agentview_goal_gripper_proj")
-            if self.config.use_single_channel_goal and "observation.images.cam_azure_kinect.goal_gripper_proj" in batch:
-                batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.cam_azure_kinect.goal_gripper_proj")
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
@@ -224,10 +217,6 @@ class DiffusionPolicy(PreTrainedPolicy):
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            if self.config.use_single_channel_goal and "observation.images.agentview_goal_gripper_proj" in batch:
-                batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.agentview_goal_gripper_proj")
-            if self.config.use_single_channel_goal and "observation.images.cam_azure_kinect.goal_gripper_proj" in batch:
-                batch = repeat_goal_first_channel_as_rgb(batch, "observation.images.cam_azure_kinect.goal_gripper_proj")
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
@@ -273,10 +262,6 @@ class DiffusionModel(nn.Module):
             else:
                 self.rgb_encoder = DiffusionRgbEncoder(config)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
-
-            if self.config.use_depth:
-                self.depth_encoder = DiffusionRgbEncoder(config)
-                global_cond_dim += self.depth_encoder.feature_dim 
 
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
@@ -372,16 +357,6 @@ class DiffusionModel(nn.Module):
                 img_features = einops.rearrange(
                     img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
                 )
-
-            if self.config.use_depth:
-                depth = einops.rearrange(batch['observation.images.agentview_depth'], "b s ... -> (b s) ...")
-                depth = depth.repeat(1, 3, 1, 1) # Repeat channel -> B, 3, H, W
-                
-                depth_features = self.depth_encoder(depth)
-                depth_features = einops.rearrange(
-                    depth_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
-                )
-                global_cond_feats.append(depth_features)
 
             global_cond_feats.append(img_features)
 

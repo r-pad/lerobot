@@ -149,7 +149,6 @@ class DiffusionConfig(PreTrainedConfig):
     clip_sample_range: float = 1.0
 
     use_text_embedding: bool = False
-    use_depth: bool = False
 
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False

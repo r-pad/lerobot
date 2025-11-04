@@ -194,7 +194,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
     if phantomize:
         rgb_data = episode_extras['phantom_vid'][frame_idx]
-        #wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
+        wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
         depth_data = (episode_extras['phantom_depth_vid'][frame_idx][:, :, None] * 1000).to(torch.uint16)
         eef_data = episode_extras['phantom_eef_pose'][frame_idx]
         joint_state = episode_extras['phantom_joint_state'][frame_idx]
@@ -215,7 +215,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         action = frame_data["action"]
 
     frame_data["observation.images.cam_azure_kinect.color"] = rgb_data
-    #frame_data["observation.images.cam_wrist"] = wrist_rgb_data
+    frame_data["observation.images.cam_wrist"] = wrist_rgb_data
     frame_data["observation.images.cam_azure_kinect.transformed_depth"] = depth_data
     frame_data["observation.right_eef_pose"] = eef_data
     frame_data["observation.state"] = joint_state
