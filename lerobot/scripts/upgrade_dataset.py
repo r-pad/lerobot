@@ -207,7 +207,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         # If human data without retargeting, we don't have any robot states/actions
         # and so we just copy over the original states/actions as a placeholder.
         rgb_data = (frame_data["observation.images.cam_azure_kinect.color"].permute(1,2,0) * 255).to(torch.uint8)
-        #wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
+        wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
         depth_data = (frame_data["observation.images.cam_azure_kinect.transformed_depth"].permute(1,2,0) * 1000).to(torch.uint16)
         eef_data = frame_data["observation.right_eef_pose"]
         joint_state = frame_data["observation.state"]

@@ -251,8 +251,6 @@ class DiffusionModel(nn.Module):
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
-
-
         if self.config.image_features:
             num_images = len(self.config.image_features)
             if self.config.use_separate_rgb_encoder_per_camera:
@@ -262,7 +260,6 @@ class DiffusionModel(nn.Module):
             else:
                 self.rgb_encoder = DiffusionRgbEncoder(config)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
-
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
         if self.use_text_embedding:
@@ -357,7 +354,6 @@ class DiffusionModel(nn.Module):
                 img_features = einops.rearrange(
                     img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
                 )
-
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:
