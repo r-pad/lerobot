@@ -155,6 +155,9 @@ class DiffusionPolicy(PreTrainedPolicy):
         }
         if self.config.image_features:
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
+            if self.config.use_depth: #RGBD
+                self._queues["observation.images.agentview"] = deque(maxlen=self.config.n_obs_steps)
+                self._queues["observation.images.agentview_depth"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
 
@@ -258,6 +261,9 @@ class DiffusionModel(nn.Module):
             else:
                 self.rgb_encoder = DiffusionRgbEncoder(config)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
+            if self.config.use_depth:
+                self.depth_encoder = DiffusionRgbEncoder(config)
+                global_cond_dim += self.depth_encoder.feature_dim
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
         if self.use_text_embedding:
@@ -352,6 +358,15 @@ class DiffusionModel(nn.Module):
                 img_features = einops.rearrange(
                     img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
                 )
+            if self.config.use_depth:
+                depth = einops.rearrange(batch['observation.images.agentview_depth'], "b s ... -> (b s) ...")
+                depth = depth.repeat(1, 3, 1, 1) # Repeat channel -> B, 3, H, W
+                
+                depth_features = self.depth_encoder(depth)
+                depth_features = einops.rearrange(
+                    depth_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
+                )
+                global_cond_feats.append(depth_features)
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:
