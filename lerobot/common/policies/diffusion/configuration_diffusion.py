@@ -67,7 +67,9 @@ class DiffusionConfig(PreTrainedConfig):
         crop_shape: (H, W) shape to crop images to as a preprocessing step for the vision backbone. Must fit
             within the image size. If None, no cropping is done.
         crop_is_random: Whether the crop should be random at training time (it's always a center crop in eval
-            mode).
+            mode). When True, uses center-jittered random cropping.
+        crop_jitter: Maximum pixel offset from center for random cropping. The crop center will be randomly
+            offset by up to ±crop_jitter pixels in both x and y directions. Only used when crop_is_random=True.
         pretrained_backbone_weights: Pretrained weights from torchvision to initialize the backbone.
             `None` means no pretrained weights.
         use_group_norm: Whether to replace batch normalization with group normalization in the backbone.
@@ -128,6 +130,7 @@ class DiffusionConfig(PreTrainedConfig):
     vision_backbone: str = "resnet18"
     crop_shape: tuple[int, int] | None = None
     crop_is_random: bool = True
+    crop_jitter: int = 30
     pretrained_backbone_weights: str | None = None
     use_group_norm: bool = True
     spatial_softmax_num_keypoints: int = 32
@@ -152,8 +155,8 @@ class DiffusionConfig(PreTrainedConfig):
 
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
-    hl_model_type: str = "articubot"  # "articubot", "dino_heatmap", or "dino_3dgp"
-    hl_run_id: str | None = "bi04w82v"
+    hl_model_type: str = "dino_3dgp"  # "articubot", "dino_heatmap", or "dino_3dgp"
+    hl_run_id: str | None = "5s0w1tg7"
     hl_entity: str = "r-pad"
     hl_project: str = "lfd3d"
     hl_checkpoint_type: str = "rmse"
@@ -166,8 +169,7 @@ class DiffusionConfig(PreTrainedConfig):
     hl_use_gripper_pcd: bool = True
     hl_use_gemini: bool = False
     hl_in_channels: int = 7
-    hl_intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
-    hl_extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v7_1013.txt"
+    hl_calibration_json: str = "lerobot/scripts/aloha_calibration/calibration_multiview.json"
 
     # dino_heatmap specific configs
     hl_dino_model: str = "facebook/dinov2-base"
@@ -178,12 +180,12 @@ class DiffusionConfig(PreTrainedConfig):
     hl_fourier_include_input: bool = True
     hl_num_transformer_layers: int = 4
     hl_dropout: float = 0.1
-    hl_use_source_token: bool = False
+    hl_use_source_token: bool = True
     hl_use_gripper_token: bool = True
 
+    # DEPRECATED
     # Preprocess goal image to single channel (repeated thrice for RGB compatibility)
     use_single_channel_goal: bool = False
-
     # Phantom - Overlay rendered robot at inference
     phantomize: bool = False
     phantom_downsample_factor: float = 0.25

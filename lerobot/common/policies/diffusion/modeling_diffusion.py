@@ -107,8 +107,7 @@ class DiffusionPolicy(PreTrainedPolicy):
 
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
         self._queues = None
-
-        self.latest_gripper_proj = None
+        self.latest_gripper_proj = {}
 
         self.diffusion = DiffusionModel(config)
 
@@ -129,8 +128,7 @@ class DiffusionPolicy(PreTrainedPolicy):
                 use_gemini=self.config.hl_use_gemini,
                 is_gmm=self.config.hl_is_gmm,
                 dino_model=self.config.hl_dino_model,
-                intrinsics_txt=self.config.hl_intrinsics_txt,
-                extrinsics_txt=self.config.hl_extrinsics_txt,
+                calibration_json=self.config.hl_calibration_json,
                 use_fourier_pe=self.config.hl_use_fourier_pe,
                 fourier_num_frequencies=self.config.hl_fourier_num_frequencies,
                 fourier_include_input=self.config.hl_fourier_include_input,
@@ -467,6 +465,66 @@ class DiffusionModel(nn.Module):
         return loss.mean()
 
 
+class CenterJitteredRandomCrop(nn.Module):
+    """Random crop around the center of the image with a jitter offset.
+
+    This is useful for data augmentation where you want to keep the crop
+    roughly centered but add some randomness. The crop position is randomly
+    offset from the center by up to ±jitter pixels in each dimension.
+
+    Args:
+        size: Desired output size (height, width)
+        jitter: Maximum offset from center in pixels (default: 30)
+    """
+
+    def __init__(self, size, jitter=30):
+        super().__init__()
+        self.size = size if isinstance(size, (tuple, list)) else (size, size)
+        self.jitter = jitter
+
+    def forward(self, img: Tensor) -> Tensor:
+        """
+        Args:
+            img: (C, H, W) or (B, C, H, W) image tensor
+        Returns:
+            Cropped image of size (C, size[0], size[1]) or (B, C, size[0], size[1])
+        """
+        # Handle both batched and unbatched inputs
+        is_batched = img.dim() == 4
+        if not is_batched:
+            img = img.unsqueeze(0)
+
+        batch_size, channels, height, width = img.shape
+        crop_h, crop_w = self.size
+
+        # Calculate center position
+        center_y = height // 2
+        center_x = width // 2
+
+        # Add random jitter to center position
+        jitter_y = torch.randint(-self.jitter, self.jitter + 1, (1,)).item()
+        jitter_x = torch.randint(-self.jitter, self.jitter + 1, (1,)).item()
+
+        jittered_center_y = center_y + jitter_y
+        jittered_center_x = center_x + jitter_x
+
+        # Calculate top-left corner of crop
+        top = jittered_center_y - crop_h // 2
+        left = jittered_center_x - crop_w // 2
+
+        # Clamp to ensure crop stays within image bounds
+        top = max(0, min(top, height - crop_h))
+        left = max(0, min(left, width - crop_w))
+
+        # Perform the crop
+        cropped = img[:, :, top:top + crop_h, left:left + crop_w]
+
+        if not is_batched:
+            cropped = cropped.squeeze(0)
+
+        return cropped
+
+
 class SpatialSoftmax(nn.Module):
     """
     Spatial Soft Argmax operation described in "Deep Spatial Autoencoders for Visuomotor Learning" by Finn et al.
@@ -552,7 +610,7 @@ class DiffusionRgbEncoder(nn.Module):
             # Always use center crop for eval
             self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
             if config.crop_is_random:
-                self.maybe_random_crop = torchvision.transforms.RandomCrop(config.crop_shape)
+                self.maybe_random_crop = CenterJitteredRandomCrop(config.crop_shape, jitter=config.crop_jitter)
             else:
                 self.maybe_random_crop = self.center_crop
         else:

@@ -8,10 +8,19 @@ Teleop script
 
 ```py
 python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --control.type=teleoperate --control.display_data=true
-
-
-python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_azure_kinect_master": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_subordinate": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --control.type=teleoperate --control.display_data=true
 ```
+
+Multiview:
+
+```py
+python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --control.type=teleoperate --control.display_data=true
+```
+
+Need to be careful when setting up multiview, various things to keep in mind:
+- Check which camera is master/subordinate in the real world and set `wired_sync_mode` accordingly
+- Usb 10gb usb 3.0 ports and make sure the cameras are spread across different usb controllers (different ports on the outside might correspond to the same internal controller, check `lsusb -t`)
+- If teleop crashes for some reason, check all these separately, unplug/replug/reboot as necessary. None of these systems are reliable ....
+
 
 Tips:
 * Maintain start and end pose: gripper in holster, handle vertical and touching base, gripper open.
@@ -250,5 +259,54 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 ```
 
 
+## Multiview
+### Fold onesie (A)
+
+BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clamping of extreme motions during teleop.
+
+```py
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the onesie." --control.repo_id=sriramsk/fold_onesie_multiview_20251025 --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=false --robot.max_relative_target=null
+
+nohup python lerobot/scripts/train.py --dataset.repo_id=sriramsk/fold_onesie_multiview_20251025_subsampled --policy.type=diffusion --output_dir=outputs/train/diffPo_multiview_foldOnesie_subsampled --job_name=diffPo_multiview_foldOnesie_subsampled --wandb.enable=true --policy.use_text_embedding=true --steps=300_000 --policy.crop_shape="[700, 700]" --policy.crop_is_random=true &
+
+HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id=sriramsk/fold_onesie_MV_20251025_ss_hg --policy.type=diffusion --output_dir=outputs/train/diffPo_MV_foldOnesie_ss_hg --job_name=diffPo_MV_foldOnesie_ss_hg --wandb.enable=true --policy.use_text_embedding=false --steps=300_000 --policy.crop_shape="[700, 700]" --policy.crop_is_random=true --policy.enable_goal_conditioning=true --batch_size=4 > foldOnesie_multiview_gc_diffPo.out &
+
+NCCL_P2P_LEVEL=NVL HF_HOME="/scratch/sskrishn/lerobot" nohup torchrun --nproc_per_node=8 scripts/train.py model=dino_3dgp dataset=rpadLerobot dataset.repo_id=sriramsk/fold_onesie_MV_20251025_ss_hg resources.num_workers=32 training.check_val_every_n_epochs=3 dataset.cache_dir=/scratch/sskrishn/multiview_cache resources.gpus=-1 > multiview.out &
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the onesie." --control.repo_id=sriramsk/eval_fold_onesie_multiview --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_multiview_foldOnesie_subsampled/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the onesie." --control.repo_id=sriramsk/eval_fold_onesie_multiview_gc --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_MV_foldOnesie_ss_hg/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=240
+```
 
 
+### Fold shirt (B)
+
+BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clamping of extreme motions during teleop.
+
+```py
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the shirt." --control.repo_id=sriramsk/fold_shirt_multiview_20251030 --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=false --robot.max_relative_target=null
+```
+
+### Fold towel (C)
+
+BE CAREFUL WHEN SETTING `--robot.max_relative_target=null`, disables all clamping of extreme motions during teleop.
+
+```py
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the towel." --control.repo_id=sriramsk/fold_towel_multiview_20251030 --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=false --robot.max_relative_target=null
+```
+
+### Fold bottoms (D)
+
+```python
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the bottoms." --control.repo_id=sriramsk/fold_bottoms_multiview_20251031 --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=true
+```
+
+### Multi-view Multi-task folders
+
+```python
+HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_MV_20251025_ss_hg", "sriramsk/fold_towel_MV_20251030_ss_hg", "sriramsk/fold_shirt_MV_20251030_ss_hg"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_MV_multiFold_ss_hg --job_name=diffPo_MV_multiFold_ss_hg --wandb.enable=true --policy.use_text_embedding=false --steps=300_000 --policy.crop_shape="[700, 700]" --policy.crop_is_random=true --policy.enable_goal_conditioning=true --batch_size=6 > multiFold_multiview_gc_diffPo.out &
+
+NCCL_P2P_LEVEL=NVL HF_HOME="/scratch/sskrishn/lerobot" nohup torchrun --nproc_per_node=8 scripts/train.py model=dino_3dgp dataset=rpadLerobot dataset.repo_id='["sriramsk/fold_onesie_MV_20251025_ss_hg", "sriramsk/fold_towel_MV_20251030_ss_hg", "sriramsk/fold_shirt_MV_20251030_ss_hg", "sriramsk/fold_bottoms_MV_20251031_ss_hg"]' resources.num_workers=32 training.check_val_every_n_epochs=3 dataset.cache_dir=/scratch/sskrishn/multiview_cache resources.gpus=-1 > multiview_multifold.out &
+
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the onesie." --control.repo_id=sriramsk/eval_fold_onesie_multiview_multifold_gc --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_MV_multiFold_ss_hg/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=240
+```

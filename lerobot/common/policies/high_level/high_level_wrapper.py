@@ -17,6 +17,7 @@ from lerobot.common.policies.high_level.classify_utils import setup_client, gene
 from dataclasses import dataclass
 from typing import Optional
 from PIL import Image
+import json
 
 TARGET_SHAPE = 224
 rgb_preprocess = transforms.Compose(
@@ -57,8 +58,7 @@ class HighLevelConfig:
     use_gemini: bool = False
     is_gmm: bool = False
     dino_model: str = "facebook/dinov2-base"
-    intrinsics_txt: str = "lerobot/scripts/aloha_calibration/intrinsics.txt"
-    extrinsics_txt: str = "lerobot/scripts/aloha_calibration/T_world_from_camera_est_v7_1013.txt"
+    calibration_json: str = "lerobot/scripts/aloha_calibration/calibration_multiview.json"
 
     # dino_3dgp specific configs
     use_fourier_pe: bool = False
@@ -82,17 +82,39 @@ class HighLevelWrapper:
             self.gemini_config = genai.types.GenerateContentConfig(temperature=0.0, candidate_count=1)
             self.model_name = "gemini-2.5-pro"
 
-        self.original_K = np.loadtxt(config.intrinsics_txt) # not scaled
-        self.scaled_K = None
-        self.cam_to_world = np.loadtxt(config.extrinsics_txt)
+        # Load camera calibration from JSON
+        with open(config.calibration_json, 'r') as f:
+            calibration_data = json.load(f)
+
+        # Extract camera configurations
+        self.camera_names = list(calibration_data.keys())
+        self.num_cameras = len(self.camera_names)
+
+        # Load intrinsics and extrinsics for all cameras
+        self.original_Ks = []  # List of intrinsics matrices
+        self.cam_to_worlds = []  # List of extrinsics matrices (T_world_from_camera)
+
+        for cam_name in self.camera_names:
+            cam_config = calibration_data[cam_name]
+            intrinsics_path = os.path.join("lerobot/scripts/", cam_config["intrinsics"])
+            extrinsics_path = os.path.join("lerobot/scripts/", cam_config["extrinsics"])
+
+            self.original_Ks.append(np.loadtxt(intrinsics_path))
+            self.cam_to_worlds.append(np.loadtxt(extrinsics_path))
+
+        self.scaled_Ks = [None] * self.num_cameras  # Will be set during inference
 
         # Initialize model based on type
         if config.model_type == "articubot":
+            if self.num_cameras != 1:
+                raise NotImplementedError("articubot model type is not yet supported for multiview inference")
             self.model = initialize_articubot_model(
                 config.run_id, config.use_text_embedding, config.use_dual_head,
                 config.in_channels, self.device
             )
         elif config.model_type == "dino_heatmap":
+            if self.num_cameras != 1:
+                raise NotImplementedError("dino_heatmap model type is not yet supported for multiview inference")
             self.model = initialize_dino_heatmap_model(config.entity, config.project, config.checkpoint_type,
                 config.run_id, config.dino_model, config.use_gripper_pcd,
                 config.use_text_embedding, self.device
@@ -122,7 +144,7 @@ class HighLevelWrapper:
         """Extract gripper point cloud for different robot types"""
         if robot_type == "aloha":
             joint_state = robot_kwargs["observation.state"]
-            return render_aloha_gripper_pcd(self.cam_to_world, joint_state)
+            return render_aloha_gripper_pcd(np.eye(4), joint_state) # render in world frame
         elif robot_type == "libero_franka":
             from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
             return get_4_points_from_gripper_pos_orient(
@@ -185,13 +207,33 @@ class HighLevelWrapper:
             self.text_embedding_cache[infer_text] = get_siglip_text_embedding(infer_text)
         return self.text_embedding_cache[infer_text]
 
-    def predict(self, text, rgb, depth, robot_type, robot_kwargs):
+    def predict(self, text, camera_obs, robot_type, robot_kwargs):
+        """
+        Args:
+            text: Task description
+            camera_obs: Dict mapping camera names to {"rgb": ..., "depth": ...}
+            robot_type: Robot type (e.g., "aloha")
+            robot_kwargs: Additional robot-specific data
+
+        Returns:
+            Goal prediction (model-dependent format)
+        """
+        # Validate that all required cameras are present
+        for cam_name in self.camera_names:
+            if cam_name not in camera_obs:
+                raise ValueError(
+                    f"Required camera '{cam_name}' not found in observations. "
+                    f"Expected cameras: {self.camera_names}, got: {list(camera_obs.keys())}"
+                )
+
         if self.config.model_type == "articubot":
+            raise NotImplementedError("Need to update after changing interface for multiview.")
             return self._predict_articubot(text, rgb, depth, robot_type, robot_kwargs)
         elif self.config.model_type == "dino_heatmap":
+            raise NotImplementedError("Need to update after changing interface for multiview.")
             return self._predict_dino_heatmap(text, rgb, depth, robot_type, robot_kwargs)
         elif self.config.model_type == "dino_3dgp":
-            return self._predict_dino_3dgp(text, rgb, depth, robot_type, robot_kwargs)
+            return self._predict_dino_3dgp(text, camera_obs, robot_type, robot_kwargs)
         else:
             raise ValueError(f"Unknown model_type: {self.config.model_type}")
 
@@ -248,19 +290,50 @@ class HighLevelWrapper:
 
         return coord_2d
 
-    def _predict_dino_3dgp(self, text, rgb, depth, robot_type, robot_kwargs):
+    def _predict_dino_3dgp(self, text, camera_obs, robot_type, robot_kwargs):
         """Prediction using DINO 3D Goal Prediction model"""
-        if self.scaled_K is None:
-            self.scaled_K = get_scaled_intrinsics(self.original_K, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
 
-        # Just for visualization, keep only 500 points
-        pcd = compute_pcd(rgb, depth, self.scaled_K, rgb_preprocess,
-                         depth_preprocess, self.device, self.rng,
-                         1000, self.config.max_depth)
-        pcd_xyz, pcd_rgb = pcd[:, :3], pcd[:, 3:]
-        # Store for rerun visualization
-        self.last_pcd_xyz = pcd_xyz
-        self.last_pcd_rgb = pcd_rgb
+        # Prepare lists for all camera data
+        all_rgbs = []
+        all_depths = []
+        all_intrinsics = []
+        all_extrinsics = []
+
+        # Process each camera
+        for cam_idx, cam_name in enumerate(self.camera_names):
+            rgb = camera_obs[cam_name]["rgb"]
+            depth = camera_obs[cam_name]["depth"]
+
+            # Scale intrinsics if needed
+            if self.scaled_Ks[cam_idx] is None:
+                self.scaled_Ks[cam_idx] = get_scaled_intrinsics(
+                    self.original_Ks[cam_idx], (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE
+                )
+
+            all_rgbs.append(rgb)
+            all_depths.append(depth)
+            all_intrinsics.append(self.scaled_Ks[cam_idx])
+            all_extrinsics.append(self.cam_to_worlds[cam_idx])
+
+        # For visualization, compute pcd from all cameras and transform to world frame
+        all_pcd_xyz = []
+        all_pcd_rgb = []
+        for cam_idx in range(len(all_rgbs)):
+            pcd = compute_pcd(all_rgbs[cam_idx], all_depths[cam_idx], self.scaled_Ks[cam_idx],
+                             rgb_preprocess, depth_preprocess, self.device, self.rng,
+                             1000, self.config.max_depth)
+            pcd_xyz, pcd_rgb = pcd[:, :3], pcd[:, 3:]
+
+            # Transform xyz to world frame
+            pcd_xyz_hom = np.concatenate([pcd_xyz, np.ones((pcd_xyz.shape[0], 1))], axis=1)  # (N, 4)
+            pcd_xyz_world = (self.cam_to_worlds[cam_idx] @ pcd_xyz_hom.T).T[:, :3]  # (N, 3)
+
+            all_pcd_xyz.append(pcd_xyz_world)
+            all_pcd_rgb.append(pcd_rgb)
+
+        # Concatenate all cameras
+        self.last_pcd_xyz = np.concatenate(all_pcd_xyz, axis=0)
+        self.last_pcd_rgb = np.concatenate(all_pcd_rgb, axis=0)
 
         # Get gripper point cloud if needed
         gripper_token = None
@@ -276,11 +349,12 @@ class HighLevelWrapper:
         # Get text embedding if needed
         text_embed = None
         if self.config.use_text_embedding:
-            text_embed = self._get_text_embedding(text, rgb, robot_type, robot_kwargs)
+            text_embed = self._get_text_embedding(text, all_rgbs[0], robot_type, robot_kwargs)
 
         goal_prediction = inference_dino_3dgp(
-            self.model, rgb, depth, self.scaled_K, gripper_token, text_embed,
-            robot_type, self.config.is_gmm, self.config.max_depth, self.device
+            self.model, all_rgbs, all_depths, all_intrinsics, all_extrinsics,
+            gripper_token, text_embed, robot_type, self.config.is_gmm,
+            self.config.max_depth, self.device
         )
 
         # Store for rerun visualization
@@ -310,21 +384,54 @@ class HighLevelWrapper:
         goal_text = call_gemini_with_retry(self.client, self.model_name, prompt, self.gemini_config)
         return goal_text
 
-    def project(self, goal_prediction, img_shape, goal_repr="heatmap"):
+    def project(self, goal_prediction, camera_obs, goal_repr="heatmap"):
         """Project goal prediction to image space"""
-        if self.config.model_type == "articubot" or self.config.model_type == "dino_3dgp":
-            return self._project_articubot(goal_prediction, img_shape, goal_repr)
+        if self.config.model_type == "articubot":
+            raise NotImplementedError("Not updated after multiview changes.")
+        elif self.config.model_type == "dino_3dgp":
+            # Project to each camera
+            goal_projections = {}
+            for idx, cam_name in enumerate(self.camera_names):
+                rgb_shape = camera_obs[cam_name]["rgb"].shape
+                goal_projections[cam_name] = self._project_to_camera(goal_prediction, rgb_shape, idx)
+            return goal_projections
         elif self.config.model_type == "dino_heatmap":
+            raise NotImplementedError("Not updated after multiview changes.")
             return self._compute_dino_heatmap(goal_prediction, img_shape)
         else:
             raise ValueError(f"Unknown model_type: {self.config.model_type}")
 
-    def _project_articubot(self, goal_prediction, img_shape, goal_repr="heatmap"):
-        """Project 3D points to 2D image space for Articubot"""
+    def _project_to_camera(self, goal_prediction, img_shape, cam_idx, goal_repr="heatmap"):
+        """
+        Project 3D points in world frame to specific camera's 2D image space.
+
+        Args:
+            goal_prediction: (N, 3) array of 3D points in WORLD frame
+            img_shape: (H, W, ...) shape of target image
+            cam_idx: Index of camera to project to
+            goal_repr: "mask" or "heatmap"
+
+        Returns:
+            (H, W, 3) projection image
+        """
         assert goal_repr in ["mask", "heatmap"]
-        urdf_proj_hom = (self.original_K @ goal_prediction.T).T
+
+        # Transform from world frame to this camera's frame
+        world_to_cam = np.linalg.inv(self.cam_to_worlds[cam_idx])
+
+        # Convert to homogeneous coordinates
+        goal_prediction_hom = np.concatenate([goal_prediction, np.ones((goal_prediction.shape[0], 1))], axis=1)  # (N, 4)
+
+        # Transform to camera frame
+        goal_prediction_cam = (world_to_cam @ goal_prediction_hom.T).T  # (N, 4)
+        goal_prediction_cam = goal_prediction_cam[:, :3]  # (N, 3)
+
+        # Project to image using this camera's intrinsics
+        K = self.original_Ks[cam_idx]
+        urdf_proj_hom = (K @ goal_prediction_cam.T).T
         urdf_proj = (urdf_proj_hom / urdf_proj_hom[:, 2:])[:, :2]
         urdf_proj = np.clip(urdf_proj, [0, 0], [img_shape[1] - 1, img_shape[0] - 1]).astype(int)
+
         goal_gripper_proj = np.zeros((img_shape[0], img_shape[1], 3))
         if goal_repr == "mask":
             goal_gripper_proj[urdf_proj[:, 1], urdf_proj[:, 0]] = 255
@@ -385,10 +492,24 @@ class HighLevelWrapper:
         # Return 3-channel heatmap (repeat single channel)
         return np.stack([heatmap, heatmap, heatmap], axis=-1)  # (H, W, 3)
 
-    def predict_and_project(self, text, rgb, depth, robot_type, robot_kwargs):
-        goal_prediction = self.predict(text, rgb, depth, robot_type, robot_kwargs)
-        goal_gripper_proj = self.project(goal_prediction, rgb.shape)
-        return goal_gripper_proj
+    def predict_and_project(self, text, camera_obs, robot_type, robot_kwargs):
+        """
+        Predict goal and project to all camera image spaces.
+
+        Args:
+            text: Task description
+            camera_obs: Dict mapping camera names to {"rgb": ..., "depth": ...}
+            robot_type: Robot type
+            robot_kwargs: Additional robot data
+
+        Returns:
+            Dict mapping camera names to goal projections: {cam_name: (H, W, 3) array}
+        """
+        # Get 3D prediction in world frame
+        goal_prediction = self.predict(text, camera_obs, robot_type, robot_kwargs)
+        goal_projections = self.project(goal_prediction, camera_obs)
+
+        return goal_projections  # dict[str, np.ndarray]
 
 
 def initialize_articubot_model(run_id, use_text_embedding, use_dual_head, in_channels, device):
@@ -555,16 +676,17 @@ def inference_dino_heatmap(model, rgb, gripper_pcd, text_embedding, device):
 
         return sampled_coord.squeeze(0).cpu().numpy()  # (2,) [x, y]
 
-def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embedding,
-                        robot_type, is_gmm, max_depth, device):
+def inference_dino_3dgp(model, rgbs, depths, intrinsics_list, extrinsics_list,
+                        gripper_token, text_embedding, robot_type, is_gmm, max_depth, device):
     """
     Run DINO 3D Goal Prediction model inference on RGB+depth and predict 3D goal points.
 
     Args:
         model (Dino3DGPNetwork): Trained model.
-        rgb (np.ndarray): RGB image (H, W, 3), uint8.
-        depth (np.ndarray): Depth image (H, W), uint16 in mm.
-        intrinsics (np.ndarray): Camera intrinsics (3, 3), scaled to 224x224.
+        rgbs (list): List of RGB images [(H, W, 3), ...], uint8, one per camera.
+        depths (list): List of depth images [(H, W), ...], uint16 in mm, one per camera.
+        intrinsics_list (list): List of camera intrinsics [(3, 3), ...], scaled to 224x224.
+        extrinsics_list (list): List of camera extrinsics [(4, 4), ...], T_world_from_camera.
         gripper_token (np.ndarray): Optional gripper token (10,).
         text_embedding (np.ndarray): Optional text embedding (1152,).
         robot_type (str): Robot type (e.g., "aloha", "robot").
@@ -575,19 +697,40 @@ def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embed
     Returns:
         pred_points: (4, 3) predicted 3D goal points
     """
-    # Preprocess RGB
-    rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb))).copy()
-    rgb_ = torch.from_numpy(rgb_).unsqueeze(0).permute(0, 3, 1, 2).float().to(device)  # (1, 3, 224, 224)
+    N = len(rgbs)  # Number of cameras
 
-    # Preprocess depth
-    depth_ = (depth / 1000.0).squeeze().astype(np.float32)  # Convert mm to meters
-    depth_ = PIL.Image.fromarray(depth_)
-    depth_ = np.asarray(depth_preprocess(depth_)).copy()
-    depth_[depth_ > max_depth] = 0  # Mask out far depths
-    depth_ = torch.from_numpy(depth_).unsqueeze(0).float().to(device)  # (1, 224, 224)
+    # Preprocess all RGBs
+    rgbs_processed = []
+    for rgb in rgbs:
+        rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb))).copy()
+        rgb_ = torch.from_numpy(rgb_).permute(2, 0, 1).float()  # (3, 224, 224)
+        rgbs_processed.append(rgb_)
 
-    # Intrinsics to torch
-    intrinsics_ = torch.from_numpy(intrinsics.astype(np.float32)).unsqueeze(0).to(device)  # (1, 3, 3)
+    # Stack into (1, N, 3, 224, 224)
+    rgbs_tensor = torch.stack(rgbs_processed, dim=0).unsqueeze(0).to(device)
+
+    # Preprocess all depths
+    depths_processed = []
+    for depth in depths:
+        depth_ = (depth / 1000.0).squeeze().astype(np.float32)  # Convert mm to meters
+        depth_ = PIL.Image.fromarray(depth_)
+        depth_ = np.asarray(depth_preprocess(depth_)).copy()
+        depth_[depth_ > max_depth] = 0  # Mask out far depths
+        depth_ = torch.from_numpy(depth_).float()  # (224, 224)
+        depths_processed.append(depth_)
+
+    # Stack into (1, N, 224, 224)
+    depths_tensor = torch.stack(depths_processed, dim=0).unsqueeze(0).to(device)
+
+    # Stack intrinsics into (1, N, 3, 3)
+    intrinsics_tensor = torch.stack([
+        torch.from_numpy(K.astype(np.float32)) for K in intrinsics_list
+    ], dim=0).unsqueeze(0).to(device)
+
+    # Stack extrinsics into (1, N, 4, 4)
+    extrinsics_tensor = torch.stack([
+        torch.from_numpy(T.astype(np.float32)) for T in extrinsics_list
+    ], dim=0).unsqueeze(0).to(device)
 
     with torch.no_grad():
         # Convert gripper_token to torch if provided
@@ -605,13 +748,14 @@ def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embed
 
         # Forward through network
         outputs, patch_coords = model(
-            image=rgb_,
-            depth=depth_,
-            intrinsics=intrinsics_,
+            image=rgbs_tensor,
+            depth=depths_tensor,
+            intrinsics=intrinsics_tensor,
+            extrinsics=extrinsics_tensor,
             gripper_token=gripper_tok,
             text_embedding=text_embed,
             source=source
-        )  # outputs: (1, 256, 13), patch_coords: (1, 256, 3)
+        )  # outputs: (1, N*256, 13), patch_coords: (1, N*256, 3) in WORLD frame
 
         # Sample or get weighted prediction
         if is_gmm:
@@ -623,7 +767,7 @@ def inference_dino_3dgp(model, rgb, depth, intrinsics, gripper_token, text_embed
         else:
             pred_points = get_weighted_prediction_3dgp(outputs, patch_coords)  # (1, 4, 3)
 
-        return pred_points.squeeze(0).cpu().numpy()  # (4, 3)
+        return pred_points.squeeze(0).cpu().numpy()  # (4, 3) in WORLD frame
 
 def compute_pcd(rgb, depth, K, rgb_preprocess, depth_preprocess, device, rng, num_points, max_depth):
     """

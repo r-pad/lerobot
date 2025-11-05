@@ -1,0 +1,6 @@
+{
+  "cam_azure_kinect": {
+    "intrinsics": "aloha_calibration/intrinsics_000077925212.txt",
+    "extrinsics": "aloha_calibration/T_world_from_camera_est_v7_1013.txt"
+  }
+}

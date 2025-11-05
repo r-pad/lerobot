@@ -112,10 +112,9 @@ def main():
         help="Transparency factor for heatmap overlay (default: 0.4)",
     )
     parser.add_argument(
-        "--output-subdir",
+        "--cam-name",
         type=str,
-        default="observation.images.cam_azure_kinect.color_with_heatmap",
-        help="Output subdirectory name (default: observation.images.cam_azure_kinect.color_with_heatmap)",
+        default="cam_azure_kinect",
     )
 
     args = parser.parse_args()
@@ -128,9 +127,9 @@ def main():
 
     # Construct paths
     base_path = cache_dir / args.repo_id / "videos" / args.chunk
-    rgb_dir = base_path / "observation.images.cam_azure_kinect.color"
-    heatmap_dir = base_path / "observation.images.cam_azure_kinect.goal_gripper_proj"
-    output_dir = base_path / args.output_subdir
+    rgb_dir = base_path / f"observation.images.{args.cam_name}.color"
+    heatmap_dir = base_path / f"observation.images.{args.cam_name}.goal_gripper_proj"
+    output_dir = base_path / f"observation.images.{args.cam_name}.color_with_heatmap"
 
     # Verify directories exist
     if not rgb_dir.exists():
