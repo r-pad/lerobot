@@ -42,7 +42,7 @@ def extract_obs_from_demo(demo, task_bddl_file, img_shape):
             obs['robot0_eef_quat'],
             obs['robot0_gripper_qpos'][0],
             np.linalg.inv(agentview_ext_mat),  # Transform to camera frame
-        )
+        )[[1, 2, 0, 3], : ] # swap gripper pcd
         all_obs.append(obs)
 
     env.close()
@@ -122,7 +122,7 @@ def gen_libero_dataset(
                 if "observation.images.agentview_goal_gripper_proj" in features:
                     # Generate gripper projection heatmap for agentview camera
                     gripper_pcd_cam = all_obs[next_event_idx]["gripper_pcd"]  # Already in camera frame
-                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat)
+                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat) # left, right, top, grasp center
                     frame_data["observation.images.agentview_goal_gripper_proj"] = generate_heatmap_from_points(points_2d, img_shape)
 
                 libero_dataset.add_frame(frame_data)
@@ -138,7 +138,7 @@ if __name__ == "__main__":
     python lerobot/scripts/create_libero_dataset.py --hdf5_list libero_object/pick_up_the_alphabet_soup_and_place_it_in_the_basket_demo.hdf5
     """
     parser = argparse.ArgumentParser(description="Generate a LeRobotDataset for LIBERO.")
-    parser.add_argument("--libero_path", type=str, default="/data/sriram/libero/",
+    parser.add_argument("--libero_path", type=str, default="/data/sriram/libero",
                         help="Path to LIBERO")
     parser.add_argument("--suite_names", type=str, nargs="*",
                         choices=["libero_goal", "libero_spatial", "libero_object", "libero_90", "libero_10", None],
@@ -164,7 +164,7 @@ if __name__ == "__main__":
         raise ValueError("No files")
 
 
-    IMG_SHAPE = (128, 128)
+    IMG_SHAPE = (256, 256)
     features = {
         "observation.state": {
             'dtype': 'float32',

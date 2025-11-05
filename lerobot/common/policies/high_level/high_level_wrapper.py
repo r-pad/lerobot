@@ -44,6 +44,9 @@ class HighLevelConfig:
     """Configuration for HighLevelWrapper"""
     model_type: str = "articubot"  # "articubot", "dino_heatmap", or "dino_3dgp"
     run_id: Optional[str] = None
+    entity: str = "r-pad"
+    project: str = "lfd3d"
+    checkpoint_type: str = "rmse"
     max_depth: float = 1.0
     num_points: int = 8192
     in_channels: int = 3
@@ -90,12 +93,12 @@ class HighLevelWrapper:
                 config.in_channels, self.device
             )
         elif config.model_type == "dino_heatmap":
-            self.model = initialize_dino_heatmap_model(
+            self.model = initialize_dino_heatmap_model(config.entity, config.project, config.checkpoint_type,
                 config.run_id, config.dino_model, config.use_gripper_pcd,
                 config.use_text_embedding, self.device
             )
         elif config.model_type == "dino_3dgp":
-            self.model = initialize_dino_3dgp_model(
+            self.model = initialize_dino_3dgp_model(config.entity, config.project, config.checkpoint_type,
                 config.run_id, config.dino_model, config.use_text_embedding,
                 config.use_gripper_token, config.use_source_token, config.use_fourier_pe,
                 config.fourier_num_frequencies, config.fourier_include_input,
@@ -106,6 +109,8 @@ class HighLevelWrapper:
 
         self.rng = np.random.default_rng()
         self.aloha_gripper_idx = torch.tensor([6, 197, 174]) # Handpicked idxs for the aloha
+        self.libero_franka_idx = torch.tensor([1, 2, 0]) # top, left, right -> left, right, top in agentview 
+        print(f"libero franka gripper idx: {self.libero_franka_idx}")
 
         # For rerun visualization
         self.last_pcd_xyz = None
@@ -125,7 +130,7 @@ class HighLevelWrapper:
                 gripper_orn=robot_kwargs["ee_quat"],
                 cur_joint_angle=robot_kwargs["gripper_angle"],
                 world_to_cam_mat=np.linalg.inv(self.cam_to_world),
-            )
+            )[self.libero_franka_idx]
         else:
             raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
 
@@ -262,7 +267,11 @@ class HighLevelWrapper:
         if self.config.use_gripper_token:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
             self.last_gripper_pcd = gripper_pcd
-            gripper_token = self._gripper_pcd_to_token(gripper_pcd[self.aloha_gripper_idx])
+            if robot_type == "aloha":
+                gripper_pcd_ = gripper_pcd[self.aloha_gripper_idx]
+            else:
+                gripper_pcd_ = gripper_pcd
+            gripper_token = self._gripper_pcd_to_token(gripper_pcd_)
 
         # Get text embedding if needed
         text_embed = None
@@ -403,7 +412,7 @@ def initialize_articubot_model(run_id, use_text_embedding, use_dual_head, in_cha
 
     return model
 
-def initialize_dino_heatmap_model(run_id, dino_model, use_gripper_pcd, use_text_embedding, device):
+def initialize_dino_heatmap_model(entity, project, checkpoint_type, run_id, dino_model, use_gripper_pcd, use_text_embedding, device):
     """Initialize DINO heatmap model from wandb artifact"""
 
     # Simple config object to match what DinoHeatmapNetwork expects
@@ -417,7 +426,7 @@ def initialize_dino_heatmap_model(run_id, dino_model, use_gripper_pcd, use_text_
     model = DinoHeatmapNetwork(model_cfg)
 
     artifact_dir = "wandb"
-    checkpoint_reference = f"r-pad/lfd3d/best_pix_dist_model-{run_id}:best"
+    checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
     ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
@@ -431,7 +440,7 @@ def initialize_dino_heatmap_model(run_id, dino_model, use_gripper_pcd, use_text_
 
     return model
 
-def initialize_dino_3dgp_model(
+def initialize_dino_3dgp_model(entity, project, checkpoint_type,
     run_id, dino_model, use_text_embedding, use_gripper_token, use_source_token,
     use_fourier_pe, fourier_num_frequencies, fourier_include_input,
     num_transformer_layers, dropout, device
@@ -461,7 +470,7 @@ def initialize_dino_3dgp_model(
     model = Dino3DGPNetwork(model_cfg)
 
     artifact_dir = "wandb"
-    checkpoint_reference = f"r-pad/lfd3d/best_rmse_model-{run_id}:best"
+    checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
     ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
