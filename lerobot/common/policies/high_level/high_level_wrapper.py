@@ -46,7 +46,7 @@ class HighLevelConfig:
     run_id: Optional[str] = None
     entity: str = "r-pad"
     project: str = "lfd3d"
-    checkpoint_type: str = "pix_dist"
+    checkpoint_type: str = "rmse"
     max_depth: float = 1.0
     num_points: int = 8192
     in_channels: int = 3
@@ -130,7 +130,7 @@ class HighLevelWrapper:
                 gripper_orn=robot_kwargs["ee_quat"],
                 cur_joint_angle=robot_kwargs["gripper_angle"],
                 world_to_cam_mat=np.linalg.inv(self.cam_to_world),
-            )
+            )[self.libero_franka_idx]
         else:
             raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
 
@@ -210,12 +210,6 @@ class HighLevelWrapper:
 
         if self.config.use_gripper_pcd:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
-            if robot_type == "aloha":
-                gripper_pcd = gripper_pcd[self.aloha_gripper_idx]
-            elif robot_type == "libero_franka":
-                gripper_pcd = gripper_pcd[self.libero_franka_idx]
-            else:
-                raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
             if self.config.use_rgb:
                 gripper_rgb = np.zeros((gripper_pcd.shape[0], 3))
@@ -242,12 +236,6 @@ class HighLevelWrapper:
         gripper_pcd = None
         if self.config.use_gripper_pcd:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
-            if robot_type == "aloha":
-                gripper_pcd = gripper_pcd[self.aloha_gripper_idx]
-            elif robot_type == "libero_franka":
-                gripper_pcd = gripper_pcd[self.libero_franka_idx]
-            else:
-                raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
             self.last_gripper_pcd = gripper_pcd
 
         # Get text embedding if needed
@@ -278,14 +266,12 @@ class HighLevelWrapper:
         gripper_token = None
         if self.config.use_gripper_token:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
-            if robot_type == "aloha":
-                gripper_pcd = gripper_pcd[self.aloha_gripper_idx]
-            elif robot_type == "libero_franka":
-                gripper_pcd = gripper_pcd[self.libero_franka_idx]
-            else:
-                raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
             self.last_gripper_pcd = gripper_pcd
-            gripper_token = self._gripper_pcd_to_token(gripper_pcd)
+            if robot_type == "aloha":
+                gripper_pcd_ = gripper_pcd[self.aloha_gripper_idx]
+            else:
+                gripper_pcd_ = gripper_pcd
+            gripper_token = self._gripper_pcd_to_token(gripper_pcd_)
 
         # Get text embedding if needed
         text_embed = None

@@ -156,7 +156,7 @@ class DiffusionConfig(PreTrainedConfig):
     hl_run_id: str | None = "bi04w82v"
     hl_entity: str = "r-pad"
     hl_project: str = "lfd3d"
-    hl_checkpoint_type: str = "pix_dist"
+    hl_checkpoint_type: str = "rmse"
     hl_max_depth: float = 1.5
     hl_num_points: int = 8192
     hl_is_gmm: bool = True
