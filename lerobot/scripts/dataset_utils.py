@@ -4,7 +4,7 @@ Shared utilities for dataset creation scripts to reduce code duplication.
 import numpy as np
 
 
-def generate_heatmap_from_points(points_2d, img_shape):
+def generate_heatmap_from_points(points_2d, img_shape, n=0.3, sigma=0.8):
     """
     Generate a 3-channel heatmap from projected 2D points.
 
@@ -35,7 +35,7 @@ def generate_heatmap_from_points(points_2d, img_shape):
         goal_image[:, :, i] = distances
 
     # Apply square root transformation for steeper near-target gradients
-    goal_image = (np.sqrt(goal_image / max_distance) * 255)
+    goal_image = (goal_image / max_distance / sigma) ** n  * 255
     goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
     return goal_image
 
