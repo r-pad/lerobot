@@ -23,6 +23,7 @@ TODO(alexander-soare):
 import math
 from collections import deque
 from typing import Callable
+import json
 
 import einops
 import numpy as np
@@ -142,6 +143,9 @@ class DiffusionPolicy(PreTrainedPolicy):
         self.renderer = None
         self.phantomize = self.config.phantomize
         self.downsample_factor = self.config.phantom_downsample_factor
+        with open(self.config.hl_calibration_json, 'r') as f:
+            calibration_data = json.load(f)
+        self.camera_names = list(calibration_data.keys())
         self.reset()
 
     def get_optim_params(self) -> dict:
@@ -156,8 +160,10 @@ class DiffusionPolicy(PreTrainedPolicy):
         if self.config.image_features:
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
             if self.config.use_depth: #RGBD
-                self._queues["observation.images.agentview"] = deque(maxlen=self.config.n_obs_steps)
-                self._queues["observation.images.agentview_depth"] = deque(maxlen=self.config.n_obs_steps)
+                for cam_name in self.camera_names:
+                    self._queues[ f"observation.images.{cam_name}.color"] = deque(maxlen=self.config.n_obs_steps)
+                    self._queues[f"observation.images.{cam_name}.transformed_depth"] = deque(maxlen=self.config.n_obs_steps)
+                
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
 
@@ -249,6 +255,9 @@ class DiffusionModel(nn.Module):
         self.act_key = robot_adapter.get_act_key()
 
         self.use_text_embedding = self.config.use_text_embedding
+        with open(self.config.hl_calibration_json, 'r') as f:
+            calibration_data = json.load(f)
+        self.camera_names = list(calibration_data.keys())
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
@@ -359,14 +368,15 @@ class DiffusionModel(nn.Module):
                     img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
                 )
             if self.config.use_depth:
-                depth = einops.rearrange(batch['observation.images.agentview_depth'], "b s ... -> (b s) ...")
-                depth = depth.repeat(1, 3, 1, 1) # Repeat channel -> B, 3, H, W
-                
-                depth_features = self.depth_encoder(depth)
-                depth_features = einops.rearrange(
-                    depth_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
-                )
-                global_cond_feats.append(depth_features)
+                for cam_name in self.camera_names:
+                    depth = einops.rearrange(batch[f'observation.images.{cam_name}.transformed_depth'], "b s ... -> (b s) ...")
+                    depth = depth.repeat(1, 3, 1, 1) # Repeat channel -> B, 3, H, W
+                    
+                    depth_features = self.depth_encoder(depth)
+                    depth_features = einops.rearrange(
+                        depth_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
+                    )
+                    global_cond_feats.append(depth_features)
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:

@@ -162,35 +162,52 @@ def rollout(
         observation = add_envs_task(env, observation)
 
         if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
-            raise NotImplementedError(
-                "Interface for predict_and_project has changed. "
-                "See control_utils.py for reference implementation with camera_obs dict."
-            )
-
             # Generate new goal prediction when queue is empty
             # This code is specific to diffusion policy and LIBERO :(
             if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
-                rgb = observation["observation.images.agentview"].cpu().numpy()
-                depth = observation["observation.images.agentview_depth"].cpu().numpy().squeeze()
-                gripper_proj = []
-                for i in range(rgb.shape[0]):
-                    rgb_ = (rgb[i].transpose(1,2,0) * 255).astype(np.uint8)
-                    depth_ = (depth[i] * 1000).astype(np.uint16)
-                    ee_pos_ = ee_pos[i]
-                    ee_quat_ = ee_quat[i]
-                    gripper_angle_ = gripper_angle[i]
+                gripper_projs = {}
+                for cam_name in policy.high_level.camera_names:
+                    gripper_projs[cam_name] = []
+
+                batch_size = observation["observation.state"].shape[0]
+                
+                for i in range(batch_size):
+                    camera_obs = {}
+                    for cam_name in policy.high_level.camera_names:
+                        rgb_key =  f"observation.images.{cam_name}.color"
+                        depth_key = f"observation.images.{cam_name}.transformed_depth"
+
+                        # Validate camera data exists
+                        if rgb_key not in observation or depth_key not in observation:
+                            raise ValueError(
+                                f"Required camera observation '{cam_name}' not found. "
+                                f"Available keys: {policy.high_level.camera_names}"
+                            )
+                        camera_obs[cam_name] = {
+                            "rgb": observation[rgb_key].numpy(),
+                            "depth": observation[depth_key].numpy().squeeze()
+                        }
                     task = observation["task"][i]
-                    g_proj = policy.high_level.predict_and_project(task, rgb_, depth_, robot_type=policy.config.robot_type,
-                                                                     robot_kwargs={
-                                                                         "ee_pos": ee_pos_,
-                                                                         "ee_quat": ee_quat_,
-                                                                         "gripper_angle": gripper_angle_,
-                                                                     })
-                    gripper_proj.append(g_proj)
-                goal_gripper_proj = torch.from_numpy(np.stack(gripper_proj))
-                goal_gripper_proj = ((goal_gripper_proj / 255.).float().to(device)).permute(0,3,1,2)
+
+                    # Get dict of projections for all cameras
+                    gripper_proj = policy.high_level.predict_and_project(
+                        task, camera_obs,
+                        robot_type=policy.config.robot_type,
+                        robot_kwargs={"observation.state": observation["observation.state"]}
+                    )
+                    for cam_name, proj in gripper_proj.items():
+                        gripper_projs[cam_name].append(proj)
+
+                goal_gripper_proj = {}
+                for cam_name, proj in gripper_projs.items():
+                    cam_goal_projs = torch.from_numpy(np.stack(proj))
+                    cam_goal_projs = ((cam_goal_projs / 255.).float().to(device)).permute(0,3,1,2)
+                    goal_gripper_proj[cam_name] = cam_goal_projs
                 policy.latest_gripper_proj = goal_gripper_proj
-            observation["observation.images.agentview_goal_gripper_proj"] = policy.latest_gripper_proj
+
+                # Add goal projection to each camera observation
+                for cam_name in policy.high_level.camera_names:
+                    observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
 
         # Save goal gripper proj frames if callback is provided
         if goal_gripper_proj_callback is not None and "observation.images.agentview_goal_gripper_proj" in observation:

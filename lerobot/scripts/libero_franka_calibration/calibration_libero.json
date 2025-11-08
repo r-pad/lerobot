@@ -1,0 +1,6 @@
+{
+  "cam_libero": {
+    "intrinsics": "libero_franka_calibration/intrinsics.txt",
+    "extrinsics": "libero_franka_calibration/agentview_cam_to_world.txt"
+  }
+}
