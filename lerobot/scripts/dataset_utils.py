@@ -4,7 +4,7 @@ Shared utilities for dataset creation scripts to reduce code duplication.
 import numpy as np
 
 
-def generate_heatmap_from_points(points_2d, img_shape, n=0.3, sigma=0.8):
+def generate_heatmap_from_points(points_2d, img_shape, n=0.5, sigma=1):
     """
     Generate a 3-channel heatmap from projected 2D points.
 
