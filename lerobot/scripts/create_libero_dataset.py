@@ -41,7 +41,7 @@ def extract_obs_from_demo(demo, task_bddl_file, img_shape):
             obs['robot0_eef_pos'],
             obs['robot0_eef_quat'],
             obs['robot0_gripper_qpos'][0],
-            np.linalg.inv(agentview_ext_mat),  # Transform to camera frame
+            np.eye(4),  # Transform to world frame
         )[[1, 2, 0, 3], : ] # swap gripper pcd
         all_obs.append(obs)
 
