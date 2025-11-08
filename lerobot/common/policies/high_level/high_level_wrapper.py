@@ -152,7 +152,7 @@ class HighLevelWrapper:
                 gripper_pos=robot_kwargs["ee_pos"],
                 gripper_orn=robot_kwargs["ee_quat"],
                 cur_joint_angle=robot_kwargs["gripper_angle"],
-                world_to_cam_mat=np.linalg.inv(self.cam_to_world),
+                world_to_cam_mat=np.linalg.inv(self.cam_to_worlds[0]),
             )[self.libero_franka_idx]
         else:
             raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
