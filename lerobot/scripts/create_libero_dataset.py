@@ -121,9 +121,15 @@ def gen_libero_dataset(
                     frame_data["next_event_idx"] = np.array([next_event_idx], dtype=np.int32)
                 if "observation.images.cam_libero.goal_gripper_proj" in features:
                     # Generate gripper projection heatmap for agentview camera
-                    gripper_pcd_cam = all_obs[next_event_idx]["gripper_pcd"]  # World frame
-                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat, np.linalg.inv(agentview_ext_mat)) # left, right, top, grasp center
+                    gripper_pcd_world = all_obs[next_event_idx]["gripper_pcd"]  # World frame
+                    points_2d = project_points_to_image(gripper_pcd_world, agentview_int_mat, np.linalg.inv(agentview_ext_mat)) # left, right, top, grasp center
                     frame_data["observation.images.cam_libero.goal_gripper_proj"] = generate_heatmap_from_points(points_2d, img_shape)
+                if "observation.points.goal_gripper_pcds" in features:
+                    gripper_pcd_world = all_obs[next_event_idx]["gripper_pcd"]  # World frame
+                    current_pcd_world = all_obs[frame_idx]["gripper_pcd"]
+                    frame_data["observation.points.goal_gripper_pcds"] = gripper_pcd_world
+                    frame_data["observation.points.gripper_pcds_displacement"] = gripper_pcd_world - current_pcd_world
+
 
                 libero_dataset.add_frame(frame_data)
 
@@ -220,6 +226,14 @@ if __name__ == "__main__":
             'names': ['idx'],
             'info': 'Index of next event in the dataset'
         }
+    if "goal_gripper_pcds" in args.new_features:
+        new_features["observation.points.goal_gripper_pcds"] = {
+            'dtype': 'pcd',
+            'shape': (-1, 3),
+            'names': ['N', 'channels'],
+            'info': 'Goal gripper point cloud'
+        }
+
     features.update(new_features)
 
     libero_dataset = gen_libero_dataset(

@@ -163,6 +163,9 @@ class DiffusionPolicy(PreTrainedPolicy):
                 for cam_name in self.camera_names:
                     self._queues[ f"observation.images.{cam_name}.color"] = deque(maxlen=self.config.n_obs_steps)
                     self._queues[f"observation.images.{cam_name}.transformed_depth"] = deque(maxlen=self.config.n_obs_steps)
+            if self.config.use_proprio:
+                self._queues[f"observation.points.goal_gripper_pcds"] = deque(maxlen=self.config.n_obs_steps)
+                self._queues[f"observation.points.gripper_pcds_displacement"] = deque(maxlen=self.config.n_obs_steps)
                 
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
@@ -273,6 +276,9 @@ class DiffusionModel(nn.Module):
             if self.config.use_depth:
                 self.depth_encoder = DiffusionRgbEncoder(config)
                 global_cond_dim += self.depth_encoder.feature_dim
+            if self.config.use_proprio:
+                self.point_encoder = SimplePointNet(3, 128)
+                global_cond_dim += self.point_encoder.feature_dim*2
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
         if self.use_text_embedding:
@@ -377,6 +383,16 @@ class DiffusionModel(nn.Module):
                         depth_features, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps
                     )
                     global_cond_feats.append(depth_features)
+            if self.config.use_proprio:
+                displacement = einops.rearrange(batch[f'observation.points.gripper_pcds_displacement'], "b s ... -> (b s) ...") # B, s, N, 3 - > (B, s), N, 3
+                goal_proprio = einops.rearrange(batch[f'observation.points.goal_gripper_pcds'], "b s ... -> (b s) ...") # B, s, N, 3 - > (B, s), N, 3
+                goal_proprio_feature = self.point_encoder(goal_proprio)
+                displacement_feature = self.point_encoder(displacement)
+                displacement_feature = einops.rearrange(displacement_feature, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
+                goal_proprio_feature = einops.rearrange(goal_proprio_feature, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
+                global_cond_feats.append(goal_proprio_feature)
+                global_cond_feats.append(displacement_feature)
+                
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:
@@ -746,6 +762,32 @@ class DiffusionSinusoidalPosEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
+
+class SimplePointNet(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(SimplePointNet, self).__init__()
+        self.conv1 = nn.Conv1d(input_dim, 64, 1)
+        self.conv2 = nn.Conv1d(64, 128, 1)
+        self.conv3 = nn.Conv1d(128, output_dim, 1)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.feature_dim = output_dim
+
+    def forward(self, x):
+        # Make translation invariant
+        centroid = x.mean(dim=1, keepdim=True)
+        x = x - centroid
+
+        # x: (B, N, input_dim) -> (B, input_dim, N)
+        x = x.transpose(1, 2)
+
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.conv3(x)
+        # Global max pooling
+        x = torch.max(x, 2)[0]  # (B, output_dim)
+        return x
+    
 
 class DiffusionConv1dBlock(nn.Module):
     """Conv1d --> GroupNorm --> Mish"""
