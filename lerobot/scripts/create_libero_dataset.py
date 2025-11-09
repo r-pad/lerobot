@@ -46,7 +46,7 @@ def extract_obs_from_demo(demo, task_bddl_file, img_shape):
         all_obs.append(obs)
 
     env.close()
-    return all_obs, agentview_int_mat
+    return all_obs, agentview_int_mat, agentview_ext_mat
 
 
 def gen_libero_dataset(
@@ -98,7 +98,7 @@ def gen_libero_dataset(
             # Some demos in LIBERO have mismatched states and can't be plugged into the simulator? :/
             # try-catch and skip
             try:
-                all_obs, agentview_int_mat = extract_obs_from_demo(demo, task_bddl_file, img_shape)
+                all_obs, agentview_int_mat, agentview_ext_mat = extract_obs_from_demo(demo, task_bddl_file, img_shape)
             except Exception as e:
                 print(f"Could not process {h5_file}, demo {idx} due to exception {e}")
                 continue
@@ -121,8 +121,8 @@ def gen_libero_dataset(
                     frame_data["next_event_idx"] = np.array([next_event_idx], dtype=np.int32)
                 if "observation.images.cam_libero.goal_gripper_proj" in features:
                     # Generate gripper projection heatmap for agentview camera
-                    gripper_pcd_cam = all_obs[next_event_idx]["gripper_pcd"]  # Already in camera frame
-                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat) # left, right, top, grasp center
+                    gripper_pcd_cam = all_obs[next_event_idx]["gripper_pcd"]  # World frame
+                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat, np.linalg.inv(agentview_ext_mat)) # left, right, top, grasp center
                     frame_data["observation.images.cam_libero.goal_gripper_proj"] = generate_heatmap_from_points(points_2d, img_shape)
 
                 libero_dataset.add_frame(frame_data)
