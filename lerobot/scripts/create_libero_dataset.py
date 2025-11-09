@@ -128,6 +128,9 @@ def gen_libero_dataset(
                     gripper_pcd_world = all_obs[next_event_idx]["gripper_pcd"]  # World frame
                     current_pcd_world = all_obs[frame_idx]["gripper_pcd"]
                     frame_data["observation.points.goal_gripper_pcds"] = gripper_pcd_world
+                if "observation.points.gripper_pcds_displacement" in features:
+                    gripper_pcd_world = all_obs[next_event_idx]["gripper_pcd"]  # World frame
+                    current_pcd_world = all_obs[frame_idx]["gripper_pcd"]
                     frame_data["observation.points.gripper_pcds_displacement"] = gripper_pcd_world - current_pcd_world
 
 
@@ -232,6 +235,13 @@ if __name__ == "__main__":
             'shape': (-1, 3),
             'names': ['N', 'channels'],
             'info': 'Goal gripper point cloud'
+        }
+    if "goal_gripper_displacement" in args.new_features:
+        new_features["observation.points.gripper_pcds_displacement"] = {
+            'dtype': 'pcd',
+            'shape': (-1, 3),
+            'names': ['N', 'channels'],
+            'info': 'Displacement between goal gripper and current gripper'
         }
 
     features.update(new_features)
