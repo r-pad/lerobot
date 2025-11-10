@@ -79,6 +79,7 @@ from lerobot.common.utils.utils import (
 )
 from lerobot.configs import parser
 from lerobot.configs.eval import EvalPipelineConfig
+from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
 
 LIBERO_REMAP = {
     "observation.images.agentview": "observation.images.cam_libero.color",
@@ -171,6 +172,8 @@ def rollout(
             # This code is specific to diffusion policy and LIBERO :(
             if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
                 gripper_projs = {}
+                goal_gripper_pcds = []
+                goal_gripper_displacements = []
                 for cam_name in policy.high_level.camera_names:
                     gripper_projs[cam_name] = []
 
@@ -206,6 +209,26 @@ def rollout(
                                         "gripper_angle": gripper_angle_,
                         }
                     )
+                    goal_gripper_pcd = policy.high_level.predict(
+                        task, camera_obs,
+                        robot_type=policy.config.robot_type,
+                        robot_kwargs={
+                                        "ee_pos": ee_pos_,
+                                        "ee_quat": ee_quat_,
+                                        "gripper_angle": gripper_angle_,
+                        }
+                    )
+
+                    goal_gripper_displacement = goal_gripper_pcd - get_4_points_from_gripper_pos_orient(
+                        gripper_pos=ee_pos_,
+                        gripper_orn=ee_quat_,
+                        cur_joint_angle=gripper_angle_,
+                        world_to_cam_mat=np.eye(4), # render in world frame
+                    )[torch.cat([policy.high_level.libero_franka_idx, torch.tensor([3])])]
+                    
+                    goal_gripper_pcds.append(goal_gripper_pcd)
+                    goal_gripper_displacements.append(goal_gripper_displacement)
+
                     for cam_name, proj in gripper_proj.items():
                         gripper_projs[cam_name].append(proj)
 
@@ -219,6 +242,9 @@ def rollout(
         # Add goal projection to each camera observation
         for cam_name in policy.high_level.camera_names:
             observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
+
+        observation[f"observation.points.goal_gripper_pcds"] = torch.from_numpy(np.array(goal_gripper_pcds)).float().to(device)
+        observation[f"observation.points.gripper_pcds_displacement"] = torch.from_numpy(np.array(goal_gripper_displacements)).float().to(device)
 
         # Save goal gripper proj frames if callback is provided
         if goal_gripper_proj_callback is not None and "observation.images.cam_libero.goal_gripper_proj" in observation:
