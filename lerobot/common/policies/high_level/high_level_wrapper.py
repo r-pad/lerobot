@@ -85,6 +85,7 @@ class HighLevelWrapper:
         # Load camera calibration from JSON
         with open(config.calibration_json, 'r') as f:
             calibration_data = json.load(f)
+        self.calibration_data = calibration_data
 
         # Extract camera configurations
         self.camera_names = list(calibration_data.keys())

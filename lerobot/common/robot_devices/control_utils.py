@@ -37,7 +37,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
-from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, forward_kinematics, render_and_overlay, setup_renderer
+from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
 
 def add_eef_pose(real_joints):
     eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
@@ -285,6 +285,34 @@ def control_loop(
                     if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
                         # Gather observations from all configured cameras
                         camera_obs = {}
+                        state = observation["observation.state"].numpy()
+
+                        # Setup renderer once for all cameras if using phantomize
+                        if hasattr(policy.config, "phantomize") and policy.config.phantomize:
+                            if policy.renderer is None:
+                                intrinsics_txts, extrinsics_txts, virtual_camera_names = [], [], []
+                                for cam_name in policy.high_level.camera_names:
+                                    intrinsics_txts.append(f"lerobot/scripts/{policy.high_level.calibration_data[cam_name]['intrinsics']}")
+                                    extrinsics_txts.append(f"lerobot/scripts/{policy.high_level.calibration_data[cam_name]['extrinsics']}")
+                                    virtual_camera_names.append(VIRTUAL_CAMERA_MAPPING[cam_name])
+
+                                # Get image dimensions from first camera
+                                first_cam = policy.high_level.camera_names[0]
+                                rgb_key = f"observation.images.{first_cam}.color"
+                                height, width, _ = observation[rgb_key].numpy().shape
+
+                                # Setup renderer with all cameras at once
+                                policy.renderer = setup_renderer(
+                                    ALOHA_MODEL,
+                                    intrinsics_txts,
+                                    extrinsics_txts,
+                                    policy.downsample_factor,
+                                    width,
+                                    height,
+                                    virtual_camera_names
+                                )
+
+                        # Gather camera observations and apply phantomize if needed
                         for cam_name in policy.high_level.camera_names:
                             rgb_key = f"observation.images.{cam_name}.color"
                             depth_key = f"observation.images.{cam_name}.transformed_depth"
@@ -299,6 +327,23 @@ def control_loop(
                                 "rgb": observation[rgb_key].numpy(),
                                 "depth": observation[depth_key].numpy().squeeze()
                             }
+
+                            if hasattr(policy.config, "phantomize") and policy.config.phantomize:
+                                # Overlay RGB with rendered robot
+                                render = render_and_overlay(
+                                    policy.renderer,
+                                    ALOHA_MODEL,
+                                    state,
+                                    camera_obs[cam_name]["rgb"].copy(),
+                                    policy.downsample_factor,
+                                    VIRTUAL_CAMERA_MAPPING[cam_name],
+                                )
+                                camera_obs[cam_name]["rgb"] = render
+                        # import matplotlib.pyplot as plt, cv2, os
+                        # os.makedirs("phantomize_inference_viz", exist_ok=True)
+                        # img = cv2.hconcat([camera_obs[cam_name]["rgb"] for cam_name in policy.high_level.camera_names])
+                        # plt.imsave(f"phantomize_inference_viz/{time.time()}.png", img)
+
 
                         # Get dict of projections for all cameras
                         gripper_projs = policy.high_level.predict_and_project(
