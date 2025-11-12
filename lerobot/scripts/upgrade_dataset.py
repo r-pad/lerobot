@@ -280,10 +280,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
             frame_data["observation.points.gripper_pcds"] = episode_extras['episode_gripper_pcds'][frame_idx]
         else:
             # Keep in world frame
-            if phantomize and frame_idx in goal_indices:
-                frame_data["observation.points.gripper_pcds"] = retarget_aloha_gripper_pcd(np.eye(4), eef_data, sample_n_points=500)
-            else:
-                frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=np.eye(4), joint_state=joint_state).astype(np.float32)
+            frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=np.eye(4), joint_state=joint_state).astype(np.float32)
 
     # Dummy values, replaced at the end of the episode
     for cam_name in camera_names:
