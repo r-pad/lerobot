@@ -163,23 +163,35 @@ def get_goal_image(K, width, height, four_points=True, goal_repr="heatmap", huma
         goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
     return goal_image
 
-def _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata):
+def _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata, camera_names):
     """Load phantom retargeted data or human demo extras for an episode."""
     episode_extras = {}
 
     if phantomize:
         PHANTOM_VID_DIR = f"{path_to_extradata}/phantom_retarget"
         EVENTS_DIR = f"{path_to_extradata}/events"
-        vid_dir = f"{PHANTOM_VID_DIR}/episode_{episode_idx:06d}.mp4/"
-        assert os.path.exists(vid_dir)
+
+        vid_dirs = [
+            f"{PHANTOM_VID_DIR}/episode_{episode_idx:06d}_{cam_name}.mp4/"
+            for cam_name in camera_names
+        ]
+        assert all([os.path.exists(i) for i in vid_dirs])
 
         events_file = f"{EVENTS_DIR}/episode_{episode_idx:06d}.mp4.json"
         with open(events_file, 'r') as f:
             episode_events = json.load(f)
         event_idxs = episode_events
-        phantom_vid = torch.from_numpy(iio.imread(f"{vid_dir}/episode_{episode_idx:06d}.mp4"))
-        phantom_depth_vid = torch.from_numpy(read_depth_video(f"{vid_dir}/depth_episode_{episode_idx:06d}.mkv"))
-        phantom_proprio = np.load(f"{vid_dir}/episode_{episode_idx:06d}.mp4_eef.npz")
+        phantom_vid = {
+            cam_name: torch.from_numpy(iio.imread(f"{vid_dir}/episode_{episode_idx:06d}_{cam_name}.mp4"))
+            for vid_dir, cam_name in zip(vid_dirs, camera_names)
+        }
+        phantom_depth_vid = {
+            cam_name: torch.from_numpy(read_depth_video(f"{vid_dir}/depth_episode_{episode_idx:06d}_{cam_name}.mkv"))
+            for vid_dir, cam_name in zip(vid_dirs, camera_names)
+        }
+
+        # Use vid_dirs[0] as it's the same for all cameras
+        phantom_proprio = np.load(f"{vid_dirs[0]}/episode_{episode_idx:06d}_{camera_names[0]}_eef.npz")
         phantom_eef_pose = torch.from_numpy(prep_eef_pose(phantom_proprio["eef_pos"],
                                          phantom_proprio["eef_rot"],
                                          phantom_proprio["eef_artic"]))
@@ -231,10 +243,9 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
     rgb_data, depth_data = {}, {}
 
     if phantomize:
-        raise NotImplementedError("Multiview not yet supported for phantom mode")
         for cam_name in camera_names:
-            rgb_data[cam_name] = episode_extras[f'phantom_vid_{cam_name}'][frame_idx]
-            depth_data[cam_name] = (episode_extras[f'phantom_depth_vid_{cam_name}'][frame_idx][:, :, None] * 1000).to(torch.uint16)
+            rgb_data[cam_name] = episode_extras[f'phantom_vid'][cam_name][frame_idx]
+            depth_data[cam_name] = (episode_extras[f'phantom_depth_vid'][cam_name][frame_idx][:, :, None] * 1000).to(torch.uint16)
         eef_data = episode_extras['phantom_eef_pose'][frame_idx]
         joint_state = episode_extras['phantom_joint_state'][frame_idx]
         next_idx = (frame_idx + 1) if (frame_idx + 1) < episode_length else frame_idx
@@ -269,10 +280,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
             frame_data["observation.points.gripper_pcds"] = episode_extras['episode_gripper_pcds'][frame_idx]
         else:
             # Keep in world frame
-            if frame_idx in goal_indices: # Really only matters if phantomize is enabled
-                frame_data["observation.points.gripper_pcds"] = retarget_aloha_gripper_pcd(np.eye(4), eef_data, sample_n_points=500)
-            else:
-                frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=np.eye(4), joint_state=joint_state).astype(np.float32)
+            frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=np.eye(4), joint_state=joint_state).astype(np.float32)
 
     # Dummy values, replaced at the end of the episode
     for cam_name in camera_names:
@@ -291,21 +299,20 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 def _process_episode_goals(target_dataset, episode_length, new_features, humanize,
                           episode_extras, phantomize, calibrations, width, height):
     """Process goal projections, event indices, and subgoals for an episode."""
-    if humanize:
+    if humanize or phantomize:
         # Use events from JSON for human data
         goal_indices = episode_extras['episode_events']['event_idxs']
         # Ensure last frame is included as a goal
         if goal_indices[-1] != episode_length - 1:
             goal_indices = goal_indices + [episode_length - 1]
-        episode_gripper_pcds = episode_extras['episode_gripper_pcds']
+
+        if humanize:
+            episode_gripper_pcds = episode_extras['episode_gripper_pcds']
+        elif phantomize:
+            joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
     else:
         joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
-        # Empirically chosen
-        if phantomize:
-            close_thresh, open_thresh = 45, 55
-        else:
-            close_thresh, open_thresh = 25, 30
-
+        close_thresh, open_thresh = 25, 30
         goal_indices = extract_events_with_gripper_pos(
             joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
 
@@ -390,9 +397,6 @@ def upgrade_dataset(
     """
     tolerance_s = 0.0004
 
-    if len(calibrations) > 1 and (phantomize):
-        raise NotImplementedError("Multiview not yet supported for phantomize mode. Some minor changes and checking needed.")
-
     # 1. Load the existing dataset
     print(f"Loading source dataset: {source_repo_id}")
     source_dataset = LeRobotDataset(source_repo_id, tolerance_s=tolerance_s)
@@ -441,7 +445,7 @@ def upgrade_dataset(
 
         # Load any extra data needed for this episode
         try:
-            episode_extras = _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata)
+            episode_extras = _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata, camera_names)
         except AssertionError as e:
             print(f"Could not find auxiliary data for episode {episode_idx}. Skipping")
             continue

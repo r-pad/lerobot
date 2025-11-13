@@ -17,6 +17,13 @@ ALOHA_REST_STATE = torch.tensor([[ 91.9336, 191.8652, 191.7773, 174.2871, 174.37
 ALOHA_REST_QPOS = np.array(
     [0, -1.73, 1.49, 0, 0, 0, 0, 0, 0, -1.73, 1.49, 0, 0, 0, 0, 0]
 )
+# Map real camera names to virtual MuJoCo camera names
+# Available virtual cameras: teleoperator_pov, collaborator_pov, overhead_cam,
+# worms_eye_cam, wrist_cam_left, wrist_cam_right
+VIRTUAL_CAMERA_MAPPING = {
+    "cam_azure_kinect_front": "teleoperator_pov",
+    "cam_azure_kinect_back": "collaborator_pov",
+}
 
 
 def map_real2sim(Q):
@@ -366,22 +373,46 @@ def combine_meshes(meshes):
     return combined_mesh
 
 
-def setup_renderer(model, intrinsics_txt, extrinsics_txt, downsample_factor, width, height):
+def setup_renderer(model, intrinsics_txts, extrinsics_txts, downsample_factor, width, height, virtual_camera_names):
     """
-    Setup mujoco renderer for Aloha.
-    Re-use the teleoperator_pov camera and configure as required
-    Downsample the rendered image because we run into opengl framebuffer issues otherwise
+    Setup mujoco renderer for Aloha with multiple cameras configured.
+    Configure all specified virtual cameras with their corresponding intrinsics/extrinsics.
+    Downsample the rendered images because we run into opengl framebuffer issues otherwise.
+
+    Args:
+        model: MuJoCo model
+        intrinsics_txts: List of paths to intrinsics files (one per camera)
+        extrinsics_txts: List of paths to extrinsics files (one per camera)
+        downsample_factor: Factor to downsample rendered images
+        width: Original image width (same for all cameras)
+        height: Original image height (same for all cameras)
+        virtual_camera_names: List of virtual camera names in the MuJoCo model to configure
+                            (e.g., teleoperator_pov, collaborator_pov, overhead_cam, etc.)
+
+    Returns:
+        mujoco.Renderer: Renderer configured with the model and all cameras set up
     """
-    cam_to_world = np.loadtxt(extrinsics_txt)
-    cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "teleoperator_pov")
-    K = np.loadtxt(intrinsics_txt)
-    width, height = int(width * downsample_factor), int(height * downsample_factor)
-    K[0,0] *= downsample_factor
-    K[0,2] *= downsample_factor
-    K[1,1] *= downsample_factor
-    K[1,2] *= downsample_factor
-    setup_camera(model, cam_id, cam_to_world, width, height, K)
-    renderer = mujoco.Renderer(model, width=width, height=height)
+    assert len(intrinsics_txts) == len(extrinsics_txts) == len(virtual_camera_names), \
+        "intrinsics_txts, extrinsics_txts, and virtual_camera_names must have the same length"
+
+    scaled_width = int(width * downsample_factor)
+    scaled_height = int(height * downsample_factor)
+
+    # Configure each virtual camera
+    for intrinsics_txt, extrinsics_txt, virtual_camera_name in zip(
+        intrinsics_txts, extrinsics_txts, virtual_camera_names
+    ):
+        cam_to_world = np.loadtxt(extrinsics_txt)
+        cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, virtual_camera_name)
+        K = np.loadtxt(intrinsics_txt)
+        K[0,0] *= downsample_factor
+        K[0,2] *= downsample_factor
+        K[1,1] *= downsample_factor
+        K[1,2] *= downsample_factor
+        setup_camera(model, cam_id, cam_to_world, scaled_width, scaled_height, K)
+
+    # Create renderer with scaled dimensions
+    renderer = mujoco.Renderer(model, width=scaled_width, height=scaled_height)
     return renderer
 
 def setup_camera(model, cam_id, cam_to_world, width, height, K):
@@ -439,10 +470,21 @@ def render_rightArm_images(renderer, data, camera="teleoperator_pov", use_seg=Fa
     return rgb, depth, seg
 
 
-def render_and_overlay(renderer, ALOHA_MODEL, joint_state, real_rgb, downsample_factor):
+def render_and_overlay(renderer, ALOHA_MODEL, joint_state, real_rgb, downsample_factor, camera_name="teleoperator_pov"):
     """
     Place sim-aloha in the same location as the real one
     Render rgb/depth/seg and then overlay the rendered robot on the real one
+
+    Args:
+        renderer: MuJoCo renderer
+        ALOHA_MODEL: MuJoCo model
+        joint_state: Current joint state of the robot
+        real_rgb: Real RGB image to overlay on
+        downsample_factor: Downsampling factor used during renderer setup
+        camera_name: Name of the virtual camera to render from
+
+    Returns:
+        real_rgb: RGB image with rendered robot overlaid
     """
     upsample_factor = 1/downsample_factor
     Q = convert_real_joints(joint_state)
@@ -450,9 +492,9 @@ def render_and_overlay(renderer, ALOHA_MODEL, joint_state, real_rgb, downsample_
     data.qpos = Q
     mujoco.mj_forward(ALOHA_MODEL, data)
 
-    rgb, depth, seg = render_rightArm_images(renderer, data)
+    rgb, depth, seg = render_rightArm_images(renderer, data, camera=camera_name)
     rgb_ = cv2.resize(rgb, (0,0), fx=upsample_factor, fy=upsample_factor)
     seg_ = cv2.resize(seg.astype(np.uint8), (0,0), fx=upsample_factor, fy=upsample_factor).astype(bool)
-    
+
     real_rgb[seg_] = rgb_[seg_]
     return real_rgb

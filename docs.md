@@ -243,23 +243,23 @@ python upgrade_dataset.py --source_repo_id sriramsk/fold_bottoms_20250919_human 
 ```
 - Alternatively, to use `phantomize` to retarget the human demo, first set up [GSAM-2](https://github.com/sriramsk1999/Grounded-SAM-2) and generate masks:
 ```
-python gsam2_lerobot.py sriramsk/fold_bottoms_20250919_human
+python gsam2_lerobot.py sriramsk/fold_bottoms_multiview_20251031 cam_azure_kinect_front
 ```
 - [E2FGVI](https://github.com/sriramsk1999/Grounded-SAM-2) to generate inpainted videos using the gsam2 masks:
 ```
 # Currently set up on autobot, only works on the 20-class gpus
 
 # Transfer data
-rsync -ravz --progress /home/sriram/.cache/huggingface/lerobot/sriramsk/fold_bottoms_20250919_human/videos/chunk-000/observation.images.cam_azure_kinect.color  sskrishn@autobot.vision.cs.cmu.edu:/project_data/held/sskrishn/E2FGVI/examples/fold_bottoms_20250919_human
+rsync -ravz --progress /home/sriram/.cache/huggingface/lerobot/sriramsk/fold_bottoms_multiview_20251031/videos/chunk-000/observation.images.cam_azure_kinect_front.color  sskrishn@autobot.vision.cs.cmu.edu:/project_data/held/sskrishn/E2FGVI/examples/fold_bottoms_multiview_20251031
 
-rsync -ravz --progress /data/sriram/lerobot_extradata/sriramsk/fold_bottoms_20250919_human/gsam2_masks  sskrishn@autobot.vision.cs.cmu.edu:/project_data/held/sskrishn/E2FGVI/examples/fold_bottoms_20250919_human
+rsync -ravz --progress /data/sriram/lerobot_extradata/sriramsk/fold_bottoms_multiview_20251031/gsam2_masks  sskrishn@autobot.vision.cs.cmu.edu:/project_data/held/sskrishn/E2FGVI/examples/fold_bottoms_multiview_20251031
 
 # infinite loop because some weird memory issue I haven't had time to fix. 
-nohup bash -c 'while true; do python test_lerobot.py --lerobot_dir examples/fold_bottoms_20250919_human; done' &
+nohup bash -c 'while true; do python test_lerobot.py --lerobot_dir examples/fold_bottoms_multiview_20251031 --cam_name cam_azure_kinect_front; done' &
 ```
 - Generate Phantom videos from lfd3d:
 ```
-python run_phantom_lerobot.py --calib_file ../../src/lfd3d/datasets/aloha_calibration/T_world_from_camera_est_left_v6_0709.txt --lerobot-extradata-path /data/sriram/lerobot_extradata/sriramsk/fold_bottoms_20250919_human
+python run_phantom_lerobot.py --calib_json ../../src/lfd3d/datasets/aloha_calibration/multiview_calib.json --lerobot-extradata-path /data/sriram/lerobot_extradata/sriramsk/fold_bottoms_multiview_20251031
 ```
 
 - And then:

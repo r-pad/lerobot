@@ -9,6 +9,8 @@ This model predicts 3D goal points using:
 - GMM-based output (256 components, each predicting 4 3D points + weight)
 """
 
+import random
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -75,7 +77,7 @@ class Dino3DGPNetwork(nn.Module):
     - Gripper token: 6DoF pose + gripper width (optional)
     - Source token: learnable embedding for human/robot (optional)
     - Transformer: self-attention blocks
-    - Output: 256 GMM components, each predicting 13-dim (4×3 coords + 1 weight)
+    - Output: N*256 GMM components, each predicting 13-dim (4×3 coords + 1 weight)
     """
 
     def __init__(self, model_cfg):
@@ -92,7 +94,9 @@ class Dino3DGPNetwork(nn.Module):
         self.pos_encoding_dim = 128
         self.hidden_dim = self.backbone.config.hidden_size + self.pos_encoding_dim
         self.patch_size = self.backbone.config.patch_size
-        self.num_components = 256  # Fixed number of GMM components
+
+        # Training augmentations
+        self.image_token_dropout = model_cfg.image_token_dropout
 
         # 3D Positional encoding
         if model_cfg.use_fourier_pe:
@@ -162,6 +166,66 @@ class Dino3DGPNetwork(nn.Module):
         # Output head: predicts 13 dims per component (12 for 4×3 coords + 1 weight)
         self.output_head = nn.Linear(self.hidden_dim, 13)
 
+    def apply_image_token_dropout(self, tokens, patch_coords, num_cameras):
+        """
+        Apply image token dropout during training.
+
+        Args:
+            tokens: (B, N*256, hidden_dim) image tokens
+            patch_coords: (B, N*256, 3) patch coordinates
+            num_cameras: N - number of cameras
+
+        Returns:
+            tokens: (B, T, hidden_dim) tokens after dropout
+            patch_coords: (B, T, 3) patch coords after dropout
+        """
+        if not self.training or not self.image_token_dropout:
+            return tokens, patch_coords
+
+        B, total_tokens, hidden_dim = tokens.shape
+        tokens_per_camera = 256
+        device = tokens.device
+
+        # Sample dropout strategy: 0.6 = no dropout, 0.3 = token dropout, 0.1 = camera dropout
+        dropout_type = random.choices([0, 1, 2], weights=[0.6, 0.3, 0.1])[0]
+
+        if dropout_type == 0:
+            # No dropout
+            return tokens, patch_coords
+        elif dropout_type == 1:
+            # Drop 0-30% of all tokens randomly
+            dropout_ratio = random.uniform(0.0, 0.3)
+            num_tokens_to_keep = int(total_tokens * (1 - dropout_ratio))
+
+            indices = torch.stack(
+                [
+                    torch.randperm(total_tokens, device=device)[:num_tokens_to_keep]
+                    for _ in range(B)
+                ]
+            )
+            batch_idx = torch.arange(B, device=device)[:, None]
+
+            tokens = tokens[batch_idx, indices]
+            patch_coords = patch_coords[batch_idx, indices]
+
+            return tokens, patch_coords
+        else:
+            # Drop one entire camera (only if more than one camera)
+            if num_cameras > 1:
+                # Randomly select a camera to drop
+                camera_to_drop = random.randint(0, num_cameras - 1)
+                start_idx = camera_to_drop * tokens_per_camera
+                end_idx = start_idx + tokens_per_camera
+
+                # Create mask to keep all tokens except from dropped camera
+                mask = torch.ones(total_tokens, dtype=torch.bool, device=device)
+                mask[start_idx:end_idx] = False
+
+                # Apply mask
+                tokens = tokens[:, mask, :]
+                patch_coords = patch_coords[:, mask, :]
+            return tokens, patch_coords
+
     def transform_to_world(self, points_cam, T_world_from_cam):
         """Transform points from camera frame to world frame.
 
@@ -187,7 +251,7 @@ class Dino3DGPNetwork(nn.Module):
 
     def get_patch_centers(self, H, W, intrinsics, depth, extrinsics):
         """
-        Compute 3D coordinates for patch centers using depth.
+        Compute 3D coordinates for patch centers using depth (multi-camera support).
 
         Args:
             H, W: image height and width
@@ -257,6 +321,7 @@ class Dino3DGPNetwork(nn.Module):
             patch_coords_world = self.transform_to_world(
                 patch_coords_cam, T_world_from_cam
             )
+
             all_coords_world.append(patch_coords_world)
 
         # Concatenate all cameras: (B, N*num_patches, 3)
@@ -275,6 +340,8 @@ class Dino3DGPNetwork(nn.Module):
         source=None,
     ):
         """
+        Multi-camera forward pass.
+
         Args:
             image: (B, N, 3, H, W) RGB images for N cameras
             depth: (B, N, H, W) depth maps for N cameras
@@ -285,8 +352,8 @@ class Dino3DGPNetwork(nn.Module):
             source: list of strings ["human" or "aloha"]
 
         Returns:
-            outputs: (B, N*256, 13) GMM parameters for all cameras
-            patch_coords: (B, N*256, 3) patch center 3D coordinates in WORLD frame
+            outputs: (B, T, 13) GMM parameters for all cameras
+            patch_coords: (B, T, 3) patch center 3D coordinates in WORLD frame
         """
         B, N, C, H, W = image.shape
 
@@ -319,7 +386,10 @@ class Dino3DGPNetwork(nn.Module):
             [patch_features, pos_encoding], dim=-1
         )  # (B, N*256, hidden_dim)
 
-        # Store number of patch tokens for later
+        # Apply image token dropout (training only)
+        tokens, patch_coords = self.apply_image_token_dropout(tokens, patch_coords, N)
+
+        # Number of tokens T <= N*256
         num_patch_tokens = tokens.shape[1]
 
         # Add language token
@@ -327,14 +397,14 @@ class Dino3DGPNetwork(nn.Module):
             lang_token = self.text_encoder(text_embedding).unsqueeze(
                 1
             )  # (B, 1, hidden_dim)
-            tokens = torch.cat([tokens, lang_token], dim=1)  # (B, N*256+1, hidden_dim)
+            tokens = torch.cat([tokens, lang_token], dim=1)  # (B, T+1, hidden_dim)
 
         # Add gripper token
         if self.use_gripper_token:
             grip_token = self.gripper_encoder(gripper_token).unsqueeze(
                 1
             )  # (B, 1, hidden_dim)
-            tokens = torch.cat([tokens, grip_token], dim=1)  # (B, N*256+2, hidden_dim)
+            tokens = torch.cat([tokens, grip_token], dim=1)  # (B, T+2, hidden_dim)
 
         # Add source token
         if self.use_source_token:
@@ -344,19 +414,17 @@ class Dino3DGPNetwork(nn.Module):
             source_token = self.source_embeddings(source_indices).unsqueeze(
                 1
             )  # (B, 1, hidden_dim)
-            tokens = torch.cat(
-                [tokens, source_token], dim=1
-            )  # (B, N*256+3, hidden_dim)
+            tokens = torch.cat([tokens, source_token], dim=1)  # (B, T+3, hidden_dim)
 
         # Apply transformer blocks
         for block in self.transformer_blocks:
             tokens = block(tokens)
 
         # Take only the patch tokens (throw away language, gripper, source tokens)
-        tokens = tokens[:, :num_patch_tokens]  # (B, N*256, hidden_dim)
+        tokens = tokens[:, :num_patch_tokens]  # (B, T, hidden_dim)
 
         # Predict GMM parameters
-        outputs = self.output_head(tokens)  # (B, N*256, 13)
+        outputs = self.output_head(tokens)  # (B, T, 13)
 
         return outputs, patch_coords
 

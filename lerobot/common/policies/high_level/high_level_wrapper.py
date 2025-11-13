@@ -85,6 +85,7 @@ class HighLevelWrapper:
         # Load camera calibration from JSON
         with open(config.calibration_json, 'r') as f:
             calibration_data = json.load(f)
+        self.calibration_data = calibration_data
 
         # Extract camera configurations
         self.camera_names = list(calibration_data.keys())
@@ -582,6 +583,7 @@ def initialize_dino_3dgp_model(entity, project, checkpoint_type,
             self.fourier_include_input = fourier_include_input
             self.num_transformer_layers = num_transformer_layers
             self.dropout = dropout
+            self.image_token_dropout = False # We only do inference here.
 
     model_cfg = ModelConfig(
         dino_model, use_text_embedding, use_gripper_token,
