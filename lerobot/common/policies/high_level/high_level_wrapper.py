@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Optional
 from PIL import Image
 import json
+from lerobot.scripts.dataset_utils import generate_heatmap_from_points
 
 TARGET_SHAPE = 224
 rgb_preprocess = transforms.Compose(
@@ -152,7 +153,7 @@ class HighLevelWrapper:
                 gripper_pos=robot_kwargs["ee_pos"],
                 gripper_orn=robot_kwargs["ee_quat"],
                 cur_joint_angle=robot_kwargs["gripper_angle"],
-                world_to_cam_mat=np.linalg.inv(self.cam_to_world),
+                world_to_cam_mat=np.eye(4), # render in world frame
             )[self.libero_franka_idx]
         else:
             raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
@@ -437,17 +438,7 @@ class HighLevelWrapper:
         if goal_repr == "mask":
             goal_gripper_proj[urdf_proj[:, 1], urdf_proj[:, 0]] = 255
         elif goal_repr == "heatmap":
-            max_distance = np.sqrt(img_shape[1]**2 + img_shape[0]**2)
-            y_coords, x_coords = np.mgrid[0:img_shape[0], 0:img_shape[1]]
-            pixel_coords = np.stack([x_coords, y_coords], axis=-1)
-            for i in range(3):
-                target_point = urdf_proj[i]  # (2,)
-                distances = np.linalg.norm(pixel_coords - target_point, axis=-1)  # (height, width)
-                goal_gripper_proj[:, :, i] = distances
-
-            # Apply square root transformation for steeper near-target gradients
-            goal_gripper_proj = (np.sqrt(goal_gripper_proj / max_distance) * 255)
-            goal_gripper_proj = np.clip(goal_gripper_proj, 0, 255)
+            goal_gripper_proj = generate_heatmap_from_points(urdf_proj, img_shape)
         return goal_gripper_proj.astype(np.uint8)
 
     def _compute_dino_heatmap(self, coord_2d_224, img_shape):

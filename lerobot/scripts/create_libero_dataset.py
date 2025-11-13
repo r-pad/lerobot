@@ -41,12 +41,12 @@ def extract_obs_from_demo(demo, task_bddl_file, img_shape):
             obs['robot0_eef_pos'],
             obs['robot0_eef_quat'],
             obs['robot0_gripper_qpos'][0],
-            np.linalg.inv(agentview_ext_mat),  # Transform to camera frame
+            np.eye(4),  # Transform to world frame
         )[[1, 2, 0, 3], : ] # swap gripper pcd
         all_obs.append(obs)
 
     env.close()
-    return all_obs, agentview_int_mat
+    return all_obs, agentview_int_mat, agentview_ext_mat
 
 
 def gen_libero_dataset(
@@ -98,7 +98,7 @@ def gen_libero_dataset(
             # Some demos in LIBERO have mismatched states and can't be plugged into the simulator? :/
             # try-catch and skip
             try:
-                all_obs, agentview_int_mat = extract_obs_from_demo(demo, task_bddl_file, img_shape)
+                all_obs, agentview_int_mat, agentview_ext_mat = extract_obs_from_demo(demo, task_bddl_file, img_shape)
             except Exception as e:
                 print(f"Could not process {h5_file}, demo {idx} due to exception {e}")
                 continue
@@ -106,9 +106,9 @@ def gen_libero_dataset(
             for frame_idx in range(num_steps):
                 frame_data = {}
                 frame_data["task"] = caption
-                frame_data["observation.images.agentview"] = all_obs[frame_idx]["agentview_image"]
-                frame_data["observation.images.wristview"] = all_obs[frame_idx]["robot0_eye_in_hand_image"]
-                frame_data["observation.images.agentview_depth"] = all_obs[frame_idx]["agentview_depth"]
+                frame_data["observation.images.cam_libero.color"] = all_obs[frame_idx]["agentview_image"]
+                frame_data["observation.images.cam_libero.wrist"] = all_obs[frame_idx]["robot0_eye_in_hand_image"]
+                frame_data["observation.images.cam_libero.transformed_depth"] = all_obs[frame_idx]["agentview_depth"]
                 frame_data["observation.state"] = ee_poses[frame_idx]
                 frame_data["action"] = actions[frame_idx]
 
@@ -119,11 +119,14 @@ def gen_libero_dataset(
                     frame_data["observation.points.gripper_pcds"] = all_obs[frame_idx]["gripper_pcd"]
                 if "next_event_idx" in features:
                     frame_data["next_event_idx"] = np.array([next_event_idx], dtype=np.int32)
-                if "observation.images.agentview_goal_gripper_proj" in features:
+                if "observation.images.cam_libero.goal_gripper_proj" in features:
                     # Generate gripper projection heatmap for agentview camera
-                    gripper_pcd_cam = all_obs[next_event_idx]["gripper_pcd"]  # Already in camera frame
-                    points_2d = project_points_to_image(gripper_pcd_cam, agentview_int_mat) # left, right, top, grasp center
-                    frame_data["observation.images.agentview_goal_gripper_proj"] = generate_heatmap_from_points(points_2d, img_shape)
+                    gripper_pcd_world = all_obs[next_event_idx]["gripper_pcd"]  # World frame
+                    points_2d = project_points_to_image(gripper_pcd_world, agentview_int_mat, np.linalg.inv(agentview_ext_mat)) # left, right, top, grasp center
+                    frame_data["observation.images.cam_libero.goal_gripper_proj"] = generate_heatmap_from_points(points_2d, img_shape)
+                if "observation.points.goal_gripper_pcds" in features:
+                    gripper_pcd_world = all_obs[next_event_idx]["gripper_pcd"]  # World frame
+                    frame_data["observation.points.goal_gripper_pcds"] = gripper_pcd_world
 
                 libero_dataset.add_frame(frame_data)
 
@@ -178,19 +181,19 @@ if __name__ == "__main__":
             'shape': (7,),
             'names': ['delta_ee_pos_0', 'delta_ee_pos_1', 'delta_ee_pos_2', 'delta_ee_rot_0', 'delta_ee_rot_1', 'delta_ee_rot_2', 'gripper_action']
         },
-        "observation.images.agentview": {
+        "observation.images.cam_libero.color": {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
             'names': ['height', 'width', 'channels'],
             'info': 'Agentview RGB image'
         },
-        "observation.images.wristview": {
+        "observation.images.cam_libero.wrist": {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
             'names': ['height', 'width', 'channels'],
             'info': 'Wristview RGB image'
         },
-        "observation.images.agentview_depth": {
+        "observation.images.cam_libero.transformed_depth": {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 1),
             'names': ['height', 'width', 'channels'],
@@ -200,7 +203,7 @@ if __name__ == "__main__":
 
     new_features = {}
     if "goal_gripper_proj" in args.new_features:
-        new_features["observation.images.agentview_goal_gripper_proj"] = {
+        new_features["observation.images.cam_libero.goal_gripper_proj"] = {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
             'names': ['height', 'width', 'channels'],
@@ -220,6 +223,14 @@ if __name__ == "__main__":
             'names': ['idx'],
             'info': 'Index of next event in the dataset'
         }
+    if "goal_gripper_pcds" in args.new_features:
+        new_features["observation.points.goal_gripper_pcds"] = {
+            'dtype': 'pcd',
+            'shape': (-1, 3),
+            'names': ['N', 'channels'],
+            'info': 'Goal gripper point cloud'
+        }
+
     features.update(new_features)
 
     libero_dataset = gen_libero_dataset(

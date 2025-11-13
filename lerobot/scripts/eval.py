@@ -79,7 +79,13 @@ from lerobot.common.utils.utils import (
 )
 from lerobot.configs import parser
 from lerobot.configs.eval import EvalPipelineConfig
+from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
 
+LIBERO_REMAP = {
+    "observation.images.agentview": "observation.images.cam_libero.color",
+    "observation.images.agentview_depth": "observation.images.cam_libero.transformed_depth",
+    "observation.images.wristview": "observation.images.cam_libero.wrist",
+}
 
 def rollout(
     env: gym.vector.VectorEnv,
@@ -154,7 +160,7 @@ def rollout(
             all_observations.append(deepcopy(observation))
 
         observation = {
-            key: observation[key].to(device, non_blocking=device.type == "cuda") for key in observation
+            LIBERO_REMAP.get(key , key): observation[key].to(device, non_blocking=device.type == "cuda") for key in observation
         }
 
         # Infer "task" from attributes of environments.
@@ -162,40 +168,88 @@ def rollout(
         observation = add_envs_task(env, observation)
 
         if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
-            raise NotImplementedError(
-                "Interface for predict_and_project has changed. "
-                "See control_utils.py for reference implementation with camera_obs dict."
-            )
-
             # Generate new goal prediction when queue is empty
             # This code is specific to diffusion policy and LIBERO :(
             if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
-                rgb = observation["observation.images.agentview"].cpu().numpy()
-                depth = observation["observation.images.agentview_depth"].cpu().numpy().squeeze()
-                gripper_proj = []
-                for i in range(rgb.shape[0]):
-                    rgb_ = (rgb[i].transpose(1,2,0) * 255).astype(np.uint8)
-                    depth_ = (depth[i] * 1000).astype(np.uint16)
+                gripper_projs = {}
+                goal_gripper_pcds = []
+                goal_gripper_displacements = []
+                for cam_name in policy.high_level.camera_names:
+                    gripper_projs[cam_name] = []
+
+                batch_size = observation["observation.state"].shape[0]
+                
+                for i in range(batch_size):
+                    camera_obs = {}
+                    for cam_name in policy.high_level.camera_names:
+                        rgb_key =  f"observation.images.{cam_name}.color"
+                        depth_key = f"observation.images.{cam_name}.transformed_depth"
+
+                        # Validate camera data exists
+                        if rgb_key not in observation or depth_key not in observation:
+                            raise ValueError(
+                                f"Required camera observation '{cam_name}' not found. "
+                                f"Available keys: {policy.high_level.camera_names}"
+                            )
+                        camera_obs[cam_name] = {
+                            "rgb": (observation[rgb_key][i].cpu().numpy().transpose(1,2,0) * 255).astype(np.uint8),
+                            "depth": (observation[depth_key][i].cpu().numpy().squeeze() * 1000).astype(np.uint16)
+                        }
+                    task = observation["task"][i]
                     ee_pos_ = ee_pos[i]
                     ee_quat_ = ee_quat[i]
                     gripper_angle_ = gripper_angle[i]
-                    task = observation["task"][i]
-                    g_proj = policy.high_level.predict_and_project(task, rgb_, depth_, robot_type=policy.config.robot_type,
-                                                                     robot_kwargs={
-                                                                         "ee_pos": ee_pos_,
-                                                                         "ee_quat": ee_quat_,
-                                                                         "gripper_angle": gripper_angle_,
-                                                                     })
-                    gripper_proj.append(g_proj)
-                goal_gripper_proj = torch.from_numpy(np.stack(gripper_proj))
-                goal_gripper_proj = ((goal_gripper_proj / 255.).float().to(device)).permute(0,3,1,2)
+                    # Get dict of projections for all cameras
+                    gripper_proj = policy.high_level.predict_and_project(
+                        task, camera_obs,
+                        robot_type=policy.config.robot_type,
+                        robot_kwargs={
+                                        "ee_pos": ee_pos_,
+                                        "ee_quat": ee_quat_,
+                                        "gripper_angle": gripper_angle_,
+                        }
+                    )
+                    goal_gripper_pcd = policy.high_level.predict(
+                        task, camera_obs,
+                        robot_type=policy.config.robot_type,
+                        robot_kwargs={
+                                        "ee_pos": ee_pos_,
+                                        "ee_quat": ee_quat_,
+                                        "gripper_angle": gripper_angle_,
+                        }
+                    )
+
+                    goal_gripper_displacement = goal_gripper_pcd - get_4_points_from_gripper_pos_orient(
+                        gripper_pos=ee_pos_,
+                        gripper_orn=ee_quat_,
+                        cur_joint_angle=gripper_angle_,
+                        world_to_cam_mat=np.eye(4), # render in world frame
+                    )[torch.cat([policy.high_level.libero_franka_idx, torch.tensor([3])])]
+                    
+                    goal_gripper_pcds.append(goal_gripper_pcd)
+                    goal_gripper_displacements.append(goal_gripper_displacement)
+
+                    for cam_name, proj in gripper_proj.items():
+                        gripper_projs[cam_name].append(proj)
+
+                goal_gripper_proj = {}
+                for cam_name, proj in gripper_projs.items():
+                    cam_goal_projs = torch.from_numpy(np.stack(proj))
+                    cam_goal_projs = ((cam_goal_projs / 255.).float().to(device)).permute(0,3,1,2)
+                    goal_gripper_proj[cam_name] = cam_goal_projs
                 policy.latest_gripper_proj = goal_gripper_proj
-            observation["observation.images.agentview_goal_gripper_proj"] = policy.latest_gripper_proj
+
+        # Add goal projection to each camera observation
+        for cam_name in policy.high_level.camera_names:
+            observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
+
+        observation[f"observation.points.goal_gripper_pcds"] = torch.from_numpy(np.array(goal_gripper_pcds)).float().to(device)
+        observation[f"observation.points.gripper_pcds_displacement"] = torch.from_numpy(np.array(goal_gripper_displacements)).float().to(device)
 
         # Save goal gripper proj frames if callback is provided
-        if goal_gripper_proj_callback is not None and "observation.images.agentview_goal_gripper_proj" in observation:
+        if goal_gripper_proj_callback is not None and "observation.images.cam_libero.goal_gripper_proj" in observation:
             goal_gripper_proj_callback(observation)
-
+        
         with torch.inference_mode():
             action, action_eef = policy.select_action(observation)
 
@@ -318,9 +372,9 @@ def eval_policy(
         if n_episodes_rendered >= max_episodes_rendered:
             return
         n_to_render_now = min(max_episodes_rendered - n_episodes_rendered, env.num_envs)
-        if "observation.images.agentview_goal_gripper_proj" in observation:
+        if "observation.images.cam_libero.goal_gripper_proj" in observation:
             # Convert from tensor to numpy and from (B, C, H, W) to (B, H, W, C) for video saving
-            goal_proj_tensor = observation["observation.images.agentview_goal_gripper_proj"][:n_to_render_now]
+            goal_proj_tensor = observation["observation.images.cam_libero.goal_gripper_proj"][:n_to_render_now]
             # Convert to numpy and rescale from [0, 1] to [0, 255]
             goal_proj_frames = (goal_proj_tensor.detach().cpu().numpy() * 255).astype(np.uint8)
             # Transpose from (B, C, H, W) to (B, H, W, C)

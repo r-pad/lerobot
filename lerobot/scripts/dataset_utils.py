@@ -4,7 +4,7 @@ Shared utilities for dataset creation scripts to reduce code duplication.
 import numpy as np
 
 
-def generate_heatmap_from_points(points_2d, img_shape):
+def generate_heatmap_from_points(points_2d, img_shape, n=0.5, sigma=1):
     """
     Generate a 3-channel heatmap from projected 2D points.
 
@@ -35,22 +35,30 @@ def generate_heatmap_from_points(points_2d, img_shape):
         goal_image[:, :, i] = distances
 
     # Apply square root transformation for steeper near-target gradients
-    goal_image = (np.sqrt(goal_image / max_distance) * 255)
+    goal_image = (goal_image / max_distance / sigma) ** n  * 255
     goal_image = np.clip(goal_image, 0, 255).astype(np.uint8)
     return goal_image
 
 
-def project_points_to_image(points_3d, intrinsic_matrix):
+def project_points_to_image(points_3d, intrinsic_matrix, world_to_cam_mat=None):
     """
     Project 3D points to 2D image coordinates using camera intrinsics.
 
     Args:
         points_3d (np.ndarray): Nx3 array of 3D points in camera frame
         intrinsic_matrix (np.ndarray): 3x3 camera intrinsic matrix
+        extrinsic_maitrx (np.ndarray) : 4x4 camera extrinsic matrix; cam to world. If passed, points are in world frame
 
     Returns:
         np.ndarray: Nx2 array of 2D pixel coordinates
     """
+    if world_to_cam_mat is not None:
+        # Convert to homogeneous coordinates
+        gripper_pcd_hom = np.hstack([points_3d, np.ones((points_3d.shape[0], 1))])
+        # Transform to camera frame
+        gripper_pcd_cam = world_to_cam_mat @ gripper_pcd_hom.T
+        points_3d = gripper_pcd_cam[:3].T  # Drop homogeneous coordinate
+
     points_2d_hom = intrinsic_matrix @ points_3d.T
     points_2d = points_2d_hom[:2].T / points_2d_hom[2].T[:, np.newaxis]
     return points_2d
