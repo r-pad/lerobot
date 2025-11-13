@@ -248,16 +248,16 @@ def eval_suite_main(cfg: EvalSuiteConfig):
         features_map = {}
         
         for key, policy_feature in cfg.policy.input_features.items():
-            if key == 'observation.images.agentview':
+            if key == 'observation.images.cam_libero.color':
                 features['agentview'] = policy_feature
                 features_map['agentview'] = key
-            elif key == 'observation.images.wristview':
+            elif key == 'observation.images.cam_libero.wrist':
                 features['wristview'] = policy_feature  
                 features_map['wristview'] = key
-            elif key == 'observation.images.agentview_depth':
+            elif key == 'observation.images.cam_libero.transformed_depth':
                 features['agentview_depth'] = policy_feature
                 features_map['agentview_depth'] = key
-            elif key == 'observation.images.agentview_goal_gripper_proj':
+            elif key == 'observation.images.cam_libero.goal_gripper_proj':
                 features['agentview_goal_gripper_proj'] = policy_feature
                 features_map['agentview_goal_gripper_proj'] = key
             elif key == 'observation.state':
