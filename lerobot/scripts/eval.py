@@ -79,7 +79,6 @@ from lerobot.common.utils.utils import (
 )
 from lerobot.configs import parser
 from lerobot.configs.eval import EvalPipelineConfig
-from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
 
 LIBERO_REMAP = {
     "observation.images.agentview": "observation.images.cam_libero.color",
@@ -168,6 +167,8 @@ def rollout(
         observation = add_envs_task(env, observation)
 
         if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
+            from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
+
             # Generate new goal prediction when queue is empty
             # This code is specific to diffusion policy and LIBERO :(
             if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
