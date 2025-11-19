@@ -178,6 +178,7 @@ def _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata, c
         assert all([os.path.exists(i) for i in vid_dirs])
 
         events_file = f"{EVENTS_DIR}/episode_{episode_idx:06d}.mp4.json"
+        assert os.path.exists(events_file)
         with open(events_file, 'r') as f:
             episode_events = json.load(f)
         event_idxs = episode_events
