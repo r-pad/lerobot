@@ -323,35 +323,61 @@ class DiffusionModel(nn.Module):
         return sample
 
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
-        """Encode image features and concatenate them all together along with the state vector."""
+        """Encode image features and concatenate them all together along with the state vector.
+
+        For each camera, computes synchronized random crops for RGB and goal images.
+        """
         batch_size, n_obs_steps = batch[self.obs_key].shape[:2]
         global_cond_feats = [batch[self.obs_key]]
-        # Extract image features.
+
+        # Extract image features with synchronized cropping per camera.
         if self.config.image_features:
-            if self.config.use_separate_rgb_encoder_per_camera:
-                # Combine batch and sequence dims while rearranging to make the camera index dimension first.
-                images_per_camera = einops.rearrange(batch["observation.images"], "b s n ... -> n (b s) ...")
-                img_features_list = torch.cat(
-                    [
-                        encoder(images)
-                        for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)
-                    ]
-                )
-                # Separate batch and sequence dims back out. The camera index dim gets absorbed into the
-                # feature dim (effectively concatenating the camera features).
-                img_features = einops.rearrange(
-                    img_features_list, "(n b s) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
-                )
-            else:
-                # Combine batch, sequence, and "which camera" dims before passing to shared encoder.
-                img_features = self.rgb_encoder(
-                    einops.rearrange(batch["observation.images"], "b s n ... -> (b s n) ...")
-                )
-                # Separate batch dim and sequence dim back out. The camera index dim gets absorbed into the
-                # feature dim (effectively concatenating the camera features).
-                img_features = einops.rearrange(
-                    img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
-                )
+            # Group images by camera to synchronize crops
+            # E.g., "cam_azure_kinect_front.color" and "cam_azure_kinect_front.goal_gripper_proj" -> "cam_azure_kinect_front"
+            camera_groups = {}
+            image_key_list = list(self.config.image_features.keys())
+
+            for idx, key in enumerate(image_key_list):
+                # Extract base camera name
+                camera_name = key.split('.')[-2]
+                if camera_name not in camera_groups:
+                    camera_groups[camera_name] = []
+
+                camera_groups[camera_name].append({'key': key, 'idx': idx})
+
+            # Process each camera group with synchronized cropping
+            img_features_list = [None] * len(image_key_list)
+
+            for camera_name, image_infos in camera_groups.items():
+                # During training, compute crop params once per camera
+                if self.training and self.config.crop_shape is not None:
+                    # Get image shape from first image in this camera group
+                    sample_key = image_infos[0]['key']
+                    img_shape = batch[sample_key].shape[2:]  # (C, H, W)
+                    # Get reference encoder for computing crop params
+                    ref_encoder = self.rgb_encoder[0] if self.config.use_separate_rgb_encoder_per_camera else self.rgb_encoder
+                    crop_params = ref_encoder.compute_crop_params(img_shape)
+                else:
+                    crop_params = None
+
+                # Encode all images from this camera with the same crop params
+                for info in image_infos:
+                    key = info['key']
+                    idx = info['idx']
+                    images = einops.rearrange(batch[key], "b s ... -> (b s) ...")
+
+                    # Use appropriate encoder based on config
+                    if self.config.use_separate_rgb_encoder_per_camera:
+                        encoder = self.rgb_encoder[idx]
+                    else:
+                        encoder = self.rgb_encoder
+
+                    img_feat = encoder(images, crop_params=crop_params)
+                    img_feat = einops.rearrange(img_feat, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
+                    img_features_list[idx] = img_feat
+
+            # Concatenate all features in original order
+            img_features = torch.cat(img_features_list, dim=-1)
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:
@@ -465,66 +491,6 @@ class DiffusionModel(nn.Module):
         return loss.mean()
 
 
-class CenterJitteredRandomCrop(nn.Module):
-    """Random crop around the center of the image with a jitter offset.
-
-    This is useful for data augmentation where you want to keep the crop
-    roughly centered but add some randomness. The crop position is randomly
-    offset from the center by up to ±jitter pixels in each dimension.
-
-    Args:
-        size: Desired output size (height, width)
-        jitter: Maximum offset from center in pixels (default: 30)
-    """
-
-    def __init__(self, size, jitter=30):
-        super().__init__()
-        self.size = size if isinstance(size, (tuple, list)) else (size, size)
-        self.jitter = jitter
-
-    def forward(self, img: Tensor) -> Tensor:
-        """
-        Args:
-            img: (C, H, W) or (B, C, H, W) image tensor
-        Returns:
-            Cropped image of size (C, size[0], size[1]) or (B, C, size[0], size[1])
-        """
-        # Handle both batched and unbatched inputs
-        is_batched = img.dim() == 4
-        if not is_batched:
-            img = img.unsqueeze(0)
-
-        batch_size, channels, height, width = img.shape
-        crop_h, crop_w = self.size
-
-        # Calculate center position
-        center_y = height // 2
-        center_x = width // 2
-
-        # Add random jitter to center position
-        jitter_y = torch.randint(-self.jitter, self.jitter + 1, (1,)).item()
-        jitter_x = torch.randint(-self.jitter, self.jitter + 1, (1,)).item()
-
-        jittered_center_y = center_y + jitter_y
-        jittered_center_x = center_x + jitter_x
-
-        # Calculate top-left corner of crop
-        top = jittered_center_y - crop_h // 2
-        left = jittered_center_x - crop_w // 2
-
-        # Clamp to ensure crop stays within image bounds
-        top = max(0, min(top, height - crop_h))
-        left = max(0, min(left, width - crop_w))
-
-        # Perform the crop
-        cropped = img[:, :, top:top + crop_h, left:left + crop_w]
-
-        if not is_batched:
-            cropped = cropped.squeeze(0)
-
-        return cropped
-
-
 class SpatialSoftmax(nn.Module):
     """
     Spatial Soft Argmax operation described in "Deep Spatial Autoencoders for Visuomotor Learning" by Finn et al.
@@ -605,14 +571,12 @@ class DiffusionRgbEncoder(nn.Module):
     def __init__(self, config: DiffusionConfig):
         super().__init__()
         # Set up optional preprocessing.
+        self.crop_shape = config.crop_shape
+        self.crop_jitter = config.crop_jitter
         if config.crop_shape is not None:
             self.do_crop = True
             # Always use center crop for eval
             self.center_crop = torchvision.transforms.CenterCrop(config.crop_shape)
-            if config.crop_is_random:
-                self.maybe_random_crop = CenterJitteredRandomCrop(config.crop_shape, jitter=config.crop_jitter)
-            else:
-                self.maybe_random_crop = self.center_crop
         else:
             self.do_crop = False
 
@@ -651,17 +615,23 @@ class DiffusionRgbEncoder(nn.Module):
         self.out = nn.Linear(config.spatial_softmax_num_keypoints * 2, self.feature_dim)
         self.relu = nn.ReLU()
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, crop_params: dict | None = None) -> Tensor:
         """
         Args:
             x: (B, C, H, W) image tensor with pixel values in [0, 1].
+            crop_params: Optional dict with 'top' and 'left' keys for synchronized cropping.
+                        If None and training, random crop will be computed.
         Returns:
             (B, D) image feature.
         """
         # Preprocess: maybe crop (if it was set up in the __init__).
         if self.do_crop:
-            if self.training:  # noqa: SIM108
-                x = self.maybe_random_crop(x)
+            if crop_params is not None:
+                # Use provided crop parameters for synchronized cropping
+                x = self._apply_crop(x, crop_params['top'], crop_params['left'])
+            elif self.training:
+                # Random crop during training (when no params provided)
+                x = self._compute_and_apply_random_crop(x)
             else:
                 # Always use center crop for eval.
                 x = self.center_crop(x)
@@ -670,6 +640,46 @@ class DiffusionRgbEncoder(nn.Module):
         # Final linear layer with non-linearity.
         x = self.relu(self.out(x))
         return x
+
+    def _compute_and_apply_random_crop(self, x: Tensor) -> Tensor:
+        """Compute random crop parameters and apply them."""
+        _, _, height, width = x.shape
+        crop_params = self.compute_crop_params((x.shape[1], height, width))
+        return self._apply_crop(x, crop_params['top'], crop_params['left'])
+
+    def _apply_crop(self, x: Tensor, top: int, left: int) -> Tensor:
+        """Apply crop with given parameters."""
+        crop_h, crop_w = self.crop_shape
+        return x[:, :, top:top + crop_h, left:left + crop_w]
+
+    def compute_crop_params(self, img_shape: tuple) -> dict:
+        """Compute random crop parameters for synchronized cropping across modalities.
+
+        Args:
+            img_shape: (C, H, W) shape of the image
+
+        Returns:
+            dict with 'top' and 'left' keys
+        """
+        _, height, width = img_shape
+        crop_h, crop_w = self.crop_shape
+
+        # Calculate center position with random jitter
+        center_y = height // 2
+        center_x = width // 2
+
+        jitter_y = torch.randint(-self.crop_jitter, self.crop_jitter + 1, (1,)).item()
+        jitter_x = torch.randint(-self.crop_jitter, self.crop_jitter + 1, (1,)).item()
+
+        # Calculate top-left corner of crop
+        top = center_y + jitter_y - crop_h // 2
+        left = center_x + jitter_x - crop_w // 2
+
+        # Clamp to ensure crop stays within image bounds
+        top = max(0, min(top, height - crop_h))
+        left = max(0, min(left, width - crop_w))
+
+        return {'top': top, 'left': left}
 
 
 def _replace_submodules(
