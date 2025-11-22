@@ -322,62 +322,84 @@ class DiffusionModel(nn.Module):
 
         return sample
 
-    def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
-        """Encode image features and concatenate them all together along with the state vector.
+    def _encode_images_train(self, batch: dict[str, Tensor], batch_size: int, n_obs_steps: int) -> Tensor:
+        """Encode images during training with synchronized random crops per camera.
 
-        For each camera, computes synchronized random crops for RGB and goal images.
+        Groups images by camera and applies the same random crop to all images from the same camera.
         """
+        camera_groups = {}
+        image_key_list = list(self.config.image_features.keys())
+
+        for idx, key in enumerate(image_key_list):
+            camera_name = key.split('.')[-2]
+            if camera_name not in camera_groups:
+                camera_groups[camera_name] = []
+            camera_groups[camera_name].append({'key': key, 'idx': idx})
+
+        img_features_list = [None] * len(image_key_list)
+
+        for camera_name, image_infos in camera_groups.items():
+            # Compute crop params once per camera for synchronized cropping
+            if self.config.crop_shape is not None:
+                sample_key = image_infos[0]['key']
+                img_shape = batch[sample_key].shape[2:]  # (C, H, W)
+                ref_encoder = self.rgb_encoder[0] if self.config.use_separate_rgb_encoder_per_camera else self.rgb_encoder
+                crop_params = ref_encoder.compute_crop_params(img_shape)
+            else:
+                crop_params = None
+
+            # Encode all images from this camera with the same crop params
+            for info in image_infos:
+                key = info['key']
+                idx = info['idx']
+                images = einops.rearrange(batch[key], "b s ... -> (b s) ...")
+
+                if self.config.use_separate_rgb_encoder_per_camera:
+                    encoder = self.rgb_encoder[idx]
+                else:
+                    encoder = self.rgb_encoder
+
+                img_feat = encoder(images, crop_params=crop_params)
+                img_feat = einops.rearrange(img_feat, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
+                img_features_list[idx] = img_feat
+
+        return torch.cat(img_features_list, dim=-1)
+
+    def _encode_images_inference(self, batch: dict[str, Tensor], batch_size: int, n_obs_steps: int) -> Tensor:
+        """Encode images during inference using center crop.
+
+        Images are stacked in batch["observation.images"] with shape (B, n_obs_steps, num_cameras, C, H, W).
+        """
+        num_cameras = len(self.config.image_features)
+
+        if self.config.use_separate_rgb_encoder_per_camera:
+            img_features_list = []
+            for cam_idx in range(num_cameras):
+                cam_images = batch["observation.images"][:, :, cam_idx]  # (B, s, C, H, W)
+                cam_images = einops.rearrange(cam_images, "b s ... -> (b s) ...")
+                encoder = self.rgb_encoder[cam_idx]
+                img_feat = encoder(cam_images, crop_params=None)
+                img_feat = einops.rearrange(img_feat, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
+                img_features_list.append(img_feat)
+            return torch.cat(img_features_list, dim=-1)
+        else:
+            images = batch["observation.images"]
+            images = einops.rearrange(images, "b s n ... -> (b s n) ...")
+            img_features = self.rgb_encoder(images, crop_params=None)
+            return einops.rearrange(
+                img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps, n=num_cameras
+            )
+
+    def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
+        """Encode image features and concatenate them all together along with the state vector."""
         batch_size, n_obs_steps = batch[self.obs_key].shape[:2]
         global_cond_feats = [batch[self.obs_key]]
 
-        # Extract image features with synchronized cropping per camera.
         if self.config.image_features:
-            # Group images by camera to synchronize crops
-            # E.g., "cam_azure_kinect_front.color" and "cam_azure_kinect_front.goal_gripper_proj" -> "cam_azure_kinect_front"
-            camera_groups = {}
-            image_key_list = list(self.config.image_features.keys())
-
-            for idx, key in enumerate(image_key_list):
-                # Extract base camera name
-                camera_name = key.split('.')[-2]
-                if camera_name not in camera_groups:
-                    camera_groups[camera_name] = []
-
-                camera_groups[camera_name].append({'key': key, 'idx': idx})
-
-            # Process each camera group with synchronized cropping
-            img_features_list = [None] * len(image_key_list)
-
-            for camera_name, image_infos in camera_groups.items():
-                # During training, compute crop params once per camera
-                if self.training and self.config.crop_shape is not None:
-                    # Get image shape from first image in this camera group
-                    sample_key = image_infos[0]['key']
-                    img_shape = batch[sample_key].shape[2:]  # (C, H, W)
-                    # Get reference encoder for computing crop params
-                    ref_encoder = self.rgb_encoder[0] if self.config.use_separate_rgb_encoder_per_camera else self.rgb_encoder
-                    crop_params = ref_encoder.compute_crop_params(img_shape)
-                else:
-                    crop_params = None
-
-                # Encode all images from this camera with the same crop params
-                for info in image_infos:
-                    key = info['key']
-                    idx = info['idx']
-                    images = einops.rearrange(batch[key], "b s ... -> (b s) ...")
-
-                    # Use appropriate encoder based on config
-                    if self.config.use_separate_rgb_encoder_per_camera:
-                        encoder = self.rgb_encoder[idx]
-                    else:
-                        encoder = self.rgb_encoder
-
-                    img_feat = encoder(images, crop_params=crop_params)
-                    img_feat = einops.rearrange(img_feat, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
-                    img_features_list[idx] = img_feat
-
-            # Concatenate all features in original order
-            img_features = torch.cat(img_features_list, dim=-1)
+            if self.training:
+                img_features = self._encode_images_train(batch, batch_size, n_obs_steps)
+            else:
+                img_features = self._encode_images_inference(batch, batch_size, n_obs_steps)
             global_cond_feats.append(img_features)
 
         if self.config.env_state_feature:
