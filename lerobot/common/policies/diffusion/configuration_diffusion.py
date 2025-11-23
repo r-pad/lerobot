@@ -67,7 +67,8 @@ class DiffusionConfig(PreTrainedConfig):
         crop_shape: (H, W) shape to crop images to as a preprocessing step for the vision backbone. Must fit
             within the image size. If None, no cropping is done.
         crop_is_random: Whether the crop should be random at training time (it's always a center crop in eval
-            mode). When True, uses center-jittered random cropping.
+            mode). When True, uses center-jittered random cropping. Note: For images from the same camera
+            (e.g., RGB and goal), the same random crop parameters are applied to maintain spatial alignment.
         crop_jitter: Maximum pixel offset from center for random cropping. The crop center will be randomly
             offset by up to ±crop_jitter pixels in both x and y directions. Only used when crop_is_random=True.
         pretrained_backbone_weights: Pretrained weights from torchvision to initialize the backbone.
@@ -76,6 +77,8 @@ class DiffusionConfig(PreTrainedConfig):
             The group sizes are set to be about 16 (to be precise, feature_dim // 16).
         spatial_softmax_num_keypoints: Number of keypoints for SpatialSoftmax.
         use_separate_rgb_encoders_per_camera: Whether to use a separate RGB encoder for each camera view.
+            Note: Random crops are synchronized per camera (images with the same camera base name in their
+            key will receive the same random crop augmentation).
         down_dims: Feature dimension for each stage of temporal downsampling in the diffusion modeling Unet.
             You may provide a variable number of dimensions, therefore also controlling the degree of
             downsampling.
