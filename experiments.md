@@ -1,6 +1,6 @@
 # Experiment / Command Log
 
-Just a small log of commands to keep track of things ...
+A log of commands to keep track of things ...
 
 ## Dataset Collection
 
@@ -359,6 +359,9 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 
 # Fold Onesie Reverse (human) - note 15fps
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the onesie - reverse version." --control.repo_id=sriramsk/fold_onesie_reverse_human_multiview_20251113 --control.num_episodes=25 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=false
+
+# Fold towel (human) - note 15fps
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.single_task="Fold the towel." --control.repo_id=sriramsk/fold_towel_human_multiview_20251122 --control.num_episodes=50 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=15 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=true
 ```
 
 ### More pick-place experiments
@@ -402,4 +405,20 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Place the mug on the table." --control.repo_id=sriramsk/eval_mug_table_MV_gc --control.num_episodes=20 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_MV_pickPlace_ss_hg/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
 
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Place the octopus on the table." --control.repo_id=sriramsk/eval_octopus_table_MV_gc --control.num_episodes=20 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_MV_pickPlace_ss_hg/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
+```
+
+### More cloth-folding experiments
+
+```python
+# Non-GC baseline
+HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_MV_20251025_ss_mini", "sriramsk/fold_shirt_MV_20251030_ss"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_MV_fold_ss --job_name=diffPo_MV_fold_ss --wandb.enable=true --policy.use_text_embedding=true --steps=300_000 --policy.crop_shape="[700, 700]" --policy.crop_is_random=true --policy.enable_goal_conditioning=false --batch_size=4 > fold_multiview_diffPo.out &
+
+# GC
+HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id='["sriramsk/fold_onesie_MV_20251025_ss_hg_mini", "sriramsk/fold_shirt_MV_20251030_ss_hg"]' --policy.type=diffusion --output_dir=outputs/train/diffPo_MV_fold_ss_hg --job_name=diffPo_MV_fold_ss_hg --wandb.enable=true --policy.use_text_embedding=false --steps=300_000 --policy.crop_shape="[700, 700]" --policy.crop_is_random=true --policy.enable_goal_conditioning=true --batch_size=4 > fold_multiview_gc_diffPo.out &
+
+# High-level trained on robot data only
+NCCL_P2P_LEVEL=NVL HF_HOME="/scratch/sskrishn/lerobot" nohup torchrun --nproc_per_node=10 scripts/train.py model=dino_3dgp dataset=rpadLerobot dataset.repo_id='["sriramsk/fold_onesie_MV_20251025_ss_hg_mini", "sriramsk/fold_shirt_MV_20251030_ss_hg"]' resources.num_workers=32 training.check_val_every_n_epochs=3 dataset.cache_dir=/scratch/sskrishn/fold_robotDataOnly_cache resources.gpus=-1 training.batch_size=16 > multiview_fold_robotDataOnly.out &
+
+# High-level trained on all datasets
+NCCL_P2P_LEVEL=NVL HF_HOME="/scratch/sskrishn/lerobot" nohup torchrun --nproc_per_node=8 scripts/train.py model=dino_3dgp dataset=rpadLerobot dataset.repo_id='["sriramsk/fold_onesie_MV_20251025_ss_hg_mini", "sriramsk/fold_shirt_MV_20251030_ss_hg", "sriramsk/fold_onesie_MVHuman_20251113_ss_hg", "sriramsk/fold_onesie_reverse_MVHuman_20251113_ss_hg", "sriramsk/fold_towel_MVHuman_20251122_ss_hg"]' resources.num_workers=32 training.check_val_every_n_epochs=3 dataset.cache_dir=/scratch/sskrishn/fold_cache resources.gpus=-1 > multiview_fold.out &
 ```
