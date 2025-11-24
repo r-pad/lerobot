@@ -56,6 +56,7 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
     normalization_mapping: dict[str, NormalizationMode] = field(default_factory=dict)
 
     input_features: dict[str, PolicyFeature] = field(default_factory=dict)
+    use_depth: bool = False
     output_features: dict[str, PolicyFeature] = field(default_factory=dict)
     input_image_feature_keys: list[str] | None = None
 
@@ -124,7 +125,7 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
     
     @property
     def depth_features(self) -> dict[str, PolicyFeature]:
-        return {key: ft for key, ft in self.input_features.items() if ft.type is FeatureType.VISUAL and "depth" in key}
+        return {key: ft for key, ft in self.input_features.items() if ft.type is FeatureType.VISUAL and "depth" in key} if self.use_depth else None
     
     @property
     def action_feature(self) -> dict[str, PolicyFeature]:

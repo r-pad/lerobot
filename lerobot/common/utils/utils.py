@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+#logging.disable(logging.CRITICAL)
 
 def none_or_int(value):
     if value == "None":

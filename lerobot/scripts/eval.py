@@ -240,12 +240,12 @@ def rollout(
                     goal_gripper_proj[cam_name] = cam_goal_projs
                 policy.latest_gripper_proj = goal_gripper_proj
 
-        # Add goal projection to each camera observation
-        for cam_name in policy.high_level.camera_names:
-            observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
+            # Add goal projection to each camera observation
+            for cam_name in policy.high_level.camera_names:
+                observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
 
-        observation[f"observation.points.goal_gripper_pcds"] = torch.from_numpy(np.array(goal_gripper_pcds)).float().to(device)
-        observation[f"observation.points.gripper_pcds_displacement"] = torch.from_numpy(np.array(goal_gripper_displacements)).float().to(device)
+            observation[f"observation.points.goal_gripper_pcds"] = torch.from_numpy(np.array(goal_gripper_pcds)).float().to(device)
+            observation[f"observation.points.gripper_pcds_displacement"] = torch.from_numpy(np.array(goal_gripper_displacements)).float().to(device)
 
         # Save goal gripper proj frames if callback is provided
         if goal_gripper_proj_callback is not None and "observation.images.cam_libero.goal_gripper_proj" in observation:

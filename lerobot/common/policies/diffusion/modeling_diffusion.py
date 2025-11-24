@@ -422,8 +422,8 @@ class DiffusionModel(nn.Module):
                 img_features_list.append(img_feat)
             for depth_idx in range(num_depths):
                 depth_images = batch["observation.depths"][:, :, depth_idx]  # (B, s, 1, H, W)
-                depth_images = depth_images.repeat(1, 1, 3, 1, 1)  # convert to 3-channel
                 depth_images = einops.rearrange(depth_images, "b s ... -> (b s) ...")
+                depth_images = depth_images.repeat(1, 3, 1, 1)  # convert to 3-channel
                 encoder = self.depth_encoder[depth_idx]
                 img_feat = encoder(depth_images, crop_params=None)
                 img_feat = einops.rearrange(img_feat, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
@@ -434,7 +434,7 @@ class DiffusionModel(nn.Module):
             images = einops.rearrange(images, "b s n ... -> (b s n) ...")
             img_features = self.rgb_encoder(images, crop_params=None)
             depths = batch["observation.depths"]
-            depths = depths.repeat(1, 1, 3, 1, 1)  # convert to 3-channel
+            depths = depths.repeat(1, 1, 1, 3, 1, 1)  # convert to 3-channel
             depths = einops.rearrange(depths, "b s n ... -> (b s n) ...")
             depth_features = self.depth_encoder(depths, crop_params=None)
             img_features = torch.cat([img_features, depth_features], dim=-1)

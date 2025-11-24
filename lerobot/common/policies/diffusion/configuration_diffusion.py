@@ -272,13 +272,20 @@ class DiffusionConfig(PreTrainedConfig):
                         f"for `crop_shape` and {image_ft.shape} for "
                         f"`{key}`."
                     )
-
-        # Check that all input images have the same shape.
+        
+        # Check that all input images have the same shape & type
         first_image_key, first_image_ft = next(iter(self.image_features.items()))
         for key, image_ft in self.image_features.items():
             if image_ft.shape != first_image_ft.shape:
                 raise ValueError(
                     f"`{key}` does not match `{first_image_key}`, but we expect all image shapes to match."
+                )
+            
+        first_depth_key, first_depth_ft = next(iter(self.depth_features.items()))
+        for key, depth_ft in self.depth_features.items():
+            if depth_ft.shape != first_depth_ft.shape:
+                raise ValueError(
+                    f"`{key}` does not match `{first_depth_key}`, but we expect all image shapes to match."
                 )
 
     @property
