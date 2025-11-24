@@ -155,6 +155,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         }
         if self.config.image_features:
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
+        if self.config.depth_features:
+            self._queues["observation.depths"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
 
@@ -190,6 +192,11 @@ class DiffusionPolicy(PreTrainedPolicy):
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
             )
+        if self.config.depth_features:
+            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            batch["observation.depths"] = torch.stack(
+                [batch[key] for key in self.config.depth_features], dim=-4
+            )
         # Note: It's important that this happens after stacking the images into a single key.
         self._queues = populate_queues(self._queues, batch)
 
@@ -217,6 +224,11 @@ class DiffusionPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch["observation.images"] = torch.stack(
                 [batch[key] for key in self.config.image_features], dim=-4
+            )
+        if self.config.depth_features:
+            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            batch["observation.depths"] = torch.stack(
+                [batch[key] for key in self.config.depth_features], dim=-4
             )
         batch = self.normalize_targets(batch)
         loss = self.diffusion.compute_loss(batch)
@@ -258,6 +270,15 @@ class DiffusionModel(nn.Module):
             else:
                 self.rgb_encoder = DiffusionRgbEncoder(config)
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
+        if self.config.depth_features:
+            num_images = len(self.config.depth_features)
+            if self.config.use_separate_rgb_encoder_per_camera:
+                encoders = [DiffusionRgbEncoder(config) for _ in range(num_images)]
+                self.depth_encoder = nn.ModuleList(encoders)
+                global_cond_dim += encoders[0].feature_dim * num_images
+            else:
+                self.depth_encoder = DiffusionRgbEncoder(config)
+                global_cond_dim += self.depth_encoder.feature_dim * num_images
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
         if self.use_text_embedding:
@@ -329,14 +350,20 @@ class DiffusionModel(nn.Module):
         """
         camera_groups = {}
         image_key_list = list(self.config.image_features.keys())
+        depth_key_list = list(self.config.depth_features.keys())
 
         for idx, key in enumerate(image_key_list):
             camera_name = key.split('.')[-2]
             if camera_name not in camera_groups:
                 camera_groups[camera_name] = []
             camera_groups[camera_name].append({'key': key, 'idx': idx})
+        
+        for idx, key in enumerate(depth_key_list):
+            camera_name = key.split('.')[-2]
+            assert camera_name in camera_groups, f"Camera {camera_name} for depth not found in image cameras."
+            camera_groups[camera_name].append({'key': key, 'idx': idx})
 
-        img_features_list = [None] * len(image_key_list)
+        img_features_list = [None] * (len(image_key_list) + len(depth_key_list))
 
         for camera_name, image_infos in camera_groups.items():
             # Compute crop params once per camera for synchronized cropping
@@ -355,9 +382,20 @@ class DiffusionModel(nn.Module):
                 images = einops.rearrange(batch[key], "b s ... -> (b s) ...")
 
                 if self.config.use_separate_rgb_encoder_per_camera:
-                    encoder = self.rgb_encoder[idx]
+                    if "depth" in key:
+                        images = images.repeat(1, 3, 1, 1)  # convert depth to 3-channel by repeating
+                        encoder = self.depth_encoder[idx]
+                        idx = len(image_key_list) + idx  # depth features go after image features
+                    else:
+                        encoder = self.rgb_encoder[idx]
+
                 else:
-                    encoder = self.rgb_encoder
+                    if "depth" in key:
+                        images = images.repeat(1, 3, 1, 1)  # convert depth to 3-channel by repeating
+                        encoder = self.depth_encoder
+                        idx = len(image_key_list) + idx  # depth features go after image features
+                    else:
+                        encoder = self.rgb_encoder
 
                 img_feat = encoder(images, crop_params=crop_params)
                 img_feat = einops.rearrange(img_feat, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
@@ -371,6 +409,7 @@ class DiffusionModel(nn.Module):
         Images are stacked in batch["observation.images"] with shape (B, n_obs_steps, num_cameras, C, H, W).
         """
         num_cameras = len(self.config.image_features)
+        num_depths = len(self.config.depth_features)
 
         if self.config.use_separate_rgb_encoder_per_camera:
             img_features_list = []
@@ -381,11 +420,24 @@ class DiffusionModel(nn.Module):
                 img_feat = encoder(cam_images, crop_params=None)
                 img_feat = einops.rearrange(img_feat, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
                 img_features_list.append(img_feat)
+            for depth_idx in range(num_depths):
+                depth_images = batch["observation.depths"][:, :, depth_idx]  # (B, s, 1, H, W)
+                depth_images = depth_images.repeat(1, 1, 3, 1, 1)  # convert to 3-channel
+                depth_images = einops.rearrange(depth_images, "b s ... -> (b s) ...")
+                encoder = self.depth_encoder[depth_idx]
+                img_feat = encoder(depth_images, crop_params=None)
+                img_feat = einops.rearrange(img_feat, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps)
+                img_features_list.append(img_feat)
             return torch.cat(img_features_list, dim=-1)
         else:
             images = batch["observation.images"]
             images = einops.rearrange(images, "b s n ... -> (b s n) ...")
             img_features = self.rgb_encoder(images, crop_params=None)
+            depths = batch["observation.depths"]
+            depths = depths.repeat(1, 1, 3, 1, 1)  # convert to 3-channel
+            depths = einops.rearrange(depths, "b s n ... -> (b s n) ...")
+            depth_features = self.depth_encoder(depths, crop_params=None)
+            img_features = torch.cat([img_features, depth_features], dim=-1)
             return einops.rearrange(
                 img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps, n=num_cameras
             )
@@ -395,7 +447,7 @@ class DiffusionModel(nn.Module):
         batch_size, n_obs_steps = batch[self.obs_key].shape[:2]
         global_cond_feats = [batch[self.obs_key]]
 
-        if self.config.image_features:
+        if self.config.image_features or self.config.depth_features:
             if self.training:
                 img_features = self._encode_images_train(batch, batch_size, n_obs_steps)
             else:
@@ -456,14 +508,15 @@ class DiffusionModel(nn.Module):
             "observation.images": (B, n_obs_steps, num_cameras, C, H, W)
                 AND/OR
             "observation.environment_state": (B, environment_dim)
-
+                AND/OR
+            "observation.depths": (B, n_obs_steps, num_cameras, 1, H, W)
             "action": (B, horizon, action_dim)
             "action_is_pad": (B, horizon)
         }
         """
         # Input validation.
         assert set(batch).issuperset({"observation.state", "action", "action_is_pad"})
-        assert "observation.images" in batch or "observation.environment_state" in batch
+        assert "observation.images" in batch or "observation.environment_state" in batch or "observation.depths" in batch
         n_obs_steps = batch[self.obs_key].shape[1]
         horizon = batch[self.act_key].shape[1]
         assert horizon == self.config.horizon
