@@ -118,6 +118,7 @@ class DiffusionConfig(PreTrainedConfig):
             "VISUAL": NormalizationMode.MEAN_STD,
             "STATE": NormalizationMode.MIN_MAX,
             "ACTION": NormalizationMode.MIN_MAX,
+            "DEPTH" : NormalizationMode.IDENTITY,
         }
     )
 

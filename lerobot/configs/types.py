@@ -23,6 +23,7 @@ class FeatureType(str, Enum):
     VISUAL = "VISUAL"
     ENV = "ENV"
     ACTION = "ACTION"
+    DEPTH = "DEPTH"
 
 
 class NormalizationMode(str, Enum):

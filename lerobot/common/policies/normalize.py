@@ -50,7 +50,7 @@ def create_stats_buffers(
         if shape == (-1, 3):
             shape = (1,3)
 
-        if ft.type is FeatureType.VISUAL:
+        if ft.type is FeatureType.VISUAL or ft.type is FeatureType.DEPTH:
             # sanity checks
             assert len(shape) == 3, f"number of dimensions of {key} != 3 ({shape=}"
             c, h, w = shape
