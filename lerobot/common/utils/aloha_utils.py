@@ -1,5 +1,4 @@
 import mink
-from robot_descriptions.loaders.mujoco import load_robot_description
 import numpy as np
 import pytorch3d.transforms as transforms
 from torch import pi
@@ -8,9 +7,13 @@ import mujoco
 import trimesh
 from scipy.spatial.transform import Rotation as R
 import cv2
+import os
 
 
-ALOHA_MODEL = load_robot_description("aloha_mj_description")
+ALOHA_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "robot_descriptions/mujoco_menagerie/aloha/scene.xml"
+)
+ALOHA_MODEL = mujoco.MjModel.from_xml_path(ALOHA_PATH)
 ALOHA_CONFIGURATION = mink.Configuration(ALOHA_MODEL)
 ALOHA_REST_STATE = torch.tensor([[ 91.9336, 191.8652, 191.7773, 174.2871, 174.3750,   5.4492,  17.4023, -2.5488,  11.5245,  
                             92.1094, 193.5352, 193.0078, 169.6289, 169.6289, -3.7793,  21.0059,   2.2852, 100.7582]])
