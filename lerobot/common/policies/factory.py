@@ -30,7 +30,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.common.policies.vqbet.configuration_vqbet import VQBeTConfig
 from lerobot.configs.policies import PreTrainedConfig
-from lerobot.configs.types import FeatureType
+from lerobot.configs.types import FeatureType, PolicyFeature
 
 
 def get_policy_class(name: str) -> PreTrainedPolicy:
@@ -138,6 +138,14 @@ def make_policy(
 
     # Filter features by action type for output
     cfg.output_features = {key: ft for key, ft in features.items() if ft.type is FeatureType.ACTION}
+
+    # Add relative action feature if using relative action space
+    if hasattr(cfg, 'action_space') and cfg.action_space == "right_eef_relative":
+        # Copy the absolute action feature for the relative action
+        cfg.output_features["action.right_eef_pose_relative"] = PolicyFeature(
+            type=FeatureType.ACTION,
+            shape=cfg.output_features["action.right_eef_pose"].shape
+        )
 
     # Get all non-action features
     non_action_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}

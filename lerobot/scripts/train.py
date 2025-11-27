@@ -41,6 +41,7 @@ from lerobot.common.utils.train_utils import (
     save_checkpoint,
     update_last_checkpoint,
 )
+from lerobot.common.policies.compute_per_timestep_stats import compute_relative_action_stats
 from lerobot.common.utils.utils import (
     format_big_number,
     get_safe_torch_device,
@@ -126,6 +127,9 @@ def train(cfg: TrainPipelineConfig):
 
     logging.info("Creating dataset")
     dataset = make_dataset(cfg)
+
+    # Compute per-timestep normalization statistics if needed
+    compute_relative_action_stats(dataset, cfg.policy)
 
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,

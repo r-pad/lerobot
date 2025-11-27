@@ -38,7 +38,8 @@ def create_stats_buffers(
     stats_buffers = {}
 
     for key, ft in features.items():
-        norm_mode = norm_map.get(ft.type, NormalizationMode.IDENTITY)
+        # Check key-specific normalization first, then fall back to type-level
+        norm_mode = norm_map.get(key) or norm_map.get(ft.type, NormalizationMode.IDENTITY)
         if norm_mode is NormalizationMode.IDENTITY:
             continue
 
@@ -81,10 +82,28 @@ def create_stats_buffers(
                     "max": nn.Parameter(max, requires_grad=False),
                 }
             )
+        elif norm_mode is NormalizationMode.PER_TIMESTEP_PERCENTILE:
+            # For per-timestep normalization, we need to create buffers for each timestep
+            buffer = nn.ParameterDict()
+            timestep_keys = [k for k in stats[key].keys() if k.startswith("timestep_")]
+            for timestep_key in timestep_keys:
+                stat_value = stats[key][timestep_key]
+                if isinstance(stat_value, np.ndarray):
+                    buffer[timestep_key] = nn.Parameter(
+                        torch.from_numpy(stat_value).to(dtype=torch.float32),
+                        requires_grad=False
+                    )
+                elif isinstance(stat_value, torch.Tensor):
+                    buffer[timestep_key] = nn.Parameter(
+                        stat_value.clone().to(dtype=torch.float32),
+                        requires_grad=False
+                    )
 
         # TODO(aliberts, rcadene): harmonize this to only use one framework (np or torch)
         if stats:
-            if isinstance(stats[key]["mean"], np.ndarray):
+            if norm_mode is NormalizationMode.PER_TIMESTEP_PERCENTILE:
+                pass
+            elif isinstance(stats[key]["mean"], np.ndarray):
                 if norm_mode is NormalizationMode.MEAN_STD:
                     buffer["mean"].data = torch.from_numpy(stats[key]["mean"]).to(dtype=torch.float32)
                     buffer["std"].data = torch.from_numpy(stats[key]["std"]).to(dtype=torch.float32)
@@ -161,13 +180,27 @@ class Normalize(nn.Module):
                 # FIXME(aliberts, rcadene): This might lead to silent fail!
                 continue
 
-            norm_mode = self.norm_map.get(ft.type, NormalizationMode.IDENTITY)
+            # Check key-specific normalization first, then fall back to type-level
+            norm_mode = self.norm_map.get(key) or self.norm_map.get(ft.type, NormalizationMode.IDENTITY)
             if norm_mode is NormalizationMode.IDENTITY:
                 continue
 
             buffer = getattr(self, "buffer_" + key.replace(".", "_"))
 
-            if norm_mode is NormalizationMode.MEAN_STD:
+            if norm_mode is NormalizationMode.PER_TIMESTEP_PERCENTILE:
+                # Per-timestep percentile normalization
+                # Only normalize position (dims 6:9) and gripper (dim 9:10), NOT rotation (dims 0:6)
+                assert batch[key].ndim == 3, f"Expected (B, horizon, dim) for per-timestep norm, got {batch[key].shape}"
+                B, horizon, dim = batch[key].shape
+
+                for t in range(horizon):
+                    p02, p98 = buffer[f"timestep_{t}_p02"], buffer[f"timestep_{t}_p98"]
+
+                    # Normalize [p02, p98] → [-1, 1] for position and gripper only (dims 6:10)
+                    batch[key][:, t, 6:] = 2 * (batch[key][:, t, 6:] - p02[6:]) / (p98[6:] - p02[6:] + 1e-8) - 1
+                    # Clip to [-1.5, 1.5]
+                    batch[key][:, t, 6:] = torch.clamp(batch[key][:, t, 6:], -1.5, 1.5)
+            elif norm_mode is NormalizationMode.MEAN_STD:
                 mean = buffer["mean"]
                 std = buffer["std"]
                 assert not torch.isinf(mean).any(), _no_stats_error_str("mean")
@@ -234,13 +267,25 @@ class Unnormalize(nn.Module):
             if key not in batch:
                 continue
 
-            norm_mode = self.norm_map.get(ft.type, NormalizationMode.IDENTITY)
+            # Check key-specific normalization first, then fall back to type-level
+            norm_mode = self.norm_map.get(key) or self.norm_map.get(ft.type, NormalizationMode.IDENTITY)
             if norm_mode is NormalizationMode.IDENTITY:
                 continue
 
             buffer = getattr(self, "buffer_" + key.replace(".", "_"))
 
-            if norm_mode is NormalizationMode.MEAN_STD:
+            if norm_mode is NormalizationMode.PER_TIMESTEP_PERCENTILE:
+                # Per-timestep percentile unnormalization
+                # Only unnormalize position (dims 6:9) and gripper (dim 9:10), NOT rotation (dims 0:6)
+                assert batch[key].ndim == 3, f"Expected (B, horizon, dim) for per-timestep unnorm, got {batch[key].shape}"
+                B, horizon, dim = batch[key].shape
+
+                for t in range(horizon):
+                    p02, p98 = buffer[f"timestep_{t}_p02"], buffer[f"timestep_{t}_p98"]
+
+                    # Unnormalize: [-1, 1] → [p02, p98] for position and gripper only (dims 6:10)
+                    batch[key][:, t, 6:] = (batch[key][:, t, 6:] + 1) / 2 * (p98[6:] - p02[6:]) + p02[6:]
+            elif norm_mode is NormalizationMode.MEAN_STD:
                 mean = buffer["mean"]
                 std = buffer["std"]
                 assert not torch.isinf(mean).any(), _no_stats_error_str("mean")
