@@ -207,11 +207,14 @@ class DiffusionPolicy(PreTrainedPolicy):
 
         action_raw = self._queues[self.act_key].popleft()
         action = self.robot_adapter.transform_action(action_raw, state)
-        action_eef = self.robot_adapter.get_eef_action(action_raw)
+        action_eef = self.robot_adapter.get_eef_action(action_raw, state)
         return action, action_eef
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         """Run the batch through the model and compute the loss for training or validation."""
+        if self.config.action_space == "right_eef_relative":
+            batch = self.robot_adapter.compute_relative_actions(batch)
+
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
