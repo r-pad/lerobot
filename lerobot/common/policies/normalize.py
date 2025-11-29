@@ -85,17 +85,33 @@ def create_stats_buffers(
         elif norm_mode is NormalizationMode.PER_TIMESTEP_PERCENTILE:
             # For per-timestep normalization, we need to create buffers for each timestep
             buffer = nn.ParameterDict()
-            timestep_keys = [k for k in stats[key].keys() if k.startswith("timestep_")]
-            for timestep_key in timestep_keys:
-                stat_value = stats[key][timestep_key]
-                if isinstance(stat_value, np.ndarray):
-                    buffer[timestep_key] = nn.Parameter(
-                        torch.from_numpy(stat_value).to(dtype=torch.float32),
+            if stats and key in stats:
+                # Populate buffers from stats if available (training from scratch)
+                timestep_keys = [k for k in stats[key].keys() if k.startswith("timestep_")]
+                for timestep_key in timestep_keys:
+                    stat_value = stats[key][timestep_key]
+                    if isinstance(stat_value, np.ndarray):
+                        buffer[timestep_key] = nn.Parameter(
+                            torch.from_numpy(stat_value).to(dtype=torch.float32),
+                            requires_grad=False
+                        )
+                    elif isinstance(stat_value, torch.Tensor):
+                        buffer[timestep_key] = nn.Parameter(
+                            stat_value.clone().to(dtype=torch.float32),
+                            requires_grad=False
+                        )
+            else:
+                # Pre-populate with placeholder tensors so load_state_dict can populate them
+                # Extract horizon from feature shape (horizon, action_dim)
+                horizon = shape[0]
+                for t in range(horizon):
+                    # Initialize with inf so we can detect if they weren't loaded
+                    buffer[f"timestep_{t}_p02"] = nn.Parameter(
+                        torch.ones(shape[-1], dtype=torch.float32) * torch.inf,
                         requires_grad=False
                     )
-                elif isinstance(stat_value, torch.Tensor):
-                    buffer[timestep_key] = nn.Parameter(
-                        stat_value.clone().to(dtype=torch.float32),
+                    buffer[f"timestep_{t}_p98"] = nn.Parameter(
+                        torch.ones(shape[-1], dtype=torch.float32) * torch.inf,
                         requires_grad=False
                     )
 
@@ -195,6 +211,8 @@ class Normalize(nn.Module):
 
                 for t in range(horizon):
                     p02, p98 = buffer[f"timestep_{t}_p02"], buffer[f"timestep_{t}_p98"]
+                    assert not torch.isinf(p02).any(), _no_stats_error_str(f"timestep_{t}_p02")
+                    assert not torch.isinf(p98).any(), _no_stats_error_str(f"timestep_{t}_p98")
 
                     # Normalize [p02, p98] → [-1, 1] for position and gripper only (dims 6:10)
                     batch[key][:, t, 6:] = 2 * (batch[key][:, t, 6:] - p02[6:]) / (p98[6:] - p02[6:] + 1e-8) - 1
@@ -282,6 +300,8 @@ class Unnormalize(nn.Module):
 
                 for t in range(horizon):
                     p02, p98 = buffer[f"timestep_{t}_p02"], buffer[f"timestep_{t}_p98"]
+                    assert not torch.isinf(p02).any(), _no_stats_error_str(f"timestep_{t}_p02")
+                    assert not torch.isinf(p98).any(), _no_stats_error_str(f"timestep_{t}_p98")
 
                     # Unnormalize: [-1, 1] → [p02, p98] for position and gripper only (dims 6:10)
                     batch[key][:, t, 6:] = (batch[key][:, t, 6:] + 1) / 2 * (p98[6:] - p02[6:]) + p02[6:]

@@ -94,7 +94,7 @@ def forward_kinematics(aloha_configuration, real_joints):
     aloha_configuration.update(Q)
     eef_pose_se3 = aloha_configuration.get_transform_frame_to_world("right/gripper", "site")
     rot_6d, trans = transforms.matrix_to_rotation_6d(torch.from_numpy(eef_pose_se3.as_matrix()[None, :3, :3])).squeeze(), torch.from_numpy(eef_pose_se3.as_matrix()[:3,3])
-    eef_pose = torch.cat([rot_6d, trans], axis=0)
+    eef_pose = torch.cat([rot_6d, trans], axis=0).to(real_joints.device)
     return eef_pose, eef_pose_se3
 
 def map_sim2real(vec):

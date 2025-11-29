@@ -15,12 +15,12 @@ class RobotAdapter(ABC):
         pass
 
     @abstractmethod
-    def transform_action(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    def transform_action(self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None) -> torch.Tensor:
         """Transform policy output to robot-executable action"""
         pass
 
     @abstractmethod
-    def get_eef_action(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    def get_eef_action(self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None) -> torch.Tensor:
         """Get eef action info """
         pass
 
@@ -52,12 +52,12 @@ class AlohaAdapter(RobotAdapter):
     def _relative_to_absolute_eef(self, relative_action: torch.Tensor, current_eef: torch.Tensor) -> torch.Tensor:
         """Convert relative EEF action to absolute
         Args:
-            relative_action: (10,) [6D_rot, xyz, gripper] relative delta
+            relative_action: (1, 10) [6D_rot, xyz, gripper] relative delta
             current_eef: (10,) [6D_rot, xyz, gripper] current absolute pose
         Returns:
-            absolute_action: (10,) [6D_rot, xyz, gripper] absolute pose
+            absolute_action: (1, 10) [6D_rot, xyz, gripper] absolute pose
         """
-        rel_rot6d, rel_pos, rel_gripper = relative_action[:6], relative_action[6:9], relative_action[9:10]
+        rel_rot6d, rel_pos, rel_gripper = relative_action[0, :6], relative_action[0, 6:9], relative_action[0, 9:10]
         obs_rot6d, obs_pos, obs_gripper = current_eef[:6], current_eef[6:9], current_eef[9:10]
 
         R_obs = transforms.rotation_6d_to_matrix(obs_rot6d[None]).squeeze()  # (3, 3)
@@ -68,7 +68,7 @@ class AlohaAdapter(RobotAdapter):
         abs_pos = obs_pos + rel_pos  # (3,)
         abs_gripper = obs_gripper + rel_gripper  # (1,)
 
-        return torch.cat([abs_rot6d, abs_pos, abs_gripper])  # (10,)
+        return torch.cat([abs_rot6d, abs_pos, abs_gripper])[None]  # (1, 10)
 
     def compute_relative_actions(self, batch: dict) -> dict:
         """Compute relative actions (delta from current observation).
@@ -118,7 +118,7 @@ class AlohaAdapter(RobotAdapter):
         )  # (B, horizon, 10)
         return batch
 
-    def transform_action(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    def transform_action(self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None) -> torch.Tensor:
         """Transform policy output to robot-executable action.
         Args:
             action: Policy output action
@@ -126,16 +126,16 @@ class AlohaAdapter(RobotAdapter):
                 - For "right_eef_relative": (10,) relative EEF delta
                 - For "joint": (18,) joint positions
             state: Current robot state (joint positions)
+            reference_eef: Reference EEF pose for relative actions (10,) [6D_rot, xyz, gripper]
         Returns:
             Joint positions to execute on robot
         """
-        from lerobot.common.utils.aloha_utils import forward_kinematics, inverse_kinematics
+        from lerobot.common.utils.aloha_utils import inverse_kinematics
 
         if self.action_space in ["right_eef", "right_eef_relative"]:
-            # FK on current state
-            current_eef, _ = forward_kinematics(self.config, state[0])
             if self.action_space == "right_eef_relative":
-                action = self._relative_to_absolute_eef(action, current_eef)
+                # For relative actions, convert to absolute using reference EEF
+                action = self._relative_to_absolute_eef(action, reference_eef)
 
             # IK to get joint action
             action_joint = inverse_kinematics(self.config, action.squeeze())[None].float()
@@ -144,16 +144,12 @@ class AlohaAdapter(RobotAdapter):
             return action_joint
         return action
 
-    def get_eef_action(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
-        from lerobot.common.utils.aloha_utils import forward_kinematics
-
+    def get_eef_action(self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None) -> torch.Tensor:
         if self.action_space == "right_eef":
             return action  # eef action is primary
         elif self.action_space == "right_eef_relative":
-            # Get current EEF pose via forward kinematics
-            current_eef, _ = forward_kinematics(self.config, state[0])
-            # Convert relative to absolute
-            return self._relative_to_absolute_eef(action, current_eef)
+            # For relative actions, convert to absolute using reference EEF
+            return self._relative_to_absolute_eef(action, reference_eef)
 
         # For joint space, return dummy eef
         return torch.zeros(10, device=action.device, dtype=action.dtype)
@@ -170,10 +166,10 @@ class LiberoFrankaAdapter(RobotAdapter):
     def get_act_key(self) -> str:
         return self.act_key
 
-    def transform_action(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    def transform_action(self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None) -> torch.Tensor:
         return action  # No transformation
 
-    def get_eef_action(self, action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    def get_eef_action(self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None) -> torch.Tensor:
         return action  # Return same action as auxiliary
 
     def compute_relative_actions(self, batch: dict) -> dict:
