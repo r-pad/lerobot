@@ -10,6 +10,7 @@ pixi shell
 pixi run install-pytorch3d
 
 # only for robot control not for training
+pixi run install-pynput
 pixi run install-open3d 
 pixi run install-k4a
 ```
