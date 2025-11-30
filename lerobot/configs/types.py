@@ -24,11 +24,16 @@ class FeatureType(str, Enum):
     ENV = "ENV"
     ACTION = "ACTION"
 
+class PipelineFeatureType(str, Enum):
+    ACTION = "ACTION"
+    OBSERVATION = "OBSERVATION"
 
 class NormalizationMode(str, Enum):
     MIN_MAX = "MIN_MAX"
     MEAN_STD = "MEAN_STD"
     IDENTITY = "IDENTITY"
+    QUANTILES = "QUANTILES"
+    QUANTILE10 = "QUANTILE10"
 
 
 class DictLike(Protocol):
@@ -39,3 +44,9 @@ class DictLike(Protocol):
 class PolicyFeature:
     type: FeatureType
     shape: tuple
+
+class RTCAttentionSchedule(str, Enum):
+    ZEROS = "ZEROS"
+    ONES = "ONES"
+    LINEAR = "LINEAR"
+    EXP = "EXP"

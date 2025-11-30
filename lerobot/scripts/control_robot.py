@@ -288,6 +288,7 @@ def record(
     # Load pretrained policy
     policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
 
+    breakpoint()
     if not robot.is_connected:
         robot.connect()
 
