@@ -28,8 +28,8 @@ import torch
 from torch import Tensor
 
 from lerobot.configs.types import RTCAttentionSchedule
-from lerobot.policies.rtc.configuration_rtc import RTCConfig
-from lerobot.policies.rtc.debug_tracker import Tracker
+from lerobot.common.policies.rtc.configuration_rtc import RTCConfig
+from lerobot.common.policies.rtc.debug_tracker import Tracker
 
 logger = logging.getLogger(__name__)
 

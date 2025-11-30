@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
 import builtins
 import logging
 import math
@@ -23,20 +21,14 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
-from transformers import AutoTokenizer
 from typing_extensions import Unpack
 
-from lerobot.common.constants import ACTION, OBS_ROBOT
-from lerobot.common.policies.normalize import Normalize, Unnormalize
-from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
-from lerobot.common.policies.pretrained import PreTrainedPolicy, T
 from lerobot.common.utils.import_utils import _transformers_available
-from lerobot.configs.policies import PreTrainedConfig
 
+# Conditional import for type checking and lazy loading
 if TYPE_CHECKING or _transformers_available:
     from transformers.models.auto import CONFIG_MAPPING
     from transformers.models.gemma import modeling_gemma
@@ -48,12 +40,16 @@ else:
     GemmaForCausalLM = None
     PaliGemmaForConditionalGeneration = None
 
-try:  # pragma: no cover - optional dependency
-    from lerobot.common.policies.rtc.modeling_rtc import RTCProcessor
-except ImportError:  # pragma: no cover - optional dependency
-    RTCProcessor = None  # type: ignore[assignment]
-
-OPENPI_ATTENTION_MASK_VALUE = -1e9  # see openpi masking implementation
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.common.policies.pi05.configuration_pi05 import PI05Config
+from lerobot.common.policies.pretrained import PreTrainedPolicy, T
+from lerobot.common.policies.rtc.modeling_rtc import RTCProcessor
+from lerobot.common.utils.constants import (
+    ACTION,
+    OBS_LANGUAGE_ATTENTION_MASK,
+    OBS_LANGUAGE_TOKENS,
+    OPENPI_ATTENTION_MASK_VALUE,
+)
 
 
 class ActionSelectKwargs(TypedDict, total=False):
@@ -881,12 +877,10 @@ class PI05Policy(PreTrainedPolicy):
     def __init__(
         self,
         config: PI05Config,
-        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         """
         Args:
             config: Policy configuration class instance.
-            dataset_stats: Dataset statistics used for input/output normalization.
         """
         super().__init__(config)
         config.validate_features()
@@ -900,8 +894,7 @@ class PI05Policy(PreTrainedPolicy):
         if config.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        if config.device is not None:
-            self.model.to(config.device)
+        self.model.to(config.device)
 
         self.reset()
 
@@ -946,6 +939,8 @@ class PI05Policy(PreTrainedPolicy):
 
         # Initialize model without loading weights
         # Check if dataset_stats were provided in kwargs
+        if "dataset_stats" in kwargs:
+            kwargs.pop("dataset_stats")
         model = cls(config, **kwargs)
 
         # Now manually load and remap the state dict
@@ -1098,10 +1093,6 @@ class PI05Policy(PreTrainedPolicy):
         # Create processor if config provided
         # If RTC is not enabled - we can still track the denoising data
         if self.config.rtc_config is not None:
-            if RTCProcessor is None:
-                raise ImportError(
-                    "RTC support requested but the RTCProcessor implementation is not available in this build."
-                )
             self.rtc_processor = RTCProcessor(self.config.rtc_config)
 
             model_value = getattr(self, "model", None)
@@ -1111,7 +1102,7 @@ class PI05Policy(PreTrainedPolicy):
     def _rtc_enabled(self) -> bool:
         return self.config.rtc_config is not None and self.config.rtc_config.enabled
 
-    def prepare_images(self, batch: dict[str, Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+    def _preprocess_images(self, batch: dict[str, Tensor]) -> tuple[list[Tensor], list[Tensor]]:
         """Preprocess images for the model.
 
         Images from LeRobot are typically in [B, C, H, W] format and normalized to [0, 1].
@@ -1177,47 +1168,10 @@ class PI05Policy(PreTrainedPolicy):
 
         return images, img_masks
 
-    def prepare_state(self, batch: dict[str, Tensor]) -> Tensor:
-        """Pad and return the normalized state."""
-        if OBS_ROBOT not in batch:
-            raise ValueError("State feature 'observation.state' missing from batch.")
-        return pad_vector(batch[OBS_ROBOT], self.config.max_state_dim)
-
-    def prepare_action(self, batch: dict[str, Tensor]) -> Tensor:
-        """Pad actions (already normalized) to the maximum dimension expected by the model."""
-        return pad_vector(batch[ACTION], self.config.max_action_dim)
-
-    def prepare_language(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
-        """Tokenize prompts that include the task string and discretized normalized state."""
-        tasks = batch.get("task")
-        if tasks is None:
-            raise ValueError("Language instructions (batch['task']) are required for PI05.")
-
-        if isinstance(tasks, str):
-            tasks = [tasks]
-
-        state = self.prepare_state(batch).detach().cpu().numpy()
-        state = np.clip(state, -1.0, 1.0)
-        discretized_states = np.digitize(state, bins=self._state_tokenizer_bins) - 1
-
-        prompts: list[str] = []
-        for i, task in enumerate(tasks):
-            cleaned_text = str(task).strip().replace("_", " ").replace("\n", " ")
-            state_str = " ".join(map(str, discretized_states[i].tolist()))
-            prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
-            prompts.append(prompt)
-
-        tokenized = self.language_tokenizer(
-            prompts,
-            padding="max_length",
-            padding_side="right",
-            max_length=self.config.tokenizer_max_length,
-            return_tensors="pt",
-        )
-        device = next(self.parameters()).device
-        tokens = tokenized["input_ids"].to(device=device)
-        masks = tokenized["attention_mask"].to(device=device, dtype=torch.bool)
-        return tokens, masks
+    def prepare_action(self, batch):
+        """Pad action"""
+        actions = pad_vector(batch[ACTION], self.config.max_action_dim)
+        return actions
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -1241,11 +1195,9 @@ class PI05Policy(PreTrainedPolicy):
         """Predict a chunk of actions given environment observations."""
         self.eval()
 
-        batch = self.normalize_inputs(batch)
-
         # Prepare inputs
-        images, img_masks = self.prepare_images(batch)
-        tokens, masks = self.prepare_language(batch)
+        images, img_masks = self._preprocess_images(batch)
+        tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
         # Sample actions using the model (pass through RTC kwargs, no separate state needed for PI05)
         actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
@@ -1253,29 +1205,20 @@ class PI05Policy(PreTrainedPolicy):
         # Unpad actions to actual action dimension
         original_action_dim = self.config.output_features[ACTION].shape[0]
         actions = actions[:, :, :original_action_dim]
-        actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
 
         return actions
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training."""
 
-        batch = self.normalize_inputs(batch)
-        batch = self.normalize_targets(batch)
-
         # Prepare inputs
-        images, img_masks = self.prepare_images(batch)
-        tokens, masks = self.prepare_language(batch)
+        images, img_masks = self._preprocess_images(batch)
+        tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
         actions = self.prepare_action(batch)
-        actions_is_pad = batch.get("action_is_pad")
 
         # Compute loss (no separate state needed for PI05)
         losses = self.model.forward(images, img_masks, tokens, masks, actions)
-
-        if actions_is_pad is not None:
-            in_episode_bound = ~actions_is_pad.to(dtype=torch.bool)
-            losses = losses * in_episode_bound.unsqueeze(-1)
 
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
