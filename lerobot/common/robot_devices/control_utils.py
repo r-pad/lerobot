@@ -148,7 +148,8 @@ def predict_action(observation, policy, device, use_amp):
     return action, action_eef
 
 
-_PI05_DEFAULT_TOKENIZER = "google/paligemma-3b-pt-224"
+# _PI05_DEFAULT_TOKENIZER = "google/paligemma-3b-pt-224"
+_PI05_DEFAULT_TOKENIZER = "distilbert-base-uncased"
 _LANGUAGE_TOKENIZER_CACHE: dict[tuple[str, int, str, str, bool], TokenizerProcessorStep] = {}
 
 

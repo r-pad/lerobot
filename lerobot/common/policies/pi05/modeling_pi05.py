@@ -877,6 +877,7 @@ class PI05Policy(PreTrainedPolicy):
     def __init__(
         self,
         config: PI05Config,
+        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
         """
         Args:
@@ -885,6 +886,9 @@ class PI05Policy(PreTrainedPolicy):
         super().__init__(config)
         config.validate_features()
         self.config = config
+        self.robot_adapter = config.get_robot_adapter()
+        self.obs_key = self.robot_adapter.get_obs_key()
+        self.act_key = self.robot_adapter.get_act_key()
 
         # Initialize the core PI05 model
         self.init_rtc_processor()
@@ -939,8 +943,7 @@ class PI05Policy(PreTrainedPolicy):
 
         # Initialize model without loading weights
         # Check if dataset_stats were provided in kwargs
-        if "dataset_stats" in kwargs:
-            kwargs.pop("dataset_stats")
+
         model = cls(config, **kwargs)
 
         # Now manually load and remap the state dict
@@ -1187,8 +1190,11 @@ class PI05Policy(PreTrainedPolicy):
             actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
             # Transpose to get shape (n_action_steps, batch_size, action_dim)
             self._action_queue.extend(actions.transpose(0, 1))
-
-        return self._action_queue.popleft()
+        
+        action_raw = self._action_queue.popleft()
+        action = self.robot_adapter.transform_action(action_raw, batch['observation.state'])
+        action_eef = self.robot_adapter.get_eef_action(action)
+        return action, action_eef
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]) -> Tensor:

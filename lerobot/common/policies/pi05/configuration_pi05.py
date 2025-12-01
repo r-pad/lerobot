@@ -26,6 +26,9 @@ from lerobot.common.policies.rtc.configuration_rtc import RTCConfig
 @PreTrainedConfig.register_subclass("pi05")
 @dataclass
 class PI05Config(PreTrainedConfig):
+    robot_type: str = "aloha"
+    action_space: str = "right_eef"
+
     paligemma_variant: str = "gemma_2b"
     action_expert_variant: str = "gemma_300m"
     dtype: str = "float32"  # Options: "bfloat16", "float32"
