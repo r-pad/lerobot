@@ -125,7 +125,7 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
     
     @property
     def depth_features(self) -> dict[str, PolicyFeature]:
-        return {key: ft for key, ft in self.input_features.items() if ft.type is FeatureType.DEPTH} if self.use_depth else None
+        return {key: ft for key, ft in self.input_features.items() if ft.type is FeatureType.DEPTH} if self.use_depth else {}
     
     @property
     def action_feature(self) -> dict[str, PolicyFeature]:
