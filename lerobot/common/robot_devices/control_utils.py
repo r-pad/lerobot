@@ -27,6 +27,7 @@ from functools import cache
 import numpy as np
 import rerun as rr
 import torch
+import torch.nn.functional as F
 from deepdiff import DeepDiff
 from termcolor import colored
 
@@ -36,8 +37,14 @@ from lerobot.common.datasets.utils import get_features_from_robot
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
+from lerobot.common.utils.constants import (
+    OBS_LANGUAGE_ATTENTION_MASK,
+    OBS_LANGUAGE_TOKENS,
+    OBS_STATE,
+)
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
+from lerobot.processor.tokenizer_processor import TokenizerProcessorStep
 
 def add_eef_pose(real_joints):
     eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
@@ -139,6 +146,115 @@ def predict_action(observation, policy, device, use_amp):
         action_eef = action_eef.to("cpu")
 
     return action, action_eef
+
+
+_PI05_DEFAULT_TOKENIZER = "google/paligemma-3b-pt-224"
+_LANGUAGE_TOKENIZER_CACHE: dict[tuple[str, int, str, str, bool], TokenizerProcessorStep] = {}
+
+
+def _get_language_tokenizer(
+    tokenizer_name: str,
+    max_length: int,
+    padding_side: str = "right",
+    padding: str = "max_length",
+    truncation: bool = True,
+) -> TokenizerProcessorStep:
+    cache_key = (tokenizer_name, max_length, padding_side, padding, truncation)
+    tokenizer = _LANGUAGE_TOKENIZER_CACHE.get(cache_key)
+    if tokenizer is None:
+        tokenizer = TokenizerProcessorStep(
+            tokenizer_name=tokenizer_name,
+            max_length=max_length,
+            padding_side=padding_side,
+            padding=padding,
+            truncation=truncation,
+        )
+        _LANGUAGE_TOKENIZER_CACHE[cache_key] = tokenizer
+    return tokenizer
+
+
+def _pad_state_for_language_tokens(state: torch.Tensor, target_dim: int) -> torch.Tensor:
+    if state.shape[-1] >= target_dim:
+        return state
+    pad_size = target_dim - state.shape[-1]
+    return F.pad(state, (0, pad_size))
+
+
+def _discretize_state(state: torch.Tensor) -> np.ndarray:
+    state_np = state.detach().cpu().numpy()
+    bins = np.linspace(-1, 1, 256 + 1)[:-1]
+    discretized = np.digitize(state_np, bins, right=False) - 1
+    return np.clip(discretized, 0, 255).astype(int)
+
+
+def _compose_language_prompts(tasks: list[str], discretized_states: np.ndarray) -> list[str]:
+    prompts: list[str] = []
+    num_states = discretized_states.shape[0]
+    for idx, task in enumerate(tasks):
+        state_idx = idx if idx < num_states else num_states - 1
+        cleaned_task = str(task).strip().replace("_", " ").replace("\n", " ")
+        state_tokens = " ".join(str(val) for val in discretized_states[state_idx])
+        prompts.append(f"Task: {cleaned_task}, State: {state_tokens};\nAction: ")
+    return prompts
+
+
+def maybe_add_language_tokens(observation: dict, policy: PreTrainedPolicy | None) -> None:
+    if policy is None:
+        return
+
+    if OBS_LANGUAGE_TOKENS in observation and OBS_LANGUAGE_ATTENTION_MASK in observation:
+        return
+
+    if getattr(policy.config, "type", None) != "pi05":
+        return
+
+    task_value = observation.get("task")
+    if task_value is None:
+        raise ValueError(
+            "PI05 policies require a task description. Please set `control.single_task` when running the controller."
+        )
+
+    if isinstance(task_value, str):
+        tasks = [task_value]
+    elif isinstance(task_value, (list, tuple)):
+        if not task_value:
+            raise ValueError("Task list cannot be empty for PI05 policies.")
+        tasks = list(task_value)
+    else:
+        raise TypeError("Task must be a string or a list of strings when running a PI05 policy.")
+
+    if len(tasks) != 1:
+        raise ValueError(
+            f"PI05 inference currently supports exactly one task string per call. Got {len(tasks)} tasks."
+        )
+
+    state_value = observation.get(OBS_STATE)
+    if state_value is None:
+        raise ValueError("`observation.state` is required to build language tokens for PI05 policies.")
+
+    state_tensor = torch.as_tensor(state_value, dtype=torch.float32)
+    if state_tensor.dim() == 1:
+        state_tensor = state_tensor.unsqueeze(0)
+    elif state_tensor.dim() != 2:
+        raise ValueError(
+            "`observation.state` must be a 1D or 2D tensor to build language tokens for PI05 policies."
+        )
+
+    max_state_dim = getattr(policy.config, "max_state_dim", state_tensor.shape[-1])
+    padded_state = _pad_state_for_language_tokens(state_tensor, max_state_dim)
+    discretized_states = _discretize_state(padded_state)
+    prompts = _compose_language_prompts(tasks, discretized_states)
+
+    tokenizer_name = getattr(policy.config, "tokenizer_name", _PI05_DEFAULT_TOKENIZER)
+    max_length = getattr(policy.config, "tokenizer_max_length", 512)
+    tokenizer = _get_language_tokenizer(tokenizer_name, max_length)
+    tokenized_prompt = tokenizer._tokenize_text(prompts)
+
+    if tokenized_prompt["input_ids"].shape[0] != 1:
+        raise ValueError("PI05 inference currently only supports batch size 1 when building language tokens.")
+
+    observation[OBS_LANGUAGE_TOKENS] = tokenized_prompt["input_ids"].squeeze(0)
+    observation[OBS_LANGUAGE_ATTENTION_MASK] = tokenized_prompt["attention_mask"].squeeze(0).to(dtype=torch.bool)
 
 
 def init_keyboard_listener():
@@ -361,6 +477,7 @@ def control_loop(
                         observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
 
                 observation["task"] = single_task
+                maybe_add_language_tokens(observation, policy)
                 pred_action, pred_action_eef = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
                 )
