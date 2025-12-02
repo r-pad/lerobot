@@ -44,7 +44,7 @@ from lerobot.common.utils.constants import (
 )
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
-from lerobot.processor.tokenizer_processor import TokenizerProcessorStep
+from lerobot.common.policies.pi05.processor_pi05 import make_pi05_pre_post_processors
 
 def add_eef_pose(real_joints):
     eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
@@ -378,6 +378,124 @@ def control_loop(
     if policy is not None:
         policy.reset()
 
+    dataset_stats = {
+        "state": {
+            "mean": [
+                -0.5725647211074829,
+                -0.2359304130077362,
+                -0.5575953722000122,
+                0.05866580456495285,
+                -0.9262049198150635,
+                0.2143455296754837,
+                0.10405240952968597,
+                0.0013659176183864474,
+                0.18704842031002045,
+                65.0785903930664
+            ],
+            "std": [
+                0.36643654108047485,
+                0.26209375262260437,
+                0.3203517496585846,
+                0.09752701967954636,
+                0.11478167027235031,
+                0.26471272110939026,
+                0.10375454276800156,
+                0.11707378923892975,
+                0.08837448060512543,
+                35.38644790649414
+            ],
+            "q01": [
+                -0.9959425592530519,
+                -0.8508675036430359,
+                -0.9836254016637802,
+                -0.11347102016210556,
+                -0.9999997615814209,
+                -0.08166948385238648,
+                -0.12274277161955834,
+                -0.18463372446298598,
+                0.042954177387058735,
+                0.4404212825894356
+            ],
+            "q99": [
+                -0.05734113860428336,
+                0.08836483933925632,
+                -0.08106395334303373,
+                0.2978545479476452,
+                -0.5242718376457691,
+                0.8344320802092553,
+                0.2618923855602741,
+                0.22866483135223387,
+                0.3634104702286422,
+                104.6967701138854
+            ]
+            },
+        "actions": {
+            "mean": [
+                92.34455871582031,
+                -191.251953125,
+                -170.44338989257812,
+                19.674468994140625,
+                21.264009475708008,
+                -20.640493392944336,
+                -6.243124485015869,
+                91.5546875,
+                -119.43356323242188,
+                -122.4383773803711,
+                38.20743179321289,
+                -4.8288655281066895,
+                15.653264045715332,
+                135.3054656982422
+            ],
+            "std": [
+                0.13258251547813416,
+                0.16535945236682892,
+                0.125,
+                0.08504508435726166,
+                0.0,
+                0.05327414721250534,
+                0.0359608456492424,
+                15.854717254638672,
+                45.31095886230469,
+                33.002471923828125,
+                21.00609016418457,
+                3.2145063877105713,
+                14.255523681640625,
+                76.05850982666016
+            ],
+            "q01": [
+                92.28515625,
+                -191.337890625,
+                -170.5078125,
+                19.599609375,
+                21.181640625,
+                -20.654296875,
+                -6.3773112297058105,
+                61.453125,
+                -192.568359375,
+                -174.05455078125,
+                -0.4819921874999995,
+                -12.748974609375,
+                -2.474103515625,
+                -5.1567763996124265
+            ],
+            "q99": [
+                92.373029296875,
+                -191.250017578125,
+                -170.33206640625,
+                19.77535546875,
+                21.269513671875,
+                -20.566423828125,
+                -6.232661572742463,
+                120.6509765625,
+                -61.27242187499999,
+                -63.379916015625,
+                71.925732421875,
+                1.8420996093750013,
+                54.832974609375,
+                223.6979402114868
+            ]
+        }
+    }
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
@@ -395,7 +513,7 @@ def control_loop(
             if policy is not None:
                 # Pretty ugly, but moving this code inside the policy makes it uglier to visualize
                 # the goal_gripper_proj key.
-
+                preprocessor, postprocessor = make_pi05_pre_post_processors(policy.config, dataset_stats)
                 if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
                     # Generate new goal prediction when queue is empty
                     # This code is specific to diffusion policy / kinect :(
@@ -478,16 +596,23 @@ def control_loop(
                         observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
 
                 observation["task"] = single_task
-                maybe_add_language_tokens(observation, policy)
-                pred_action, pred_action_eef = predict_action(
+                observation = preprocessor(observation)
+                pred_action = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
                 )
+                robot_adapter = policy.config.get_robot_adapter()
+
+
+                pred_action = postprocessor(pred_action)
+                action = robot_adapter.transform_action(pred_action, observation["observation.state"])
+                action_eef = robot_adapter.get_eef_action(pred_action)
                 # Action can eventually be clipped using `max_relative_target`,
                 # so action actually sent is saved in the dataset.
-                action = robot.send_action(pred_action)
+
+                action = robot.send_action(action)
                 action = {"action": action}
                 if robot.use_eef:
-                    action["action.right_eef_pose"] = pred_action_eef
+                    action["action.right_eef_pose"] = action_eef
 
         if dataset is not None:
             frame = {**observation, **action, "task": single_task}
