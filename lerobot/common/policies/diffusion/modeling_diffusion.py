@@ -108,6 +108,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         # queues are populated during rollout of the policy, they contain the n latest observations and actions
         self._queues = None
         self.latest_gripper_proj = {}
+        # For relative actions: save reference EEF pose for the current action chunk
+        self._relative_action_reference_eef = None
 
         self.diffusion = DiffusionModel(config)
 
@@ -181,6 +183,8 @@ class DiffusionPolicy(PreTrainedPolicy):
         actually measured from the first observation which (if `n_obs_steps` > 1) happened in the past.
         """
         state = batch['observation.state']
+        current_obs = batch[self.obs_key]
+
         batch = self.normalize_inputs(batch)
         if self.config.use_text_embedding:
             text = batch['task']
@@ -198,6 +202,10 @@ class DiffusionPolicy(PreTrainedPolicy):
             batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
             if self.config.use_text_embedding:
                 batch['task'] = text
+
+            # Save the reference observation for this action chunk (used for relative actions)
+            self._relative_action_reference_eef = current_obs.squeeze(0)  # (10,)
+
             actions = self.diffusion.generate_actions(batch)
 
             # TODO(rcadene): make above methods return output dictionary?
@@ -206,12 +214,15 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues[self.act_key].extend(actions.transpose(0, 1))
 
         action_raw = self._queues[self.act_key].popleft()
-        action = self.robot_adapter.transform_action(action_raw, state)
-        action_eef = self.robot_adapter.get_eef_action(action_raw)
+        action = self.robot_adapter.transform_action(action_raw, state, self._relative_action_reference_eef)
+        action_eef = self.robot_adapter.get_eef_action(action_raw, state, self._relative_action_reference_eef)
         return action, action_eef
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         """Run the batch through the model and compute the loss for training or validation."""
+        if self.config.action_space == "right_eef_relative":
+            batch = self.robot_adapter.compute_relative_actions(batch)
+
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original

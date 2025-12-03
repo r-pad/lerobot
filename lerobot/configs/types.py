@@ -29,6 +29,7 @@ class NormalizationMode(str, Enum):
     MIN_MAX = "MIN_MAX"
     MEAN_STD = "MEAN_STD"
     IDENTITY = "IDENTITY"
+    PER_TIMESTEP_PERCENTILE = "PER_TIMESTEP_PERCENTILE"  # Per-timestep normalization (TRI LBM paper)
 
 
 class DictLike(Protocol):

@@ -115,9 +115,12 @@ class DiffusionConfig(PreTrainedConfig):
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
+            # Type-level defaults (applied to all features of this type)
             "VISUAL": NormalizationMode.MEAN_STD,
             "STATE": NormalizationMode.MIN_MAX,
             "ACTION": NormalizationMode.MIN_MAX,
+            # Key-level overrides
+            "action.right_eef_pose_relative": NormalizationMode.PER_TIMESTEP_PERCENTILE,
         }
     )
 
