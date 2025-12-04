@@ -169,6 +169,10 @@ from lerobot.common.robot_devices.control_utils import (
 )
 from lerobot.common.robot_devices.robots.utils import Robot, make_robot_from_config
 from lerobot.common.robot_devices.utils import busy_wait, safe_disconnect
+from lerobot.common.utils.constants import (
+    OBS_LANGUAGE_ATTENTION_MASK,
+    OBS_LANGUAGE_TOKENS,
+)
 from lerobot.common.utils.utils import has_method, init_logging, log_say
 from lerobot.configs import parser
 
@@ -263,16 +267,38 @@ def record(
         # Create empty dataset or load existing saved episodes
         sanity_check_dataset_name(cfg.repo_id, cfg.policy)
 
+        extra_features = {}
         if cfg.policy is not None and cfg.policy.enable_goal_conditioning:
             with open(cfg.policy.hl_calibration_json) as f:
                 calibration_data = json.load(f)
             cam_names = calibration_data.keys()
-            extra_features = {f"observation.images.{cam}.goal_gripper_proj":
-                              {'dtype': 'video', 'shape': (720, 1280, 3), 
-                               'names': ['height', 'width', 'channels'], 
-                               'info': 'Projection of gripper pcd at goal position onto image'} for cam in cam_names}
-        else:
-            extra_features = {}
+            extra_features.update(
+                {
+                    f"observation.images.{cam}.goal_gripper_proj": {
+                        "dtype": "video",
+                        "shape": (720, 1280, 3),
+                        "names": ["height", "width", "channels"],
+                        "info": "Projection of gripper pcd at goal position onto image",
+                    }
+                    for cam in cam_names
+                }
+            )
+
+        if cfg.policy is not None and cfg.policy.type == "pi05":
+            tokenizer_max_length = getattr(cfg.policy, "tokenizer_max_length", 512)
+            language_features = {
+                OBS_LANGUAGE_TOKENS: {
+                    "dtype": "int64",
+                    "shape": (tokenizer_max_length,),
+                    "names": None,
+                },
+                OBS_LANGUAGE_ATTENTION_MASK: {
+                    "dtype": "bool",
+                    "shape": (tokenizer_max_length,),
+                    "names": None,
+                },
+            }
+            extra_features.update(language_features)
 
         dataset = LeRobotDataset.create(
             cfg.repo_id,

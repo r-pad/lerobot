@@ -1192,7 +1192,9 @@ class PI05Policy(PreTrainedPolicy):
             self._action_queue.extend(actions.transpose(0, 1))
         
         action_raw = self._action_queue.popleft()
-        return action_raw
+        action = self.robot_adapter.transform_action(action_raw, batch['observation.state'])
+        action_eef = self.robot_adapter.get_eef_action(action)
+        return action, action_eef
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]) -> Tensor:

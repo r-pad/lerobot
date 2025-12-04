@@ -45,6 +45,7 @@ from lerobot.common.utils.constants import (
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
 from lerobot.common.policies.pi05.processor_pi05 import make_pi05_pre_post_processors
+from lerobot.processor.tokenizer_processor import TokenizerProcessorStep
 
 def add_eef_pose(real_joints):
     eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
@@ -148,8 +149,8 @@ def predict_action(observation, policy, device, use_amp):
     return action, action_eef
 
 
-# _PI05_DEFAULT_TOKENIZER = "google/paligemma-3b-pt-224"
-_PI05_DEFAULT_TOKENIZER = "distilbert-base-uncased"
+_PI05_DEFAULT_TOKENIZER = "google/paligemma-3b-pt-224"
+# _PI05_DEFAULT_TOKENIZER = "distilbert-base-uncased"
 _LANGUAGE_TOKENIZER_CACHE: dict[tuple[str, int, str, str, bool], TokenizerProcessorStep] = {}
 
 
@@ -370,6 +371,12 @@ def control_loop(
 
     if dataset is not None and fps is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset['fps']} != {fps}).")
+
+    language_feature_keys = (OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_MASK)
+    dataset_supports_language = (
+        dataset is not None and all(key in dataset.features for key in language_feature_keys)
+    )
+    warned_missing_language_features = False
 
     timestamp = 0
     start_episode_t = time.perf_counter()
@@ -596,26 +603,38 @@ def control_loop(
                         observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
 
                 observation["task"] = single_task
-                observation = preprocessor(observation)
-                pred_action = predict_action(
+                # observation = preprocessor(observation)
+                maybe_add_language_tokens(observation, policy)
+                pred_action, pred_action_eef = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
                 )
                 robot_adapter = policy.config.get_robot_adapter()
 
 
-                pred_action = postprocessor(pred_action)
-                action = robot_adapter.transform_action(pred_action, observation["observation.state"])
-                action_eef = robot_adapter.get_eef_action(pred_action)
+                # pred_action = postprocessor(pred_action)
+                # action = robot_adapter.transform_action(pred_action, observation["observation.state"])
+                # action_eef = robot_adapter.get_eef_action(pred_action)
                 # Action can eventually be clipped using `max_relative_target`,
                 # so action actually sent is saved in the dataset.
 
-                action = robot.send_action(action)
+                action = robot.send_action(pred_action)
                 action = {"action": action}
                 if robot.use_eef:
-                    action["action.right_eef_pose"] = action_eef
+                    action["action.right_eef_pose"] = pred_action_eef
 
         if dataset is not None:
             frame = {**observation, **action, "task": single_task}
+            if not dataset_supports_language and (
+                OBS_LANGUAGE_TOKENS in frame or OBS_LANGUAGE_ATTENTION_MASK in frame
+            ):
+                frame.pop(OBS_LANGUAGE_TOKENS, None)
+                frame.pop(OBS_LANGUAGE_ATTENTION_MASK, None)
+                if not warned_missing_language_features:
+                    logging.warning(
+                        "Dataset metadata does not define language token features; "
+                        "dropping them before saving. Recreate the dataset to store these features."
+                    )
+                    warned_missing_language_features = True
             dataset.add_frame(frame)
 
         # TODO(Steven): This should be more general (for RemoteRobot instead of checking the name, but anyways it will change soon)
