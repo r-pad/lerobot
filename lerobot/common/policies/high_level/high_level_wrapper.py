@@ -4,13 +4,13 @@ from torchvision import transforms
 import PIL
 import torch
 from pytorch3d.ops import sample_farthest_points
-from pytorch3d.transforms import matrix_to_rotation_6d
+from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix
 from lerobot.common.policies.high_level.articubot import PointNet2_super, get_weighted_displacement, sample_from_gmm
 from lerobot.common.policies.high_level.dino_heatmap import DinoHeatmapNetwork, sample_from_heatmap
 from lerobot.common.policies.high_level.dino_3dgp import Dino3DGPNetwork, sample_from_gmm_3dgp, get_weighted_prediction_3dgp
 import wandb
 from transformers import AutoModel, AutoProcessor
-from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd
+from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd, render_aloha_gripper_mesh
 import os
 from google import genai
 from lerobot.common.policies.high_level.classify_utils import setup_client, generate_prompt_for_current_subtask, call_gemini_with_retry, TASK_SPEC, EXAMPLES
@@ -141,6 +141,7 @@ class HighLevelWrapper:
         self.last_pcd_rgb = None
         self.last_gripper_pcd = None
         self.last_goal_prediction = None
+        self.last_goal_gripper_mesh = None
 
     def _get_gripper_pcd(self, robot_type, robot_kwargs):
         """Extract gripper point cloud for different robot types"""
@@ -201,6 +202,41 @@ class HighLevelWrapper:
         gripper_token = np.concatenate([gripper_pos, rotation_6d, [gripper_width]])
 
         return gripper_token
+
+    def _compute_goal_gripper_mesh(self, goal_prediction, gripper_token, joint_state, robot_type):
+        """
+        Transform gripper mesh from current pose to goal pose for visualization.
+
+        Args:
+            goal_prediction: (N, 3) array of predicted goal points
+            gripper_token: (10,) array [3 position, 6 rotation (6d), 1 gripper width]
+            joint_state: Current joint state for rendering the mesh
+            robot_type: Type of robot
+
+        Returns:
+            trimesh object transformed to goal pose
+        """
+        if robot_type != "aloha":
+            raise NotImplementedError(f"Goal gripper mesh visualization not implemented for robot_type={robot_type}")
+        # Get gripper mesh at current position in world frame
+        gripper_mesh = render_aloha_gripper_mesh(np.eye(4), joint_state)
+
+        # Build current gripper pose matrix
+        current_pose_mat = np.eye(4)
+        current_pose_mat[:3, :3] = rotation_6d_to_matrix(torch.from_numpy(gripper_token[3:9])).numpy()
+        current_pose_mat[:3, 3] = gripper_token[:3]
+
+        # Build goal gripper pose matrix from predicted points
+        goal_pose = self._gripper_pcd_to_token(goal_prediction)
+        goal_pose_mat = np.eye(4)
+        goal_pose_mat[:3, :3] = rotation_6d_to_matrix(torch.from_numpy(goal_pose[3:9])).numpy()
+        goal_pose_mat[:3, 3] = goal_pose[:3]
+
+        # Transform mesh from current pose to goal pose
+        gripper_mesh.apply_transform(np.linalg.inv(current_pose_mat))
+        gripper_mesh.apply_transform(goal_pose_mat)
+
+        return gripper_mesh
 
     def _get_text_embedding(self, text, rgb, robot_type, robot_kwargs):
         """Get text embedding with optional Gemini preprocessing and caching"""
@@ -361,6 +397,13 @@ class HighLevelWrapper:
 
         # Store for rerun visualization
         self.last_goal_prediction = goal_prediction
+
+        # Compute goal gripper mesh for visualization
+        if self.config.use_gripper_token:
+            joint_state = robot_kwargs["observation.state"]
+            self.last_goal_gripper_mesh = self._compute_goal_gripper_mesh(
+                goal_prediction, gripper_token, joint_state, robot_type
+            )
 
         return goal_prediction
 

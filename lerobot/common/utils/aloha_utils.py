@@ -248,6 +248,24 @@ def render_aloha_gripper_pcd(cam_to_world, joint_state, sample_n_points=500):
     urdf_cam3dcoords = (world_to_cam @ gripper_urdf_3d_pos)[:, :3].squeeze(2)
     return urdf_cam3dcoords.astype(np.float32)
 
+def render_aloha_gripper_mesh(cam_to_world, joint_state):
+    """
+    Run FK, extract gripper mesh from robot URDF, transform to camera frame
+    """
+    data = mujoco.MjData(ALOHA_MODEL)
+    Q = convert_real_joints(joint_state)
+    data.qpos = Q
+    mujoco.mj_forward(ALOHA_MODEL, data)
+
+    world_to_cam = np.linalg.inv(cam_to_world)
+    meshes = get_right_gripper_mesh(ALOHA_MODEL, data)
+    mesh = combine_meshes(meshes)
+    mesh_ = trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.triangles)
+    )
+    mesh_.apply_transform(world_to_cam)
+    return mesh_
+
 def get_right_gripper_mesh(mj_model, mj_data):
     """
     Extract the visual meshes of the right gripper from the Aloha MJCF model.

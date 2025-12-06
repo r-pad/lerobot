@@ -408,13 +408,24 @@ def control_loop(
 
                 # Gripper point cloud
                 if hl_wrapper.last_gripper_pcd is not None:
-                    rr.log("high_level/gripper_pointcloud", 
-                           rr.Points3D(hl_wrapper.last_gripper_pcd, colors=[255, 0, 0]))
+                    rr.log("high_level/gripper_pointcloud",
+                           rr.Points3D(hl_wrapper.last_gripper_pcd, colors=[0, 255, 0]))
 
                 if hl_wrapper.last_goal_prediction is not None:
                     # Goal prediction
                     rr.log("high_level/goal_prediction",
-                        rr.Points3D(hl_wrapper.last_goal_prediction, colors=[0, 255, 0], radii=0.005))
+                        rr.Points3D(hl_wrapper.last_goal_prediction, colors=[255, 0, 0], radii=0.01))
+
+                # Goal gripper mesh
+                if hl_wrapper.last_goal_gripper_mesh is not None:
+                    mesh = hl_wrapper.last_goal_gripper_mesh
+                    LIGHT_PURPLE = (0.25098039, 0.274117647, 0.65882353)
+                    rr.log("high_level/goal_gripper_mesh", rr.Mesh3D(
+                        vertex_positions=mesh.vertices,
+                        triangle_indices=mesh.faces,
+                        vertex_normals=mesh.vertex_normals,
+                        vertex_colors=np.tile(LIGHT_PURPLE, (len(mesh.vertices), 1))
+                    ))
 
         if fps is not None:
             dt_s = time.perf_counter() - start_loop_t
