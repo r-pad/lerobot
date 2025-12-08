@@ -289,7 +289,7 @@ def record(
     # Load pretrained policy
     policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
 
-    stats = load_stats(Path('/home/kyutae/Projects/lerobot/checkpoints/20000/assets/trossen/norm_stats.json'))
+    stats = load_stats(Path('/home/kyutae/Projects/lerobot/checkpoints/20000/dataset_stats.json'))
     if policy is not None:
         preprocessor, postprocessor = make_pre_post_processors(
             policy_cfg=cfg.policy,

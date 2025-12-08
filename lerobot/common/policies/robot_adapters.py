@@ -53,6 +53,8 @@ class AlohaAdapter(RobotAdapter):
             # Force left arm to rest at predefined pose
             action_joint[:, :9] = self.rest_state[:, :9]
             return action_joint
+        elif self.action_space == "joint":
+            action[:, :9] = self.rest_state[:, :9]
         return action
 
     def get_eef_action(self, action: torch.Tensor) -> torch.Tensor:

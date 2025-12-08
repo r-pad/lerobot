@@ -483,9 +483,10 @@ def control_loop(
                         observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
 
                 observation["task"] = single_task
-                maybe_add_language_tokens(observation, policy)
+                observation_for_policy = copy(observation)
+                maybe_add_language_tokens(observation_for_policy, policy)
                 pred_action, pred_action_eef = predict_action(
-                    observation, policy, get_safe_torch_device(policy.config.device), preprocessor, postprocessor, policy.config.use_amp
+                    observation_for_policy, policy, get_safe_torch_device(policy.config.device), preprocessor, postprocessor, policy.config.use_amp
                 )
                 # Action can eventually be clipped using `max_relative_target`,
                 # so action actually sent is saved in the dataset.
