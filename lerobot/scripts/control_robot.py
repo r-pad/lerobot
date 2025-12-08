@@ -142,7 +142,7 @@ from dataclasses import asdict
 from pprint import pformat
 
 import rerun as rr
-
+from pathlib import Path
 # from safetensors.torch import load_file, save_file
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.datasets.utils import load_stats
@@ -289,14 +289,13 @@ def record(
     # Load pretrained policy
     policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
 
-    stats = load_stats('/home/ktsim/Projects/rpad_lerobot/20000/dataset_stats.json')
+    stats = load_stats(Path('/home/kyutae/Projects/lerobot/checkpoints/20000/assets/trossen/norm_stats.json'))
     if policy is not None:
         preprocessor, postprocessor = make_pre_post_processors(
             policy_cfg=cfg.policy,
-            dataset_stats=dataset.stats,
+            dataset_stats=stats,
         )
 
-    breakpoint()
     if not robot.is_connected:
         robot.connect()
 

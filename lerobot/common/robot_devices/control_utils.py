@@ -43,6 +43,7 @@ from lerobot.common.utils.constants import (
     OBS_LANGUAGE_TOKENS,
     OBS_STATE,
 )
+from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
 from lerobot.processor.tokenizer_processor import TokenizerProcessorStep
@@ -119,7 +120,7 @@ def predict_action(
     observation: dict[str, np.ndarray],
     policy: PreTrainedPolicy,
     device: torch.device,
-    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    preprocessor: PolicyProcessorPipeline[dict[str, any], dict[str, any]],
     postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
     use_amp: bool,
     task: str | None = None,
@@ -132,27 +133,19 @@ def predict_action(
     ):
                 # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
         observation = prepare_observation_for_inference(observation, device, task, robot_type)
-        observation = preprocessor(observation)
 
         # Compute the next action with the policy
         # based on the current observation
-        action = policy.select_action(observation)
+        action, action_eef = policy.select_action(observation, preprocessor, postprocessor)
 
-        action = postprocessor(action)
+        # Remove batch dimension
+        action, action_eef = action.squeeze(0), action_eef.squeeze(0)
 
+        # Move to cpu, if not already the case
+        action = action.to("cpu")
+        action_eef = action_eef.to("cpu")
 
-    # Compute the next action with the policy
-    # based on the current observation
-    action, action_eef = policy.select_action(observation)
-
-    # Remove batch dimension
-    action, action_eef = action.squeeze(0), action_eef.squeeze(0)
-
-    # Move to cpu, if not already the case
-    action = action.to("cpu")
-    action_eef = action_eef.to("cpu")
-
-    return action, action_eef
+        return action, action_eef
 
 
 _PI05_DEFAULT_TOKENIZER = "google/paligemma-3b-pt-224"
