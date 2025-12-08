@@ -50,6 +50,7 @@ from lerobot.common.utils.constants import (
     OBS_LANGUAGE_TOKENS,
     OPENPI_ATTENTION_MASK_VALUE,
 )
+from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 
 
 class ActionSelectKwargs(TypedDict, total=False):
@@ -885,6 +886,9 @@ class PI05Policy(PreTrainedPolicy):
         super().__init__(config)
         config.validate_features()
         self.config = config
+        self.robot_adapter = config.get_robot_adapter()
+        self.obs_key = self.robot_adapter.get_obs_key()
+        self.act_key = self.robot_adapter.get_act_key()
 
         # Initialize the core PI05 model
         self.init_rtc_processor()
@@ -1174,21 +1178,29 @@ class PI05Policy(PreTrainedPolicy):
         return actions
 
     @torch.no_grad()
-    def select_action(self, batch: dict[str, Tensor]) -> Tensor:
+    def select_action(self, batch: dict[str, Tensor], preprocessor: PolicyProcessorPipeline[dict[str, any], dict[str, any]], postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction]) -> Tensor:
         """Select a single action given environment observations."""
         assert not self._rtc_enabled(), (
             "RTC is not supported for select_action, use it with predict_action_chunk"
         )
 
         self.eval()
+        batch = preprocessor(batch)
 
-        # Action queue logic for n_action_steps > 1
         if len(self._action_queue) == 0:
             actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
             # Transpose to get shape (n_action_steps, batch_size, action_dim)
             self._action_queue.extend(actions.transpose(0, 1))
 
-        return self._action_queue.popleft()
+        # Compute the next action with the policy
+        # based on the current observation
+        action = self._action_queue.popleft()
+        action = postprocessor(action)
+
+        action = self.robot_adapter.transform_action(action, batch['observation.state'])
+        action_eef = self.robot_adapter.get_eef_action(action)
+        # Action queue logic for n_action_steps > 1
+        return action, action_eef
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]) -> Tensor:

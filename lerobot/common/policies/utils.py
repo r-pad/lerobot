@@ -24,9 +24,9 @@ from torch import nn
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType, PolicyFeature
-from lerobot.datasets.utils import build_dataset_frame
+from lerobot.common.datasets.utils import build_dataset_frame
 from lerobot.processor import PolicyAction, RobotAction, RobotObservation
-from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.common.utils.constants import ACTION, OBS_STR
 
 
 def populate_queues(
@@ -125,16 +125,19 @@ def prepare_observation_for_inference(
         inference, residing on the target device. Image tensors are reshaped
         to (C, H, W) and normalized to a [0, 1] range.
     """
+    # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
     for name in observation:
-        observation[name] = torch.from_numpy(observation[name])
+        if type(observation[name]) == str: observation[name] = [observation[name]]; continue
         if "image" in name:
-            observation[name] = observation[name].type(torch.float32) / 255
+            if observation[name].dtype == torch.uint8:
+                observation[name] = observation[name].type(torch.float32) / 255
+            elif observation[name].dtype == torch.uint16: # depth
+                observation[name] = observation[name].type(torch.float32) / 1000.
+            else:
+                raise NotImplementedError
             observation[name] = observation[name].permute(2, 0, 1).contiguous()
         observation[name] = observation[name].unsqueeze(0)
         observation[name] = observation[name].to(device)
-
-    observation["task"] = task if task else ""
-    observation["robot_type"] = robot_type if robot_type else ""
 
     return observation
 
