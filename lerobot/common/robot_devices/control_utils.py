@@ -35,6 +35,7 @@ from lerobot.common.datasets.image_writer import safe_stop_image_writer
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.datasets.utils import get_features_from_robot
 from lerobot.common.policies.pretrained import PreTrainedPolicy
+from lerobot.common.policies.utils import prepare_observation_for_inference
 from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.constants import (
@@ -114,36 +115,42 @@ def is_headless():
         return True
 
 
-def predict_action(observation, policy, device, use_amp):
+def predict_action(
+    observation: dict[str, np.ndarray],
+    policy: PreTrainedPolicy,
+    device: torch.device,
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
+    use_amp: bool,
+    task: str | None = None,
+    robot_type: str | None = None,
+):
     observation = copy(observation)
     with (
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
     ):
-        # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
-        for name in observation:
-            if type(observation[name]) == str: observation[name] = [observation[name]]; continue
-            if "image" in name:
-                if observation[name].dtype == torch.uint8:
-                    observation[name] = observation[name].type(torch.float32) / 255
-                elif observation[name].dtype == torch.uint16: # depth
-                    observation[name] = observation[name].type(torch.float32) / 1000.
-                else:
-                    raise NotImplementedError
-                observation[name] = observation[name].permute(2, 0, 1).contiguous()
-            observation[name] = observation[name].unsqueeze(0)
-            observation[name] = observation[name].to(device)
+                # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
+        observation = prepare_observation_for_inference(observation, device, task, robot_type)
+        observation = preprocessor(observation)
 
         # Compute the next action with the policy
         # based on the current observation
-        action, action_eef = policy.select_action(observation)
+        action = policy.select_action(observation)
 
-        # Remove batch dimension
-        action, action_eef = action.squeeze(0), action_eef.squeeze(0)
+        action = postprocessor(action)
 
-        # Move to cpu, if not already the case
-        action = action.to("cpu")
-        action_eef = action_eef.to("cpu")
+
+    # Compute the next action with the policy
+    # based on the current observation
+    action, action_eef = policy.select_action(observation)
+
+    # Remove batch dimension
+    action, action_eef = action.squeeze(0), action_eef.squeeze(0)
+
+    # Move to cpu, if not already the case
+    action = action.to("cpu")
+    action_eef = action_eef.to("cpu")
 
     return action, action_eef
 
@@ -325,6 +332,8 @@ def record_episode(
     policy,
     fps,
     single_task,
+    preprocessor,
+    postprocessor,
 ):
     control_loop(
         robot=robot,
@@ -336,6 +345,8 @@ def record_episode(
         fps=fps,
         teleoperate=policy is None,
         single_task=single_task,
+        preprocessor=preprocessor,
+        postprocessor=postprocessor,
     )
 
 
@@ -350,6 +361,8 @@ def control_loop(
     policy: PreTrainedPolicy = None,
     fps: int | None = None,
     single_task: str | None = None,
+    preprocessor=None,
+    postprocessor=None,
 ):
     # TODO(rcadene): Add option to record logs
     if not robot.is_connected:
@@ -479,7 +492,7 @@ def control_loop(
                 observation["task"] = single_task
                 maybe_add_language_tokens(observation, policy)
                 pred_action, pred_action_eef = predict_action(
-                    observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
+                    observation, policy, get_safe_torch_device(policy.config.device), preprocessor, postprocessor, policy.config.use_amp
                 )
                 # Action can eventually be clipped using `max_relative_target`,
                 # so action actually sent is saved in the dataset.

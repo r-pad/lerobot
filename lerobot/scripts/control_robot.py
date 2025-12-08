@@ -145,7 +145,8 @@ import rerun as rr
 
 # from safetensors.torch import load_file, save_file
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.common.policies.factory import make_policy
+from lerobot.common.datasets.utils import load_stats
+from lerobot.common.policies.factory import make_policy, make_pre_post_processors
 from lerobot.common.robot_devices.control_configs import (
     CalibrateControlConfig,
     ControlConfig,
@@ -288,6 +289,13 @@ def record(
     # Load pretrained policy
     policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
 
+    stats = load_stats('/home/ktsim/Projects/rpad_lerobot/20000/dataset_stats.json')
+    if policy is not None:
+        preprocessor, postprocessor = make_pre_post_processors(
+            policy_cfg=cfg.policy,
+            dataset_stats=dataset.stats,
+        )
+
     breakpoint()
     if not robot.is_connected:
         robot.connect()
@@ -320,6 +328,8 @@ def record(
             policy=policy,
             fps=cfg.fps,
             single_task=cfg.single_task,
+            preprocessor=preprocessor,
+            postprocessor=postprocessor,
         )
 
         # Execute a few seconds without recording to give time to manually reset the environment
