@@ -46,13 +46,14 @@ class AlohaAdapter(RobotAdapter):
 
         if self.action_space == "right_eef":
             # FK on current state
-            forward_kinematics(self.config, state[0])
+            # forward_kinematics(self.config, state[0])
+            forward_kinematics(self.config, state)
 
             # IK to get joint action
-            action_joint = inverse_kinematics(self.config, action.squeeze())[None].float()
+            action_joint = inverse_kinematics(self.config, action)[None].float()
             # Force left arm to rest at predefined pose
             action_joint[:, :9] = self.rest_state[:, :9]
-            return action_joint
+            return action_joint.squeeze()
         return action
 
     def get_eef_action(self, action: torch.Tensor) -> torch.Tensor:

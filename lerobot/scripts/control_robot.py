@@ -261,7 +261,7 @@ def record(
         sanity_check_dataset_robot_compatibility(dataset, robot, cfg.fps, cfg.video)
     else:
         # Create empty dataset or load existing saved episodes
-        sanity_check_dataset_name(cfg.repo_id, cfg.policy)
+        # sanity_check_dataset_name(cfg.repo_id, cfg.policy)
 
         if cfg.policy is not None and cfg.policy.enable_goal_conditioning:
             with open(cfg.policy.hl_calibration_json) as f:
@@ -286,12 +286,34 @@ def record(
         )
 
     # Load pretrained policy
-    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_train_longer_keep_old_normalizer" 
+    checkpoint_name = "epoch-300.ckpt"
+    from lerobot.scripts.yufei_policy_utils import load_low_level_policy, load_multitask_high_level_model
+    low_level_policy = load_low_level_policy(exp_dir, checkpoint_name)
+    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-04fine_tune_our_on_sriram_lr_decay/model_15001.pth"
+    high_level_policy, _ = load_multitask_high_level_model(model_path)
+    import torch
+    siglip_text_features = torch.load(os.path.join(os.environ['PROJECT_DIR'], "siglip_text_features_w_pick_and_place.pt"))
+    siglip_text_features = siglip_text_features['values']
+    from lerobot.common.policies.robot_adapters import AlohaAdapter
+    robot_adapter = AlohaAdapter(action_space="right_eef")
+    from collections import deque
+    cat_idx = 13
+    policy = {
+        "high_level": high_level_policy,
+        "low_level": low_level_policy,
+        "cat_embedding": siglip_text_features[cat_idx].float().to("cuda"),
+        "cat_idx": cat_idx,
+        "robot_adapter": robot_adapter,
+        "action_queue": deque(),
+    }
+    # import pdb; pdb.set_trace()
 
     if not robot.is_connected:
         robot.connect()
 
     listener, events = init_keyboard_listener()
+    # import pdb; pdb.set_trace()
 
     # Execute a few seconds without recording to:
     # 1. teleoperate the robot to move it in starting position if no policy provided,
@@ -300,15 +322,30 @@ def record(
     enable_teleoperation = policy is None
     log_say("Warmup record", cfg.play_sounds)
     warmup_record(robot, events, enable_teleoperation, cfg.warmup_time_s, cfg.display_data, cfg.fps)
+    # import pdb; pdb.set_trace()
 
     if has_method(robot, "teleop_safety_stop"):
         robot.teleop_safety_stop()
 
     recorded_episodes = 0
+    # import pdb; pdb.set_trace()
     while True:
         if recorded_episodes >= cfg.num_episodes:
             break
 
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        print("going to record episode!!!!!!!!!!!!!!!")
+        # import pdb; pdb.set_trace()
         log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
         record_episode(
             robot=robot,
@@ -417,13 +454,33 @@ def _init_rerun(control_config: ControlConfig, session_name: str = "lerobot_cont
             memory_limit = os.getenv("LEROBOT_RERUN_MEMORY_LIMIT", "10%")
             rr.spawn(memory_limit=memory_limit)
 
-
+"""
+python lerobot/scripts/control_robot.py 
+    --robot.type=aloha 
+    --control.type=record 
+    --control.fps=30 
+    --control.single_task="Grasp mug and place it on the table." 
+    --control.repo_id=sriramsk/eval_aloha_eef_rgb_0709_heatmapGoal 
+    --control.num_episodes=1 
+    --control.reset_time_s=5 
+    --control.warmup_time_s=3 
+    --robot.cameras='{"cam_azure_kinect": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true}}' 
+    --robot.use_eef=true 
+    --control.push_to_hub=false 
+    --control.policy.path=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal/checkpoints/last/pretrained_model/ 
+    --control.display_data=true 
+    --control.episode_time_s=120
+"""
 @parser.wrap()
 def control_robot(cfg: ControlPipelineConfig):
+    # import pdb; pdb.set_trace()
     init_logging()
+    # import pdb; pdb.set_trace()
     logging.info(pformat(asdict(cfg)))
 
+    # import pdb; pdb.set_trace()
     robot = make_robot_from_config(cfg.robot)
+    # import pdb; pdb.set_trace()
 
     # TODO(Steven): Blueprint for fixed window size
 
@@ -433,7 +490,9 @@ def control_robot(cfg: ControlPipelineConfig):
         _init_rerun(control_config=cfg.control, session_name="lerobot_control_loop_teleop")
         teleoperate(robot, cfg.control)
     elif isinstance(cfg.control, RecordControlConfig):
+        # import pdb; pdb.set_trace()
         _init_rerun(control_config=cfg.control, session_name="lerobot_control_loop_record")
+        # import pdb; pdb.set_trace()
         record(robot, cfg.control)
     elif isinstance(cfg.control, ReplayControlConfig):
         replay(robot, cfg.control)

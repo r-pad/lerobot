@@ -29,6 +29,8 @@ import rerun as rr
 import torch
 from deepdiff import DeepDiff
 from termcolor import colored
+from PIL import Image
+from termcolor import cprint
 
 from lerobot.common.datasets.image_writer import safe_stop_image_writer
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -38,6 +40,10 @@ from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
+from lerobot.scripts.yufei_policy_utils import compute_pcd, get_gripper_4_points_from_sriram_data, \
+    get_4_points_from_gripper_pos_orient, infer_multitask_high_level_model, low_level_policy_infer, \
+    get_aloha_future_eef_poses_from_delta_actions
+from matplotlib import pyplot as plt
 
 def add_eef_pose(real_joints):
     eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
@@ -231,7 +237,8 @@ def control_loop(
     display_data=False,
     dataset: LeRobotDataset | None = None,
     events=None,
-    policy: PreTrainedPolicy = None,
+    policy=None,
+    # policy: PreTrainedPolicy = None,
     fps: int | None = None,
     single_task: str | None = None,
 ):
@@ -258,7 +265,7 @@ def control_loop(
     start_episode_t = time.perf_counter()
 
     # Controls starts, if policy is given it needs cleaning up
-    if policy is not None:
+    if policy is not None and has_method(policy, "reset"):
         policy.reset()
 
     while timestamp < control_time_s:
@@ -275,7 +282,7 @@ def control_loop(
                 observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
             action = None
 
-            if policy is not None:
+            if policy is not None and type(policy) != dict:
                 # Pretty ugly, but moving this code inside the policy makes it uglier to visualize
                 # the goal_gripper_proj key.
 
@@ -371,16 +378,152 @@ def control_loop(
                 if robot.use_eef:
                     action["action.right_eef_pose"] = pred_action_eef
 
+            ### NOTE: write my own inference of the high and low-level policy
+            if type(policy) == dict:
+                high_level_policy, low_level_policy = policy['high_level'], policy['low_level']
+                action_queue = policy['action_queue']
+
+                # import pdb; pdb.set_trace()
+                if len(action_queue) == 0:
+                    ### NOTE: get the scene pcd from the depth camera
+                    depth_keys = ["observation.images.cam_azure_kinect_front.transformed_depth", "observation.images.cam_azure_kinect_back.transformed_depth"]
+                    # import pdb; pdb.set_trace()
+                    all_cam_depth_images = []
+                    for depth_key in depth_keys:
+                        depth = Image.fromarray(observation[depth_key].numpy()[:, :, 0])
+                        depth = np.asarray(depth)
+                        all_cam_depth_images.append(depth)
+                    
+                    # import pdb; pdb.set_trace()
+                    # fig, axes = plt.subplots(1, 2)
+                    # axes = axes.reshape(-1)
+                    # axes[0].imshow(all_cam_depth_images[0])    
+                    # axes[1].imshow(all_cam_depth_images[1])
+                    # plt.show()    
+                    # plt.close("all")
+                    
+                    # import pdb; pdb.set_trace()
+                    scene_pcd, scene_pcd_in_table_center = compute_pcd(all_cam_depth_images, num_points=4500)
+                  
+                    
+                    # import pdb; pdb.set_trace()
+                    ### NOTE: get the gripper 4 points
+                    right_eef_pose = observation['observation.right_eef_pose']
+                    cprint(f"current eef position: { right_eef_pose[6:9]}", "red")
+                    cprint(f"current eef position: { right_eef_pose[6:9]}", "red")
+                    cprint(f"current eef position: { right_eef_pose[6:9]}", "red")
+                    cprint(f"current eef position: { right_eef_pose[6:9]}", "red")
+                    eef_pos, eef_rot_6d, eef_gripper_width, eef_pos_robot_base, eef_rot_matrix_robot_base, eef_rot_6d_robot_base, eef_gripper_width_franka = get_gripper_4_points_from_sriram_data(right_eef_pose)
+                    agent_pos = np.array([*eef_pos_robot_base, *eef_rot_6d_robot_base, *eef_gripper_width_franka])
+                    eef_4_points = get_4_points_from_gripper_pos_orient(eef_pos_robot_base, eef_rot_matrix_robot_base, eef_gripper_width_franka)
+                    
+                    high_level_input_np = np.concatenate([scene_pcd, eef_4_points], axis=0)  # (N, 3)
+                    high_level_input = torch.from_numpy(high_level_input_np).float().unsqueeze(0).cuda()
+
+                    # import pdb; pdb.set_trace()
+                    with torch.no_grad():
+                        high_level_predict = infer_multitask_high_level_model(
+                            high_level_input, high_level_policy, policy['cat_embedding']
+                        )  # 1, 4, 3 ## torch tensor
+
+                   
+                    ### TODO: figure out how to use the history here
+                    # import pdb; pdb.set_trace()
+                    with torch.no_grad():
+                        low_level_action = low_level_policy_infer(
+                            torch.from_numpy(scene_pcd).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1,1),
+                            torch.from_numpy(agent_pos).to('cuda').float().unsqueeze(0).unsqueeze(1).repeat(1,2,1), 
+                            high_level_predict.float().to('cuda').unsqueeze(1).repeat(1, 2, 1, 1),
+                            torch.from_numpy(eef_4_points).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1,1),
+                            low_level_policy,
+                            cat_idx=policy['cat_idx']
+                        )
+
+                        low_level_action_np = low_level_action.cpu().numpy().reshape(-1, 10)
+                        delta_pos_mag = np.linalg.norm(low_level_action_np[:, :3], axis=1)
+                        print("delta pos magnitude is: ", delta_pos_mag)
+
+                    
+                    ### convert this low-level action back to the aloha eef pose
+                    ### TODO: note this max_relative_target thing
+                    # import pdb; pdb.set_trace()
+                    aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths, robot_base_eef_pos = get_aloha_future_eef_poses_from_delta_actions(
+                        low_level_action, 
+                        eef_pos_robot_base, 
+                        eef_rot_matrix_robot_base, 
+                        eef_gripper_width_franka
+                    )
+
+                    ### 3d plot the scene pcd
+                    fig = plt.figure(figsize=(10, 5))
+
+                    ax = fig.add_subplot(1, 2, 1, projection='3d')
+                    ax.scatter(scene_pcd[:,0], scene_pcd[:,1], scene_pcd[:,2], s=1, color='grey')
+                    ax.scatter(eef_4_points[:,0], eef_4_points[:,1], eef_4_points[:,2], s=50, color='green')
+                    high_level_predict_np = high_level_predict.cpu().numpy()[0]
+                    ax.scatter(high_level_predict_np[:,0], high_level_predict_np[:,1], high_level_predict_np[:,2], s=50, color='red')
+                    ax.plot(robot_base_eef_pos[:,0], robot_base_eef_pos[:,1], robot_base_eef_pos[:,2], color='blue')
+                    ax.set_xlabel("X")
+                    ax.set_ylabel("Y")
+                    ax.set_zlabel("Z")
+                    ax.scatter([0], [0], [0], color='red', s=100)
+
+                    ax2 = fig.add_subplot(1, 2, 2, projection='3d')
+                    ax2.scatter(scene_pcd_in_table_center[:,0], scene_pcd_in_table_center[:,1], scene_pcd_in_table_center[:,2], s=1, color='grey')
+                    # ax.scatter(eef_4_points[:,0], eef_4_points[:,1], eef_4_points[:,2], s=50, color='green')
+                    # high_level_predict_np = high_level_predict.cpu().numpy()[0]
+                    # ax.scatter(high_level_predict_np[:,0], high_level_predict_np[:,1], high_level_predict_np[:,2], s=50, color='red')
+                    ax2.plot(aloha_world_eef_pos[:,0], aloha_world_eef_pos[:,1], aloha_world_eef_pos[:,2], color='blue')
+                    ax2.set_xlabel("X")
+                    ax2.set_ylabel("Y")
+                    ax2.set_zlabel("Z")
+                    ax2.scatter([0], [0], [0], color='red', s=100)
+
+                    plt.show()
+                    
+                    
+                    
+                    
+                    ### TODO: figure out what command is sent to the robot
+                    # import pdb; pdb.set_trace()
+                    all_aloha_eef_poses = []
+                    for  pos, orient_6d, gripper_width in zip(aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths):
+                        eef_pose = [*orient_6d, *pos, gripper_width]
+                        eef_pose = torch.tensor(eef_pose).float()
+                        all_aloha_eef_poses.append(eef_pose)
+
+                    # import pdb; pdb.set_trace()
+                    cprint(f"commanded future eef position: { aloha_world_eef_pos}", "green")
+
+
+                
+                    # import pdb; pdb.set_trace()
+                    robot_adapter = policy.get('robot_adapter', None)
+                    state = observation['observation.state']
+                    # import pdb; pdb.set_trace()
+                    aloha_joint_actions = [robot_adapter.transform_action(x, state) for x in all_aloha_eef_poses]
+                    for aja in aloha_joint_actions:
+                        action_queue.append(aja)
+                        
+                action_joint = action_queue.popleft()
+                # import pdb; pdb.set_trace()
+                action_joint = robot.send_action(action_joint)
+                action = {"action": action_joint}
+                if robot.use_eef:
+                    action["action.right_eef_pose"] = np.zeros(10, dtype=np.float32) ### TODO: record the true eef pose
+
+                
+               
         if dataset is not None:
             frame = {**observation, **action, "task": single_task}
             dataset.add_frame(frame)
 
         # TODO(Steven): This should be more general (for RemoteRobot instead of checking the name, but anyways it will change soon)
         if (display_data and not is_headless()) or (display_data and robot.robot_type.startswith("lekiwi")):
-            if action is not None:
-                for k, v in action.items():
-                    for i, vv in enumerate(v):
-                        rr.log(f"sent_{k}_{i}", rr.Scalar(vv.numpy()))
+            # if action is not None:
+            #     for k, v in action.items():
+            #         for i, vv in enumerate(v):
+            #             rr.log(f"sent_{k}_{i}", rr.Scalar(vv.numpy()))
 
             image_keys = [key for key in observation if "image" in key]
             for key in image_keys:

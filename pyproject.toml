@@ -64,7 +64,7 @@ dependencies = [
     "packaging>=24.2",
     "av>=14.2.0",
     "pymunk>=6.6.0",
-    "pynput>=1.7.7",
+    # "pynput>=1.7.7",
     "pyzmq>=26.2.1",
     "rerun-sdk>=0.21.0,<0.24.0",
     "termcolor>=2.4.0",
@@ -100,8 +100,8 @@ dev = ["pre-commit>=3.7.0", "debugpy>=1.8.1"]
 dora = [
     "gym-dora @ git+https://github.com/dora-rs/dora-lerobot.git#subdirectory=gym_dora ; python_version < '4.0'",
 ]
-dynamixel = ["dynamixel-sdk>=3.7.31", "pynput>=1.7.7"]
-feetech = ["feetech-servo-sdk>=1.0.0", "pynput>=1.7.7"]
+dynamixel = ["dynamixel-sdk>=3.7.31"]
+feetech = ["feetech-servo-sdk>=1.0.0"]
 pi0 = ["transformers>=4.48.0"]
 pusht = ["gym-pusht>=0.1.5 ; python_version < '4.0'"]
 stretch = [
@@ -168,11 +168,15 @@ gcc = "11.*"
 gxx = "11.*"
 cuda-toolkit = "12.4.*"
 ffmpeg = ">=6,<8"
+jupyterlab = ">=4.5.0,<5"
+ipykernel = ">=7.1.0,<8"
+ipympl = ">=0.9.8,<0.10"
 
 [tool.pixi.pypi-dependencies]
 lerobot = { path = ".", editable = true }
 
 [tool.pixi.environments]
+# default = { solve-group = "default" }
 default = { features = ["dynamixel"], solve-group = "default" }
 # aloha = { features = ["aloha"], solve-group = "default" }
 # dev = { features = ["dev"], solve-group = "default" }
@@ -198,3 +202,4 @@ pip install git+https://github.com/facebookresearch/pytorch3d.git@stable --no-bu
 install-k4a = """
 CPLUS_INCLUDE_PATH=/usr/include:$CPLUS_INCLUDE_PATH CC=/usr/bin/gcc CXX=/usr/bin/g++ pip install --no-build-isolation --verbose --no-binary :all: pyk4a==1.5.0
 """
+install-pynput = "CC=/usr/bin/gcc CXX=/usr/bin/g++ pip install pynput==1.7.7"

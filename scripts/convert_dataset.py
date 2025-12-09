@@ -39,8 +39,20 @@ def R_y(deg):
         [-s, 0,  c],
     ])
 
+def R_z(deg):
+    theta = np.deg2rad(deg)
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([
+        [ c, s,  0],
+        [ -s, c,  0],
+        [0, 0,  1],
+    ])
+
+
 # Fixed transform: viper frame → franka frame
-R_fv = R_y(-90.0) 
+# R_fv = R_y(-90.0) 
+R_vf_y = R_y(90.0)
+R_vf_z = R_z(180)
 
 def transform_from_table_center_to_robot_base(xyz_in_table_center):
     # xyz_robot_base = xyz_in_table_center - robot_base_in_table_center_frame
@@ -196,7 +208,8 @@ def get_gripper_4_points_from_sriram_data(eef_pose_from_sriram):
     right_eef_pose = eef_pose_from_sriram
     eef_rot_6d = right_eef_pose[:6]
     eef_rot_matrix = rotation_6d_to_matrix(eef_rot_6d[None, :]).squeeze().cpu().numpy()  # (3, 3)
-    eef_rot_matrix_franka_eef_coordinate = R_fv @ eef_rot_matrix
+    # eef_rot_matrix_franka_eef_coordinate = R_fv @ eef_rot_matrix
+    eef_rot_matrix_franka_eef_coordinate = eef_rot_matrix @ R_vf_y @ R_vf_z
     eef_rot_matrix_robot_base = R_world_to_robot @ eef_rot_matrix_franka_eef_coordinate
     # eef_rot_matrix_robot_base = eef_rot_matrix # @ R_world_to_robot 
     eef_rot_6d_robot_base = matrix_to_rotation_6d(torch.from_numpy(eef_rot_matrix_robot_base)[None, :]).squeeze().cpu().numpy()
@@ -319,6 +332,7 @@ for cam_name, cam_cfg in cameras.items():
     print(f"Loaded extrinsics for cam_name: {cam_name}: {T}")
 
 num_points = 4500
+# num_points = 30000
 max_depth = 1.5
 
 for traj_idx in range(dataset.num_episodes):
@@ -343,6 +357,7 @@ for traj_idx in range(dataset.num_episodes):
     # all_gripper_finger_widths = [x[-1].item() for x in all_eef_pose]
     
     for t_idx in range(from_idx, to_idx):
+    # for t_idx in range(from_idx + 100, to_idx):
         
         print(f"Processing traj {traj_idx}, frame_idx {t_idx - from_idx} / {traj_len}")
         
@@ -420,6 +435,30 @@ for traj_idx in range(dataset.num_episodes):
         all_pcd_in_world = np.concatenate(all_pcd_in_world, axis=0)  # (num_cams * num_points, 3)
         end = time.time()
         # print("time for getting scene pcd from multiview depth: ", end - beg)
+
+
+        # pcd1 = o3d.geometry.PointCloud()
+        # pcd1.points = o3d.utility.Vector3dVector(all_pcd_in_world)
+        # pcd1.paint_uniform_color([1, 0, 0])   # Red
+
+        # geometries = [pcd1]
+
+        # # --- Create spheres for pcd2 ---
+        # sphere_radius = 0.01
+        # sphere_resolution = 10
+
+        # for p in eef_4_points:
+        #     sphere = o3d.geometry.TriangleMesh.create_sphere(
+        #         radius=sphere_radius, 
+        #         resolution=sphere_resolution
+        #     )
+        #     sphere.paint_uniform_color([0, 0, 1])  # red spheres
+        #     sphere.translate(p)                    # move sphere to point location
+        #     geometries.append(sphere)
+
+        # # Visualize
+        # o3d.visualization.draw_geometries(geometries)
+
         
         ### perform fps here
         beg = time.time()
@@ -481,8 +520,8 @@ for traj_idx in range(dataset.num_episodes):
         # print("time for getting goal gripper pcd: ", end - beg)
         
         # %matplotlib widget
-        from matplotlib import pyplot as plt
-        # plt.close("all")
+        # from matplotlib import pyplot as plt
+        # # plt.close("all")
         # ax = plt.subplot(projection='3d')
         # ax.scatter(all_pcd_in_world[:, 0], all_pcd_in_world[:, 1], all_pcd_in_world[:, 2], s=1, color='blue')
         # ax.scatter(goal_x_in_robot_base[:, 0], goal_x_in_robot_base[:, 1], goal_x_in_robot_base[:, 2], s=1, color='blue')
@@ -530,7 +569,7 @@ for traj_idx in range(dataset.num_episodes):
     action_arrays, traj_scene_pcd, traj_eef_pose, traj_gripper_pcd, traj_goal_gripper_pcd = \
         extract_actions(traj_eef_pose, traj_scene_pcd, traj_gripper_pcd, traj_goal_gripper_pcd, combine_action_steps=2)
 
-    data_dir = "/data/yufei/lerobot/data"
+    data_dir = "/data/yufei/lerobot/data/plate_new_rot"
     traj_dir = os.path.join(data_dir, f"traj_{traj_idx:04d}")
     if not os.path.exists(traj_dir):
         os.makedirs(traj_dir)
