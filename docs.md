@@ -328,7 +328,7 @@ CC=/usr/bin/gcc CXX=/usr/bin/g++ pixi install
 
 ### Calibration Playbook
 
-- In lfd3d-system, in separate terminals:
+- In [lfd3d-system](https://github.com/r-pad/lfd3d-system), in separate terminals:
 ```
 pixi run ros2 launch aloha aloha_bringup.launch.py robot:=aloha_stationary use_cameras:=false
 pixi run python ros/src/aloha/scripts/teleop.py -r aloha_stationary
@@ -343,10 +343,26 @@ pixi run ros2 run lfd3d_ros broadcast_transform --transform_file captures/camera
 
 - Collect ~30 images where the aruco marker is detected in the camera by pressing 'c'.
 
-- After this, in `/home/sriram/Desktop/calibation`, run:
+- After this, in `/home/sriram/Desktop/calibration`, run:
 ```
 uv run scripts/calibrate.py --output-dir /home/sriram/Desktop/lfd3d-system/captures/output_20251011_195009 # the latest capture
 ```
 - The aruco marker needs to be mounted on the corresponding link for which we record the pose from `camera_calibration_collect_ros`. Might need to play around with hyperparams a bit but typically I see a loss of around 0.025 with the default hyperparams, and a pretty good overlay in rviz.
 
 - After successful calibration, update `configuration_diffusion.py` and maybe the `config.json` files in the trained checkpoints.
+- NOTE: The calibration repo is [over here](https://github.com/r-pad/calibration) but there are new changes on the `sriram/changes` branch which have not been pushed upstream because Sriram does not have access to the repo yet.
+
+#### Clean shut-down after finishing calibration
+
+- First, kill the terminal where `teleop.py` is running. Then, run:
+```
+pixi run python ros/src/aloha/scripts/teleop.py -r aloha_stationary
+```
+- After `sleep.py` has finished executing, kill all the other terminals
+- Rename the latest capture:
+```
+mv captures/output_20251011_195009 captures/camera_<cam-name>_<calibration-date>_
+```
+- Copy the latest `T_world_from_camera_est.txt` into `lerobot/lerobot/scripts/aloha_calibration.txt`
+- Update the corresponding `calibration.json`
+- And done!
