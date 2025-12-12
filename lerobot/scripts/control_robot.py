@@ -286,12 +286,22 @@ def record(
         )
 
     # Load pretrained policy
-    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_train_longer_keep_old_normalizer" 
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_train_longer_keep_old_normalizer" 
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer"
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer_keep_old_normalizer/"
+    # checkpoint_name = "epoch-300.ckpt"
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_train_longer_keep_old_normalizer"
     checkpoint_name = "epoch-300.ckpt"
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1020_grasp_lift_closed_goal_full"
+    # checkpoint_name = "epoch-92.ckpt"
     from lerobot.scripts.yufei_policy_utils import load_low_level_policy, load_multitask_high_level_model
     low_level_policy = load_low_level_policy(exp_dir, checkpoint_name)
-    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-04fine_tune_our_on_sriram_lr_decay/model_15001.pth"
-    high_level_policy, _ = load_multitask_high_level_model(model_path)
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-04fine_tune_our_on_sriram_lr_decay/model_15001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-09fine_tune_our_on_sriram_new_rot/model_32501.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-09fine_tune_our_on_sriram_new_rot/model_62501.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-10fine_tune_our_on_sriram_new_rot_w_one_hot/model_47501.pth"
+    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-10fine_tune_our_on_sriram_new_rot_w_one_hot/model_27501.pth"
+    high_level_policy, high_level_args = load_multitask_high_level_model(model_path)
     import torch
     siglip_text_features = torch.load(os.path.join(os.environ['PROJECT_DIR'], "siglip_text_features_w_pick_and_place.pt"))
     siglip_text_features = siglip_text_features['values']
@@ -306,6 +316,9 @@ def record(
         "cat_idx": cat_idx,
         "robot_adapter": robot_adapter,
         "action_queue": deque(),
+        "obs_queue": deque(maxlen=2),
+        "debug_queue": deque(),
+        "high_level_args": high_level_args
     }
     # import pdb; pdb.set_trace()
 
@@ -322,7 +335,6 @@ def record(
     enable_teleoperation = policy is None
     log_say("Warmup record", cfg.play_sounds)
     warmup_record(robot, events, enable_teleoperation, cfg.warmup_time_s, cfg.display_data, cfg.fps)
-    # import pdb; pdb.set_trace()
 
     if has_method(robot, "teleop_safety_stop"):
         robot.teleop_safety_stop()
@@ -333,20 +345,8 @@ def record(
         if recorded_episodes >= cfg.num_episodes:
             break
 
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        print("going to record episode!!!!!!!!!!!!!!!")
-        # import pdb; pdb.set_trace()
         log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+        # warmup_record(robot, events, enable_teleoperation, cfg.warmup_time_s, cfg.display_data, cfg.fps)
         record_episode(
             robot=robot,
             dataset=dataset,
@@ -366,6 +366,7 @@ def record(
             (recorded_episodes < cfg.num_episodes - 1) or events["rerecord_episode"]
         ):
             log_say("Reset the environment", cfg.play_sounds)
+            import pdb; pdb.set_trace()
             reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
 
         if events["rerecord_episode"]:

@@ -8,6 +8,7 @@ import trimesh
 from scipy.spatial.transform import Rotation as R
 import cv2
 import os
+from termcolor import cprint
 
 
 ALOHA_PATH = os.path.join(
@@ -134,7 +135,7 @@ def inverse_kinematics(configuration, ee_pose):
     
     ee_task = mink.FrameTask(frame_name="right/gripper", frame_type="site", position_cost=1., orientation_cost=1.)
     ee_task.set_target(ee_pose_se3)
-    n_iter = 200
+    n_iter = 2000
     dt = 0.01
     thresh = 1e-3
     for i in range(n_iter):
@@ -142,8 +143,8 @@ def inverse_kinematics(configuration, ee_pose):
         configuration.integrate_inplace(vel, dt)
 
         err = ee_task.compute_error(configuration)
-        print(i, np.linalg.norm(err))
         if np.linalg.norm(err) < thresh: break
+    cprint(f"ik error {i} {np.linalg.norm(err)}", "yellow"  )
     
     Q = configuration.q
     vec = torch.tensor(
@@ -498,6 +499,10 @@ def render_and_overlay(renderer, ALOHA_MODEL, joint_state, real_rgb, downsample_
     rgb, depth, seg = render_rightArm_images(renderer, data, camera=camera_name)
     rgb_ = cv2.resize(rgb, (0,0), fx=upsample_factor, fy=upsample_factor)
     seg_ = cv2.resize(seg.astype(np.uint8), (0,0), fx=upsample_factor, fy=upsample_factor).astype(bool)
+    # from matplotlib import pyplot as plt
+    # plt.imshow(rgb_)
+    # plt.show()
+    # import pdb; pdb.set_trace()
 
     real_rgb[seg_] = rgb_[seg_]
     return real_rgb

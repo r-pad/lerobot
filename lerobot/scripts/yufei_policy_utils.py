@@ -8,6 +8,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix   
 from pytorch3d.ops import sample_farthest_points
+from termcolor import cprint
+import copy
 
 def _load_camera_intrinsics(intrinsics_path):
     """Load camera intrinsics from file.
@@ -137,7 +139,18 @@ def load_multitask_high_level_model(path):
         
     return model, args
 
-def infer_multitask_high_level_model(inputs, goal_prediction_model, cat_embedding=None):
+def infer_multitask_high_level_model(inputs, goal_prediction_model, cat_embedding=None, high_level_args=None):
+
+    # import pdb; pdb.set_trace()
+    if high_level_args is not None:
+        if high_level_args.add_one_hot_encoding:
+            print("adding one hot encoding to the input")
+            N_scene_points = inputs.shape[1] - 4
+            pointcloud_one_hot = torch.zeros(inputs.shape[0], inputs.shape[1], 2).float().to(inputs.device)
+            pointcloud_one_hot[:, :N_scene_points, 0] = 1
+            pointcloud_one_hot[:, N_scene_points:, 1] = 1
+            inputs = torch.cat([inputs, pointcloud_one_hot], dim=2) # B, N+4, 5
+    
     inputs = inputs.to('cuda')
     inputs_ = inputs.permute(0, 2, 1)
     with torch.no_grad():
@@ -363,12 +376,9 @@ def get_gripper_4_points_from_sriram_data(eef_pose_from_sriram):
     eef_rot_matrix = rotation_6d_to_matrix(eef_rot_6d[None, :]).squeeze().cpu().numpy()  # (3, 3)
     
     ### convert from aloha eef coordinate to franka eef coordinate
-    # eef_rot_matrix_franka_eef_coordinate = R_fv @ eef_rot_matrix
     eef_rot_matrix_franka_eef_coordinate = eef_rot_matrix @ R_vf_y @ R_vf_z
-    eef_rot_matrix_robot_base = R_world_to_robot @ eef_rot_matrix_franka_eef_coordinate
     ### convert from table center to robot base frame
     eef_rot_matrix_robot_base = R_world_to_robot @ eef_rot_matrix_franka_eef_coordinate
-    # eef_rot_matrix_robot_base = eef_rot_matrix # @ R_world_to_robot 
     eef_rot_6d_robot_base = matrix_to_rotation_6d(torch.from_numpy(eef_rot_matrix_robot_base)[None, :]).squeeze().cpu().numpy()
     
     eef_pos = right_eef_pose[6:9].cpu().numpy()
@@ -421,9 +431,9 @@ def get_aloha_future_eef_poses_from_delta_actions(low_level_action,
                                                   eef_rot_matrix_robot_base, 
                                                   eef_gripper_width_franka):
     low_level_action = low_level_action.squeeze(0).cpu().numpy()  # 4 x 10
-    cur_eef_pos = eef_pos_robot_base
-    cur_eef_matrix = eef_rot_matrix_robot_base
-    cur_gripper_width = eef_gripper_width_franka
+    cur_eef_pos = copy.deepcopy(eef_pos_robot_base)
+    cur_eef_matrix = copy.deepcopy(eef_rot_matrix_robot_base)
+    cur_gripper_width = copy.deepcopy(eef_gripper_width_franka)
     eef_pos = []
     eef_orient_matrix = []
     gripper_widths = []
@@ -434,6 +444,7 @@ def get_aloha_future_eef_poses_from_delta_actions(low_level_action,
 
         new_eef_pos = cur_eef_pos + delta_pos
         new_eef_rot_matrix = cur_eef_matrix @ rotation_transfer_6D_to_matrix(delta_rot_6d)
+        # new_eef_rot_matrix = cur_eef_matrix # @ rotation_transfer_6D_to_matrix(delta_rot_6d)
         new_gripper_width = cur_gripper_width + delta_gripper_width
         new_gripper_width= np.clip(new_gripper_width, 0.0, 0.04)
 
@@ -445,13 +456,15 @@ def get_aloha_future_eef_poses_from_delta_actions(low_level_action,
         gripper_widths.append(new_gripper_width)
     
     eef_pos = np.array(eef_pos).reshape(-1, 3)
-    eef_orient_matrix = np.array(eef_orient_matrix).reshape(-1, 3, 3)
+    # eef_orient_matrix = np.array(eef_orient_matrix)
     gripper_widths = np.array(gripper_widths)
     
     aloha_world_eef_pos = transform_from_robot_base_to_table_center(eef_pos)
     aloha_world_eef_orient_matrix = [eef_matrix_robot_base_to_aloha_eef_matrix(mat) for mat in eef_orient_matrix]
     aloha_world_eef_orient_6d = [rotation_transfer_matrix_to_6D(mat) for mat in aloha_world_eef_orient_matrix]
     aloha_gripper_widths = [x / 0.04 * 80 for x in gripper_widths]  # convert back to aloha gripper width
+    cprint("gripper width: {}".format(aloha_gripper_widths), "yellow")
+
     
     return aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths, eef_pos
                     
