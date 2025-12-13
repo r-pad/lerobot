@@ -222,6 +222,92 @@ def record_episode(
         single_task=single_task,
     )
 
+def get_camera_names_from_observation(observation):
+    """Get the camera names matching a given pattern from the observation, exclude the wrist camera."""
+    return [s for s in observation.keys() if s.startswith('observation.images.cam_') and s.endswith('.color') and 'wrist' not in s]
+
+def compute_goal_prediction(policy, policy_cfg, single_task, observation):
+    if not (hasattr(policy_cfg, "enable_goal_conditioning") and policy_cfg.enable_goal_conditioning):
+        return observation
+
+    # Generate new goal prediction when queue is empty
+    # This code is specific to diffusion policy / kinect :(
+    if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
+        # Gather observations from all configured cameras
+        camera_obs = {}
+
+        # Gather camera observations and apply phantomize if needed
+        for cam_name in policy.high_level.camera_names:
+            rgb_key = f"observation.images.{cam_name}.color"
+            depth_key = f"observation.images.{cam_name}.transformed_depth"
+
+            # Validate camera data exists
+            if rgb_key not in observation or depth_key not in observation:
+                raise ValueError(
+                    f"Required camera observation '{cam_name}' not found. "
+                    f"Available keys: {policy.high_level.camera_names}"
+                )
+            camera_obs[cam_name] = {
+                "rgb": observation[rgb_key].numpy(),
+                "depth": observation[depth_key].numpy().squeeze()
+            }
+
+        # Get dict of projections for all cameras
+        gripper_projs = policy.high_level.predict_and_project(
+            single_task, camera_obs,
+            robot_type=policy.config.robot_type,
+            robot_kwargs={"observation.state": observation["observation.state"]}
+        )  # Returns dict[str, np.ndarray]
+
+        # Store as dict of tensors
+        for cam_name, proj in gripper_projs.items():
+            policy.latest_gripper_proj[cam_name] = torch.from_numpy(proj)
+
+    # Add goal projection to each camera observation
+    for cam_name in policy.high_level.camera_names:
+        observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
+    return observation
+
+def get_phantomized_observation(policy, policy_cfg, camera_names, observation):
+    if not(hasattr(policy_cfg, "phantomize") and policy_cfg.phantomize):
+        return observation
+
+    # Setup renderer once for all cameras if using phantomize
+    if policy.renderer is None:
+        intrinsics_txts, extrinsics_txts, virtual_camera_names = [], [], []
+        for cam_name in camera_names:
+            cam_name_ = cam_name.split('.')[2] # assuming camera names follow convention of `observation.images.<cam_name>`
+            intrinsics_txts.append(f"lerobot/scripts/{policy.calibration_data[cam_name_]['intrinsics']}")
+            extrinsics_txts.append(f"lerobot/scripts/{policy.calibration_data[cam_name_]['extrinsics']}")
+            virtual_camera_names.append(VIRTUAL_CAMERA_MAPPING[cam_name_])
+
+        # Get image dimensions from first camera
+        height, width, _ = observation[camera_names[0]].numpy().shape
+
+        # Setup renderer with all cameras at once
+        policy.renderer = setup_renderer(
+            ALOHA_MODEL,
+            intrinsics_txts,
+            extrinsics_txts,
+            policy.downsample_factor,
+            width,
+            height,
+            virtual_camera_names
+        )
+
+    state = observation["observation.state"].numpy()
+    for cam_name in camera_names:
+        # Overlay RGB with rendered robot
+        render = render_and_overlay(
+            policy.renderer,
+            ALOHA_MODEL,
+            state,
+            observation[cam_name].numpy().copy(),
+            policy.downsample_factor,
+            VIRTUAL_CAMERA_MAPPING[cam_name.split('.')[2]],
+        )
+        observation[cam_name] = torch.from_numpy(render)
+    return observation
 
 @safe_stop_image_writer
 def control_loop(
@@ -278,87 +364,9 @@ def control_loop(
             if policy is not None:
                 # Pretty ugly, but moving this code inside the policy makes it uglier to visualize
                 # the goal_gripper_proj key.
-
-                if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
-                    # Generate new goal prediction when queue is empty
-                    # This code is specific to diffusion policy / kinect :(
-                    if hasattr(policy, "_queues") and len(policy._queues[policy.act_key]) == 0:
-                        # Gather observations from all configured cameras
-                        camera_obs = {}
-                        state = observation["observation.state"].numpy()
-
-                        # Setup renderer once for all cameras if using phantomize
-                        if hasattr(policy.config, "phantomize") and policy.config.phantomize:
-                            if policy.renderer is None:
-                                intrinsics_txts, extrinsics_txts, virtual_camera_names = [], [], []
-                                for cam_name in policy.high_level.camera_names:
-                                    intrinsics_txts.append(f"lerobot/scripts/{policy.high_level.calibration_data[cam_name]['intrinsics']}")
-                                    extrinsics_txts.append(f"lerobot/scripts/{policy.high_level.calibration_data[cam_name]['extrinsics']}")
-                                    virtual_camera_names.append(VIRTUAL_CAMERA_MAPPING[cam_name])
-
-                                # Get image dimensions from first camera
-                                first_cam = policy.high_level.camera_names[0]
-                                rgb_key = f"observation.images.{first_cam}.color"
-                                height, width, _ = observation[rgb_key].numpy().shape
-
-                                # Setup renderer with all cameras at once
-                                policy.renderer = setup_renderer(
-                                    ALOHA_MODEL,
-                                    intrinsics_txts,
-                                    extrinsics_txts,
-                                    policy.downsample_factor,
-                                    width,
-                                    height,
-                                    virtual_camera_names
-                                )
-
-                        # Gather camera observations and apply phantomize if needed
-                        for cam_name in policy.high_level.camera_names:
-                            rgb_key = f"observation.images.{cam_name}.color"
-                            depth_key = f"observation.images.{cam_name}.transformed_depth"
-
-                            # Validate camera data exists
-                            if rgb_key not in observation or depth_key not in observation:
-                                raise ValueError(
-                                    f"Required camera observation '{cam_name}' not found. "
-                                    f"Available keys: {policy.high_level.camera_names}"
-                                )
-                            camera_obs[cam_name] = {
-                                "rgb": observation[rgb_key].numpy(),
-                                "depth": observation[depth_key].numpy().squeeze()
-                            }
-
-                            if hasattr(policy.config, "phantomize") and policy.config.phantomize:
-                                # Overlay RGB with rendered robot
-                                render = render_and_overlay(
-                                    policy.renderer,
-                                    ALOHA_MODEL,
-                                    state,
-                                    camera_obs[cam_name]["rgb"].copy(),
-                                    policy.downsample_factor,
-                                    VIRTUAL_CAMERA_MAPPING[cam_name],
-                                )
-                                camera_obs[cam_name]["rgb"] = render
-                        # import matplotlib.pyplot as plt, cv2, os
-                        # os.makedirs("phantomize_inference_viz", exist_ok=True)
-                        # img = cv2.hconcat([camera_obs[cam_name]["rgb"] for cam_name in policy.high_level.camera_names])
-                        # plt.imsave(f"phantomize_inference_viz/{time.time()}.png", img)
-
-
-                        # Get dict of projections for all cameras
-                        gripper_projs = policy.high_level.predict_and_project(
-                            single_task, camera_obs,
-                            robot_type=policy.config.robot_type,
-                            robot_kwargs={"observation.state": observation["observation.state"]}
-                        )  # Returns dict[str, np.ndarray]
-
-                        # Store as dict of tensors
-                        for cam_name, proj in gripper_projs.items():
-                            policy.latest_gripper_proj[cam_name] = torch.from_numpy(proj)
-
-                    # Add goal projection to each camera observation
-                    for cam_name in policy.high_level.camera_names:
-                        observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
+                camera_names = get_camera_names_from_observation(observation)
+                observation = get_phantomized_observation(policy, policy.config, camera_names, observation)
+                observation = compute_goal_prediction(policy, policy.config, single_task, observation)
 
                 observation["task"] = single_task
                 pred_action, pred_action_eef = predict_action(
