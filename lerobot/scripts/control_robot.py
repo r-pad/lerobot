@@ -264,7 +264,7 @@ def record(
         sanity_check_dataset_name(cfg.repo_id, cfg.policy)
 
         if cfg.policy is not None and cfg.policy.enable_goal_conditioning:
-            with open(cfg.policy.hl_calibration_json) as f:
+            with open(cfg.policy.calibration_json) as f:
                 calibration_data = json.load(f)
             cam_names = calibration_data.keys()
             extra_features = {f"observation.images.{cam}.goal_gripper_proj":

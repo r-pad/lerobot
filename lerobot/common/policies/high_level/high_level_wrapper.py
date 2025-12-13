@@ -14,8 +14,8 @@ from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd, render_al
 import os
 from google import genai
 from lerobot.common.policies.high_level.classify_utils import setup_client, generate_prompt_for_current_subtask, call_gemini_with_retry, TASK_SPEC, EXAMPLES
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Dict
 from PIL import Image
 import json
 from lerobot.scripts.dataset_utils import generate_heatmap_from_points
@@ -59,7 +59,7 @@ class HighLevelConfig:
     use_gemini: bool = False
     is_gmm: bool = False
     dino_model: str = "facebook/dinov2-base"
-    calibration_json: str = "lerobot/scripts/aloha_calibration/calibration_multiview.json"
+    calibration_data: Dict[str, Dict] = field(default_factory=dict)
 
     # dino_3dgp specific configs
     use_fourier_pe: bool = False
@@ -83,13 +83,10 @@ class HighLevelWrapper:
             self.gemini_config = genai.types.GenerateContentConfig(temperature=0.0, candidate_count=1)
             self.model_name = "gemini-2.5-pro"
 
-        # Load camera calibration from JSON
-        with open(config.calibration_json, 'r') as f:
-            calibration_data = json.load(f)
-        self.calibration_data = calibration_data
+        self.calibration_data = config.calibration_data
 
         # Extract camera configurations
-        self.camera_names = list(calibration_data.keys())
+        self.camera_names = list(self.calibration_data.keys())
         self.num_cameras = len(self.camera_names)
 
         # Load intrinsics and extrinsics for all cameras
@@ -97,7 +94,7 @@ class HighLevelWrapper:
         self.cam_to_worlds = []  # List of extrinsics matrices (T_world_from_camera)
 
         for cam_name in self.camera_names:
-            cam_config = calibration_data[cam_name]
+            cam_config = self.calibration_data[cam_name]
             intrinsics_path = os.path.join("lerobot/scripts/", cam_config["intrinsics"])
             extrinsics_path = os.path.join("lerobot/scripts/", cam_config["extrinsics"])
 

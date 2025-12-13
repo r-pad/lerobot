@@ -130,13 +130,14 @@ class AlohaAdapter(RobotAdapter):
         Returns:
             Joint positions to execute on robot
         """
-        from lerobot.common.utils.aloha_utils import inverse_kinematics
+        from lerobot.common.utils.aloha_utils import forward_kinematics, inverse_kinematics
 
         if self.action_space in ["right_eef", "right_eef_relative"]:
             if self.action_space == "right_eef_relative":
                 # For relative actions, convert to absolute using reference EEF
                 action = self._relative_to_absolute_eef(action, reference_eef)
 
+            forward_kinematics(self.config, state[0]) # FK on current state
             # IK to get joint action
             action_joint = inverse_kinematics(self.config, action.squeeze())[None].float()
             # Force left arm to rest at predefined pose

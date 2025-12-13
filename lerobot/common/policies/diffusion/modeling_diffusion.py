@@ -21,6 +21,7 @@ TODO(alexander-soare):
 """
 
 import math
+import json
 from collections import deque
 from typing import Callable
 
@@ -112,6 +113,10 @@ class DiffusionPolicy(PreTrainedPolicy):
         self._relative_action_reference_eef = None
 
         self.diffusion = DiffusionModel(config)
+        # Load camera calibration from JSON
+        with open(self.config.calibration_json, 'r') as f:
+            calibration_data = json.load(f)
+        self.calibration_data = calibration_data
 
         if self.config.enable_goal_conditioning:
             hl_config = HighLevelConfig(
@@ -130,7 +135,7 @@ class DiffusionPolicy(PreTrainedPolicy):
                 use_gemini=self.config.hl_use_gemini,
                 is_gmm=self.config.hl_is_gmm,
                 dino_model=self.config.hl_dino_model,
-                calibration_json=self.config.hl_calibration_json,
+                calibration_data=self.calibration_data,
                 use_fourier_pe=self.config.hl_use_fourier_pe,
                 fourier_num_frequencies=self.config.hl_fourier_num_frequencies,
                 fourier_include_input=self.config.hl_fourier_include_input,

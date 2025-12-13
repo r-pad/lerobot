@@ -268,8 +268,11 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
     for cam_name in camera_names:
         frame_data[f"observation.images.{cam_name}.color"] = rgb_data[cam_name]
         frame_data[f"observation.images.{cam_name}.transformed_depth"] = depth_data[cam_name]
-    wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
-    frame_data["observation.images.cam_wrist"] = wrist_rgb_data
+
+    if 'observation.images.cam_wrist' in frame_data:
+        wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
+        frame_data["observation.images.cam_wrist"] = wrist_rgb_data
+
     frame_data["observation.right_eef_pose"] = eef_data
     frame_data["observation.state"] = joint_state
     frame_data["action.right_eef_pose"] = action_eef
