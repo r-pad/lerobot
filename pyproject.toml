@@ -169,6 +169,21 @@ ffmpeg = ">=6,<8"
 [tool.pixi.pypi-dependencies]
 pip = ">=25.1.1,<26"
 lerobot = { path = ".", editable = true }
+openpi = { path = "../openpi", editable = true }
+jax = { version = "==0.4.30", extras = ["cuda12"] }
+jaxlib = "==0.4.30"
+numpy = "==1.26.4"  # Pin strict 1.x version here
+
+# Pin ml_dtypes to avoid the 'isnan' crash
+ml_dtypes = "<0.5.0"
+
+# Pin jaxtyping to the version compatible with openpi's private imports
+jaxtyping = "==0.2.33"
+
+# Other ML libs
+flax = ">=0.8.0,<0.9.0"  # Flax 0.10+ often requires newer JAX, 0.8.x is safe for JAX 0.4.x
+beartype = ">=0.18.0"
+matplotlib = ">=3.8.0"
 
 [tool.pixi.environments]
 default = { features = ["dynamixel"], solve-group = "default" }

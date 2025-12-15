@@ -192,9 +192,9 @@ def cast_stats_to_numpy(stats) -> dict[str, dict[str, np.ndarray]]:
 
 
 def load_stats(local_dir: Path) -> dict[str, dict[str, np.ndarray]]:
-    if not (local_dir / STATS_PATH).exists():
+    if not (local_dir).exists():
         return None
-    stats = load_json(local_dir / STATS_PATH)
+    stats = load_json(local_dir)
     return cast_stats_to_numpy(stats)
 
 

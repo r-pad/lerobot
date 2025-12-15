@@ -1078,6 +1078,15 @@ class PI05Policy(PreTrainedPolicy):
 
             fixed_state_dict[new_key] = value
 
+        # Manually ensure embed_tokens is populated if missing (weights tied to lm_head)
+        # Note: keys in fixed_state_dict do not have "model." prefix yet
+        lm_head_key = "paligemma_with_expert.paligemma.lm_head.weight"
+        embed_tokens_key = "paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+        
+        if lm_head_key in fixed_state_dict and embed_tokens_key not in fixed_state_dict:
+            print(f"Duplicating {lm_head_key} to {embed_tokens_key} (tied weights)")
+            fixed_state_dict[embed_tokens_key] = fixed_state_dict[lm_head_key]
+
         return fixed_state_dict
 
     def get_optim_params(self) -> dict:
