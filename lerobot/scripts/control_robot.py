@@ -286,12 +286,44 @@ def record(
             extra_features=extra_features,
         )
 
-    # Load pretrained policy
-    policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
-
-    # stats = load_stats(Path('/home/kyutae/Projects/lerobot/checkpoints/20000/dataset_stats.json'))
-    # stats = load_stats(Path('/home/kyutae/Projects/lerobot/checkpoints/20000/assets/trossen/norm_stats.json'))
-    if policy is not None:
+    # Load dataset stats for OpenPI inference
+    dataset_stats = None
+    pretrained_path = None
+    use_openpi_inference = False
+    
+    # Skip loading LeRobot policy when using OpenPI inference to avoid OOM
+    # Only load policy if not using OpenPI inference
+    policy = None
+    preprocessor = None
+    postprocessor = None
+    
+    if cfg.policy is not None:
+        # Check if this is a PI05 policy and we should use OpenPI inference
+        if getattr(cfg.policy, "type", None) == "pi05":
+            use_openpi_inference = True
+            pretrained_path = Path(cfg.policy.pretrained_path) if cfg.policy.pretrained_path else None
+            
+            # Try to load dataset stats from checkpoint directory
+            if pretrained_path and pretrained_path.exists():
+                stats_paths = [
+                    pretrained_path / "dataset_stats.json",
+                    pretrained_path / "assets" / "trossen" / "norm_stats.json",
+                ]
+                for stats_path in stats_paths:
+                    if stats_path.exists():
+                        dataset_stats = load_stats(stats_path)
+                        logging.info(f"Loaded dataset stats from {stats_path}")
+                        break
+                
+                # If not found, try to load from dataset meta
+                if dataset_stats is None and hasattr(dataset.meta, "stats"):
+                    dataset_stats = dataset.meta.stats
+                    logging.info("Using dataset stats from dataset meta")
+            
+            logging.info("Using OpenPI inference - skipping LeRobot policy loading to save GPU memory")
+        else:
+            # Load LeRobot policy for non-PI05 policies
+            policy = make_policy(cfg.policy, ds_meta=dataset.meta)
         preprocessor, postprocessor = make_pre_post_processors(
             policy_cfg=cfg.policy,
             pretrained_path=cfg.policy.pretrained_path,
@@ -322,6 +354,19 @@ def record(
             break
 
         log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+        # Create policy_config dict for OpenPI inference when policy is None
+        policy_config = None
+        if use_openpi_inference and policy is None and cfg.policy is not None:
+            policy_config = {
+                "max_action_dim": getattr(cfg.policy, "max_action_dim", 32),
+                "chunk_size": getattr(cfg.policy, "chunk_size", 50),
+                "paligemma_variant": getattr(cfg.policy, "paligemma_variant", "gemma_2b"),
+                "action_expert_variant": getattr(cfg.policy, "action_expert_variant", "gemma_300m"),
+                "dtype": getattr(cfg.policy, "dtype", "float32"),
+                "device": getattr(cfg.policy, "device", "cpu"),
+                "max_state_dim": getattr(cfg.policy, "max_state_dim", 18),
+                "tokenizer_max_length": getattr(cfg.policy, "tokenizer_max_length", 200),
+            }
         record_episode(
             robot=robot,
             dataset=dataset,
@@ -333,6 +378,10 @@ def record(
             single_task=cfg.single_task,
             preprocessor=preprocessor,
             postprocessor=postprocessor,
+            use_openpi_inference=use_openpi_inference,
+            pretrained_path=pretrained_path,
+            dataset_stats=dataset_stats,
+            policy_config=policy_config,
         )
 
         # Execute a few seconds without recording to give time to manually reset the environment

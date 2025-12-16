@@ -216,27 +216,6 @@ def make_pre_post_processors(
             policy configuration type.
     """
     if pretrained_path:
-        # TODO(Steven): Temporary patch, implement correctly the processors for Gr00t
-        if isinstance(policy_cfg, GrootConfig):
-            # GROOT handles normalization in groot_pack_inputs_v3 step
-            # Need to override both stats AND normalize_min_max since saved config might be empty
-            preprocessor_overrides = {}
-            postprocessor_overrides = {}
-            preprocessor_overrides["groot_pack_inputs_v3"] = {
-                "stats": kwargs.get("dataset_stats"),
-                "normalize_min_max": True,
-            }
-
-            # Also ensure postprocessing slices to env action dim and unnormalizes with dataset stats
-            env_action_dim = policy_cfg.output_features["action"].shape[0]
-            postprocessor_overrides["groot_action_unpack_unnormalize_v1"] = {
-                "stats": kwargs.get("dataset_stats"),
-                "normalize_min_max": True,
-                "env_action_dim": env_action_dim,
-            }
-            kwargs["preprocessor_overrides"] = preprocessor_overrides
-            kwargs["postprocessor_overrides"] = postprocessor_overrides
-
         return (
             PolicyProcessorPipeline.from_pretrained(
                 pretrained_model_name_or_path=pretrained_path,
