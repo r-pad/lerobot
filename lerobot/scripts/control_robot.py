@@ -176,7 +176,6 @@ from lerobot.configs import parser
 # Control modes
 ########################################################################################
 
-
 @safe_disconnect
 def calibrate(robot: Robot, cfg: CalibrateControlConfig):
     # TODO(aliberts): move this code in robots' classes
@@ -290,8 +289,12 @@ def record(
     # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer"
     # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer_keep_old_normalizer/"
     # checkpoint_name = "epoch-300.ckpt"
-    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_train_longer_keep_old_normalizer"
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_train_longer_keep_old_normalizer" ### trained with only one-hot
     checkpoint_name = "epoch-300.ckpt"
+
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_rgb_train_longer_keep_old_normalizer" ### trained with color
+    checkpoint_name = "epoch-240.ckpt"
+
     # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1020_grasp_lift_closed_goal_full"
     # checkpoint_name = "epoch-92.ckpt"
     from lerobot.scripts.yufei_policy_utils import load_low_level_policy, load_multitask_high_level_model
@@ -300,7 +303,11 @@ def record(
     # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-09fine_tune_our_on_sriram_new_rot/model_32501.pth"
     # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-09fine_tune_our_on_sriram_new_rot/model_62501.pth"
     # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-10fine_tune_our_on_sriram_new_rot_w_one_hot/model_47501.pth"
-    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-10fine_tune_our_on_sriram_new_rot_w_one_hot/model_27501.pth"
+    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-10fine_tune_our_on_sriram_new_rot_w_one_hot/model_27501.pth" ### best withtout color but with one-hot
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-13fine_tune_our_on_sriram_new_rot_rgb/model_45001.pth" 
+    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-14fine_tune_our_on_sriram_new_rot_dino/model_47501.pth" 
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-14fine_tune_our_on_sriram_new_rot_dino/model_27501.pth" 
+
     high_level_policy, high_level_args = load_multitask_high_level_model(model_path)
     import torch
     siglip_text_features = torch.load(os.path.join(os.environ['PROJECT_DIR'], "siglip_text_features_w_pick_and_place.pt"))

@@ -15,6 +15,122 @@ from scipy.spatial.transform import Rotation as R
 from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix   
 from pytorch3d.ops import sample_farthest_points
 import time
+from torchvision import transforms
+import torch.nn.functional as F
+from sklearn.decomposition import PCA
+
+### TODO: add torch transformations for resizing the rgb and depth images
+target_shape = 224
+rgb_preprocess = transforms.Compose(
+    [
+        transforms.Resize(
+            target_shape,
+            interpolation=transforms.InterpolationMode.BICUBIC,
+        ),
+        transforms.CenterCrop(target_shape),
+    ]
+)
+depth_preprocess = transforms.Compose(
+    [
+        transforms.Resize(
+            target_shape,
+            interpolation=transforms.InterpolationMode.NEAREST,
+        ),
+        transforms.CenterCrop(target_shape),
+    ]
+)
+
+def get_scaled_intrinsics(K, orig_shape, target_shape=224):
+    """
+    Scale camera intrinsics matrix based on image resizing and cropping.
+
+    Args:
+        K (np.ndarray): Original camera intrinsics matrix (3x3).
+        orig_shape (tuple): Original image shape (height, width).
+        target_shape (int): Target size for resized images (default: 224).
+
+    Returns:
+        np.ndarray: Scaled intrinsics matrix (3x3).
+    """
+    # Getting scale factor from torchvision.transforms.Resize behaviour
+    K_ = K.copy()
+    scale_factor = target_shape / min(orig_shape)
+
+    # Apply the scale factor to the intrinsics
+    K_[[0, 1], [0, 1]] *= scale_factor  # fx, fy
+    K_[[0, 1], 2] *= scale_factor  # cx, cy
+
+    # Adjust the principal point (cx, cy) for the center crop
+    crop_offset_x = (orig_shape[1] * scale_factor - target_shape) / 2
+    crop_offset_y = (orig_shape[0] * scale_factor - target_shape) / 2
+    K_[0, 2] -= crop_offset_x
+    K_[1, 2] -= crop_offset_y
+    return K_
+
+
+### TODO: load a dino-v2 model
+dinov2 = torch.hub.load(
+    "facebookresearch/dinov2", "dinov2_vitl14_reg"
+).to("cuda")
+def get_dinov2_image_embedding(image, dinov2=None, device="cuda"):
+    if dinov2 is None:
+        dinov2 = torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14_reg").to(
+            device
+        )
+    patch_size = 14
+    target_shape = 224
+
+    assert type(image) == Image.Image
+    preprocess = transforms.Compose(
+        [
+            transforms.Resize(
+                target_shape, interpolation=transforms.InterpolationMode.BICUBIC
+            ),
+            transforms.CenterCrop(target_shape),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ]
+    )
+    inputs = preprocess(image).unsqueeze(0).to(device)
+
+    # Forward pass to get features
+    with torch.no_grad():
+        outputs = dinov2.forward_features(inputs)
+
+    # Extract the last hidden state as features
+    patch_features = outputs["x_norm_patchtokens"].squeeze(0)
+    num_patches = patch_features.shape[0]
+    h = w = int(num_patches**0.5)
+    patch_features_2d = patch_features.reshape(h, w, -1)
+
+    # Permute to [C, H, W] for interpolation
+    patch_features_2d = patch_features_2d.permute(2, 0, 1)
+
+    # Upsample to match original image patch dimensions
+    resized_features = F.interpolate(
+        patch_features_2d.unsqueeze(0),
+        size=(target_shape, target_shape),
+        mode="bilinear",
+        align_corners=False,
+    )
+
+    return resized_features.squeeze().permute(1, 2, 0).cpu().numpy()
+
+def compute_dino_v2_features(rgb, target_shape=224):
+    # pca_n_components = 256
+    rgb_embed = get_dinov2_image_embedding(
+        Image.fromarray(rgb), dinov2=dinov2, device="cuda"
+    )
+
+    # pca_model = PCA(n_components=pca_n_components)
+    # rgb_embed = pca_model.fit_transform(
+    #     rgb_embed.reshape(-1, rgb_embed.shape[2])
+    # # )
+    # rgb_embed = rgb_embed.reshape(
+    #     target_shape, target_shape, -1
+    # )
+    
+    return rgb_embed.reshape(-1, rgb_embed.shape[2])  # (H*W, feat_dim)
 
 robot_base_in_table_center_frame = np.array([0.449, -0.019, 0.00])
 R_world_to_robot = np.array([
@@ -110,10 +226,10 @@ def fpsample_pcd(scene_pcd, num_points):
     kdline_fps_samples_idx = fpsample.bucket_fps_kdline_sampling(scene_pcd[:, :3], num_points, h=h)
     kdline_fps_samples_idx = np.array(sorted(kdline_fps_samples_idx))
     scene_pcd = scene_pcd[kdline_fps_samples_idx]
-    return scene_pcd
+    return scene_pcd, kdline_fps_samples_idx
 
 
-def get_scene_pcd_cam_frame(depth, K, num_points, max_depth):
+def get_scene_pcd_cam_frame(depth, K, num_points, max_depth=None):
     """
     Generate a downsampled point cloud (PCD) from RGB embeddings and depth map.
 
@@ -136,10 +252,10 @@ def get_scene_pcd_cam_frame(depth, K, num_points, max_depth):
 
     # Remove points with invalid depth
     valid_depth = np.logical_and(z_flat > 0, z_flat < max_depth)
+
     x_flat, y_flat, z_flat = (
         arr[valid_depth] for arr in (x_flat, y_flat, z_flat)
     )
-
     # Unproject points using K inverse
     pixels = np.stack([x_flat, y_flat, np.ones_like(x_flat)], axis=0)
     K_inv = np.linalg.inv(K)
@@ -155,7 +271,7 @@ def get_scene_pcd_cam_frame(depth, K, num_points, max_depth):
     else:
         scene_pcd = scene_pcd[0]
 
-    return scene_pcd
+    return scene_pcd, valid_depth
 
 def _load_camera_intrinsics(intrinsics_path):
     """Load camera intrinsics from file.
@@ -225,11 +341,13 @@ def get_gripper_4_points_from_sriram_data(eef_pose_from_sriram):
     return eef_pos, eef_rot_6d, eef_gripper_width, eef_pos_robot_base, eef_rot_matrix_robot_base, eef_rot_6d_robot_base, eef_gripper_width_franka
     
 
-def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_pcd, combine_action_steps=2):
+def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_pcd, traj_rgb_values, traj_rgb_features, combine_action_steps=2):
     traj_pos_ori = traj_pos_ori[::combine_action_steps]
     traj_pc = traj_pc[::combine_action_steps]
     traj_gripper_pcd = traj_gripper_pcd[::combine_action_steps]
     traj_goal_gripper_pcd = traj_goal_gripper_pcd[::combine_action_steps]
+    traj_rgb_features = traj_rgb_features[::combine_action_steps]
+    traj_rgb_values = traj_rgb_values[::combine_action_steps]
     
     traj_actions = []
     
@@ -237,6 +355,8 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
     filtered_pos_oris = []
     filtered_gripper_pcds = []
     filtered_goal_gripper_pcds = []
+    filtered_rgb_features = []
+    filtered_rgb_values = []
     
     base_pos = traj_pos_ori[0][:3]
     base_ori_6d = traj_pos_ori[0][3:9]
@@ -245,6 +365,8 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
     base_pc = traj_pc[0]
     base_pos_ori = traj_pos_ori[0]
     base_goal_gripper_pcd = traj_goal_gripper_pcd[0]
+    base_rgb_features = traj_rgb_features[0]
+    base_rgb_values = traj_rgb_values[0]
     
     for i in range(len(traj_pos_ori) - 1):
         target_pos = traj_pos_ori[i+1][:3]
@@ -278,6 +400,8 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
             filtered_gripper_pcds.append(base_gripper_pcd)
             filtered_pos_oris.append(base_pos_ori)
             filtered_goal_gripper_pcds.append(base_goal_gripper_pcd)
+            filtered_rgb_features.append(base_rgb_features)
+            filtered_rgb_values.append(base_rgb_values)
             
             base_pc = traj_pc[i+1]
             base_gripper_pcd = traj_gripper_pcd[i+1]
@@ -286,8 +410,10 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
             base_ori_6d = target_ori_6d
             base_finger_angle = target_finger_angle
             base_goal_gripper_pcd = traj_goal_gripper_pcd[i+1]
+            base_rgb_features = traj_rgb_features[i+1]
+            base_rgb_values = traj_rgb_values[i+1]
 
-    return np.asarray(traj_actions), filtered_pcs, filtered_pos_oris, filtered_gripper_pcds, filtered_goal_gripper_pcds
+    return np.asarray(traj_actions), filtered_pcs, filtered_pos_oris, filtered_gripper_pcds, filtered_goal_gripper_pcds, filtered_rgb_values, filtered_rgb_features
 
 # Let's take this one for this example
 # repo_id = "lerobot/aloha_mobile_cabinet"
@@ -305,6 +431,7 @@ from_idx = dataset.episode_data_index["from"][episode_index].item()
 to_idx = dataset.episode_data_index["to"][episode_index].item()
 
 ### NOTE: load camera intrinsics and extrinsics
+### TODO: scale the intrinsics if we resize the depth images
 all_intrinsics = []
 all_extrinsics = []
 cameras = {
@@ -320,10 +447,11 @@ cameras = {
 for cam_name, cam_cfg in cameras.items():
     # Load intrinsics
     K = _load_camera_intrinsics(cam_cfg['intrinsics'])
-    # K_scaled = BaseDataset.get_scaled_intrinsics(
-    #     K, orig_shape, target_shape
-    # )
-    all_intrinsics.append(K)
+    orig_shape = [720, 1280]
+    K_scaled = get_scaled_intrinsics(
+        K, orig_shape, target_shape
+    )
+    all_intrinsics.append(K_scaled)
     print(f"Loaded intrinsics for cam_name: {cam_name}: {K}")
 
     # Load extrinsics
@@ -332,7 +460,6 @@ for cam_name, cam_cfg in cameras.items():
     print(f"Loaded extrinsics for cam_name: {cam_name}: {T}")
 
 num_points = 4500
-# num_points = 30000
 max_depth = 1.5
 
 for traj_idx in range(dataset.num_episodes):
@@ -342,22 +469,16 @@ for traj_idx in range(dataset.num_episodes):
     traj_gripper_pcd = []
     traj_scene_pcd = []
     traj_goal_gripper_pcd = []
+    traj_fpsed_rgb_features = []
+    traj_fpsed_rgb_values = []
     
     from_idx = dataset.episode_data_index["from"][traj_idx].item()
     to_idx = dataset.episode_data_index["to"][traj_idx].item()
     traj_len = to_idx - from_idx
     print(f"Trajectory {traj_idx} has length {traj_len} from {from_idx} to {to_idx}")
-    # for t_idx in range(from_idx, to_idx):
-    #     dataset_idx =  t_idx
-    #     data_point = dataset[dataset_idx]
-    #     print(f"processing traj {traj_idx} dataset idx {t_idx} frame idx {t_idx - from_idx}, which is labeled to be traj {data_point['episode_index']} and frame idx {data_point['frame_index']}")
-    #     assert data_point['episode_index'].item() == traj_idx
-    # exit()
-    # all_eef_pose = [dataset[t_idx]['observation.right_eef_pose'] for t_idx in range(from_idx, to_idx)]
-    # all_gripper_finger_widths = [x[-1].item() for x in all_eef_pose]
-    
+
+    ### TODO: add DINO-V2 features for the RGB images and downsample them to the same fpsed pcd    
     for t_idx in range(from_idx, to_idx):
-    # for t_idx in range(from_idx + 100, to_idx):
         
         print(f"Processing traj {traj_idx}, frame_idx {t_idx - from_idx} / {traj_len}")
         
@@ -382,9 +503,28 @@ for traj_idx in range(dataset.num_episodes):
         all_cam_depth_images = []
         for depth_key in depth_keys:
             depth = Image.fromarray(data_point[depth_key].numpy()[0])
-            depth = np.asarray(depth)
-            
+            ### scale the depth image
+            depth = np.asarray(depth_preprocess(depth))
             all_cam_depth_images.append(depth)
+        
+        color_keys = ["observation.images.cam_azure_kinect_front.color", "observation.images.cam_azure_kinect_back.color"]
+        all_cam_color_images = []
+        for color_key in color_keys:
+            rgb = (data_point[color_key].permute(1, 2, 0).numpy() * 255).astype(
+                np.uint8
+            )
+            rgb = Image.fromarray(rgb)
+            rgb = np.asarray(rgb_preprocess(rgb))
+            all_cam_color_images.append(rgb)
+            
+        ### NOTE: encode dino-v2 features for the rgb images here
+        all_rgb_flattend = [rgb.reshape(-1, 3) for rgb in all_cam_color_images]
+        all_rgb_flattend = np.concatenate(all_rgb_flattend, axis=0)  # (num_cams * H * W, 3)
+        all_rgb_features_flattened = []
+        for rgb in all_cam_color_images:
+            rgb_features = compute_dino_v2_features(rgb, target_shape=target_shape)
+            all_rgb_features_flattened.append(rgb_features)    
+        all_rgb_features_flattened = np.concatenate(all_rgb_features_flattened, axis=0)  # (num_cams * H * W, feat_dim)
             
         # import pdb; pdb.set_trace()    
         # %matplotlib inline
@@ -395,16 +535,20 @@ for traj_idx in range(dataset.num_episodes):
         # %matplotlib widget
         from matplotlib import pyplot as plt
         all_pcd_in_world = []
+        depth_masks = []
         for (depth, intrisincs, extrinsics) in zip(all_cam_depth_images, all_intrinsics, all_extrinsics):
-            pcd_in_camera = get_scene_pcd_cam_frame(
+            pcd_in_camera, depth_mask = get_scene_pcd_cam_frame(
                 depth, intrisincs, None, max_depth
             )
+
+            depth_masks.append(depth_mask.flatten())
             
             pcd_in_world = transform_to_world_frame(pcd_in_camera, extrinsics)
-            
+            x = pcd_in_world
+
             ### use open3d to visualize the point cloud
-            x = pcd_in_world[pcd_in_world[:, 1] < 0.6]
-            x = x[x[:, 1] > -0.4]
+            # x = pcd_in_world[pcd_in_world[:, 1] < 0.6]
+            # x = x[x[:, 1] > -0.4]
             
             x_in_robot_base = transform_from_table_center_to_robot_base(x)
             
@@ -434,8 +578,9 @@ for traj_idx in range(dataset.num_episodes):
             all_pcd_in_world.append(x_in_robot_base)
         
         all_pcd_in_world = np.concatenate(all_pcd_in_world, axis=0)  # (num_cams * num_points, 3)
-        end = time.time()
-        # print("time for getting scene pcd from multiview depth: ", end - beg)
+        depth_masks = np.concatenate(depth_masks, axis=0)  # (num_cams * H * W,)
+        all_rgb_features_flattened = all_rgb_features_flattened[depth_masks]
+        all_rgb_flattend = all_rgb_flattend[depth_masks]
 
 
         # pcd1 = o3d.geometry.PointCloud()
@@ -463,17 +608,38 @@ for traj_idx in range(dataset.num_episodes):
         
         ### perform fps here
         beg = time.time()
-        # all_pcd_in_world = get_fps_pcd(torch.from_numpy(all_pcd_in_world).unsqueeze(0).cuda(), num_points)
-        all_pcd_in_world = fpsample_pcd(all_pcd_in_world, num_points)
+
+        filter_idx_1 = all_pcd_in_world[:, 1] < 0.6
+        filter_idx_2 = all_pcd_in_world[:, 1] > -0.4
+        filter_idx = np.logical_and(filter_idx_1, filter_idx_2)
+        all_pcd_in_world = all_pcd_in_world[filter_idx]
+        all_rgb_features_flattened = all_rgb_features_flattened[filter_idx]
+        all_rgb_flattend = all_rgb_flattend[filter_idx]
+
+
+        all_pcd_in_world, fps_index = fpsample_pcd(all_pcd_in_world, num_points)
+        rgb_features_fpsed = all_rgb_features_flattened[fps_index]
+        rgb_value_fpsed = all_rgb_flattend[fps_index]  
         end = time.time()
         # print("time for fps of the scene pcd: ", end - beg)
         
         # print("all_pcd_in_world shape:", all_pcd_in_world.shape)
         traj_scene_pcd.append(all_pcd_in_world)
+        traj_fpsed_rgb_features.append(rgb_features_fpsed)
+        traj_fpsed_rgb_values.append(rgb_value_fpsed)
+        # import pdb; pdb.set_trace()
         # ax = plt.subplot(projection='3d')
-        # ax.scatter(all_pcd_in_world[:, 0], all_pcd_in_world[:, 1], all_pcd_in_world[:, 2], s=1, color='blue')
+        # ax.scatter(all_pcd_in_world[:, 0], all_pcd_in_world[:, 1], all_pcd_in_world[:, 2], s=1, color=rgb_value_fpsed.astype(np.float32)/255.0)
         # plt.show()
         
+
+        ### use open3d to visualize the colored pcd
+        # pcd = o3d.geometry.PointCloud()
+        # pcd.points = o3d.utility.Vector3dVector(all_pcd_in_world)
+        # pcd.colors = o3d.utility.Vector3dVector(rgb_value_fpsed.astype(np.float32)/255.0)
+        # o3d.visualization.draw_geometries([pcd])
+
+
         ### NOTE: get the goal event idx, goal eef pose and convert that to the goal gripper pcd
         episode_index = data_point["episode_index"].item()
         assert episode_index == traj_idx
@@ -567,10 +733,10 @@ for traj_idx in range(dataset.num_episodes):
     '''
 
     ### TODO: extract the actions
-    action_arrays, traj_scene_pcd, traj_eef_pose, traj_gripper_pcd, traj_goal_gripper_pcd = \
-        extract_actions(traj_eef_pose, traj_scene_pcd, traj_gripper_pcd, traj_goal_gripper_pcd, combine_action_steps=2)
+    action_arrays, traj_scene_pcd, traj_eef_pose, traj_gripper_pcd, traj_goal_gripper_pcd, traj_fpsed_rgb_values, traj_fpsed_rgb_features = \
+        extract_actions(traj_eef_pose, traj_scene_pcd, traj_gripper_pcd, traj_goal_gripper_pcd, traj_fpsed_rgb_values, traj_fpsed_rgb_features, combine_action_steps=2)
 
-    data_dir = "/data/yufei/lerobot/data/plate_new_rot_default_delta_finger_angle"
+    data_dir = "/data/yufei/lerobot/data/plate_new_rot_rgb"
     traj_dir = os.path.join(data_dir, f"traj_{traj_idx:04d}")
     if not os.path.exists(traj_dir):
         os.makedirs(traj_dir)
@@ -584,6 +750,8 @@ for traj_idx in range(dataset.num_episodes):
         pickle_data['action'] = action_arrays[t_idx][None, :]
         pickle_data['gripper_pcd'] = traj_gripper_pcd[t_idx][None, :]
         pickle_data['goal_gripper_pcd'] = traj_goal_gripper_pcd[t_idx][None, :]
+        pickle_data['rgb_values'] = traj_fpsed_rgb_values[t_idx][None, :].astype(np.float32) / 255.0
+        pickle_data['rgb_features'] = traj_fpsed_rgb_features[t_idx][None, :]
         
         # with open(step_save_dir, 'wb') as f:
         #     pickle.dump(pickle_data, f)

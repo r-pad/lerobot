@@ -10,6 +10,121 @@ from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix
 from pytorch3d.ops import sample_farthest_points
 from termcolor import cprint
 import copy
+from torchvision import transforms
+from PIL import Image
+import torch.nn.functional as F
+
+dinov2 = torch.hub.load(
+    "facebookresearch/dinov2", "dinov2_vitl14_reg"
+).to("cuda")
+def get_dinov2_image_embedding(image, dinov2=None, device="cuda"):
+    if dinov2 is None:
+        dinov2 = torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14_reg").to(
+            device
+        )
+    patch_size = 14
+    target_shape = 224
+
+    assert type(image) == Image.Image
+    preprocess = transforms.Compose(
+        [
+            transforms.Resize(
+                target_shape, interpolation=transforms.InterpolationMode.BICUBIC
+            ),
+            transforms.CenterCrop(target_shape),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ]
+    )
+    inputs = preprocess(image).unsqueeze(0).to(device)
+
+    # Forward pass to get features
+    with torch.no_grad():
+        outputs = dinov2.forward_features(inputs)
+
+    # Extract the last hidden state as features
+    patch_features = outputs["x_norm_patchtokens"].squeeze(0)
+    num_patches = patch_features.shape[0]
+    h = w = int(num_patches**0.5)
+    patch_features_2d = patch_features.reshape(h, w, -1)
+
+    # Permute to [C, H, W] for interpolation
+    patch_features_2d = patch_features_2d.permute(2, 0, 1)
+
+    # Upsample to match original image patch dimensions
+    resized_features = F.interpolate(
+        patch_features_2d.unsqueeze(0),
+        size=(target_shape, target_shape),
+        mode="bilinear",
+        align_corners=False,
+    )
+
+    return resized_features.squeeze().permute(1, 2, 0).cpu().numpy()
+
+def compute_dino_v2_features(rgb, target_shape=224):
+    # pca_n_components = 256
+    rgb_embed = get_dinov2_image_embedding(
+        Image.fromarray(rgb), dinov2=dinov2, device="cuda"
+    )
+
+    # pca_model = PCA(n_components=pca_n_components)
+    # rgb_embed = pca_model.fit_transform(
+    #     rgb_embed.reshape(-1, rgb_embed.shape[2])
+    # # )
+    # rgb_embed = rgb_embed.reshape(
+    #     target_shape, target_shape, -1
+    # )
+    
+    return rgb_embed.reshape(-1, rgb_embed.shape[2])  # (H*W, feat_dim)
+
+
+
+target_shape = 224
+rgb_preprocess = transforms.Compose(
+    [
+        transforms.Resize(
+            target_shape,
+            interpolation=transforms.InterpolationMode.BICUBIC,
+        ),
+        transforms.CenterCrop(target_shape),
+    ]
+)
+depth_preprocess = transforms.Compose(
+    [
+        transforms.Resize(
+            target_shape,
+            interpolation=transforms.InterpolationMode.NEAREST,
+        ),
+        transforms.CenterCrop(target_shape),
+    ]
+)
+
+def get_scaled_intrinsics(K, orig_shape, target_shape=224):
+    """
+    Scale camera intrinsics matrix based on image resizing and cropping.
+
+    Args:
+        K (np.ndarray): Original camera intrinsics matrix (3x3).
+        orig_shape (tuple): Original image shape (height, width).
+        target_shape (int): Target size for resized images (default: 224).
+
+    Returns:
+        np.ndarray: Scaled intrinsics matrix (3x3).
+    """
+    # Getting scale factor from torchvision.transforms.Resize behaviour
+    K_ = K.copy()
+    scale_factor = target_shape / min(orig_shape)
+
+    # Apply the scale factor to the intrinsics
+    K_[[0, 1], [0, 1]] *= scale_factor  # fx, fy
+    K_[[0, 1], 2] *= scale_factor  # cx, cy
+
+    # Adjust the principal point (cx, cy) for the center crop
+    crop_offset_x = (orig_shape[1] * scale_factor - target_shape) / 2
+    crop_offset_y = (orig_shape[0] * scale_factor - target_shape) / 2
+    K_[0, 2] -= crop_offset_x
+    K_[1, 2] -= crop_offset_y
+    return K_
 
 def _load_camera_intrinsics(intrinsics_path):
     """Load camera intrinsics from file.
@@ -38,6 +153,7 @@ def _load_camera_extrinsics(extrinsics_path):
 
 default_intrinsics = []
 default_extrinsics = []
+scaled_intrinsics = []
 cameras = {
   "cam_azure_kinect_front": {
     "intrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000259921812.txt",
@@ -52,11 +168,12 @@ cameras = {
 for cam_name, cam_cfg in cameras.items():
     # Load intrinsics
     K = _load_camera_intrinsics(cam_cfg['intrinsics'])
-    # K_scaled = BaseDataset.get_scaled_intrinsics(
-    #     K, orig_shape, target_shape
-    # )
+    orig_shape = [720, 1280]
+    K_scaled = get_scaled_intrinsics(
+        K, orig_shape, target_shape
+    )
     default_intrinsics.append(K)
-    # print(f"Loaded intrinsics for cam_name: {cam_name}: {K}")
+    scaled_intrinsics.append(K_scaled)
 
     # Load extrinsics
     T = _load_camera_extrinsics(cam_cfg['extrinsics'])
@@ -110,6 +227,11 @@ def load_multitask_high_level_model(path):
     device = torch.device("cuda")
     general_args = args.general
     input_channel = 5 if general_args.add_one_hot_encoding else 3
+    if general_args.get("use_rgb", False):
+        input_channel += 3
+    if general_args.get("use_dino", False):
+        input_channel += 1024
+
     output_dim = 13 
     from test_PointNet2.model_invariant import PointNet2_super_multitask
     
@@ -139,9 +261,19 @@ def load_multitask_high_level_model(path):
         
     return model, args
 
-def infer_multitask_high_level_model(inputs, goal_prediction_model, cat_embedding=None, high_level_args=None):
+def infer_multitask_high_level_model(inputs, goal_prediction_model, cat_embedding=None, high_level_args=None, extra=None):
+    if high_level_args.get("use_rgb", False):
+        rgb = extra['rgb']
+        gripper_rgb = extra['rgb_gripper']
+        extra_rgb = torch.cat([rgb, gripper_rgb], dim=1)
+        inputs = torch.cat([inputs, extra_rgb], dim=2)  # B, N+4, 6
+    if high_level_args.get("use_dino", False):
+        dino_features = extra['dino_features']
+        gripper_dino_features = extra['dino_features_gripper']
+        extra_dino_features = torch.cat([dino_features, gripper_dino_features], dim=1)
+        inputs = torch.cat([inputs, extra_dino_features], dim=2)  # B, N+4, 6 + 1024
 
-    # import pdb; pdb.set_trace()
+
     if high_level_args is not None:
         if high_level_args.add_one_hot_encoding:
             print("adding one hot encoding to the input")
@@ -289,10 +421,10 @@ def fpsample_pcd(scene_pcd, num_points):
     kdline_fps_samples_idx = fpsample.bucket_fps_kdline_sampling(scene_pcd[:, :3], num_points, h=h)
     kdline_fps_samples_idx = np.array(sorted(kdline_fps_samples_idx))
     scene_pcd = scene_pcd[kdline_fps_samples_idx]
-    return scene_pcd
+    return scene_pcd, kdline_fps_samples_idx
 
 
-def get_scene_pcd_cam_frame(depth, K, num_points, max_depth):
+def get_scene_pcd_cam_frame(depth, K, num_points, max_depth=None):
     """
     Generate a downsampled point cloud (PCD) from RGB embeddings and depth map.
 
@@ -315,10 +447,10 @@ def get_scene_pcd_cam_frame(depth, K, num_points, max_depth):
 
     # Remove points with invalid depth
     valid_depth = np.logical_and(z_flat > 0, z_flat < max_depth)
+
     x_flat, y_flat, z_flat = (
         arr[valid_depth] for arr in (x_flat, y_flat, z_flat)
     )
-
     # Unproject points using K inverse
     pixels = np.stack([x_flat, y_flat, np.ones_like(x_flat)], axis=0)
     K_inv = np.linalg.inv(K)
@@ -334,7 +466,7 @@ def get_scene_pcd_cam_frame(depth, K, num_points, max_depth):
     else:
         scene_pcd = scene_pcd[0]
 
-    return scene_pcd
+    return scene_pcd, valid_depth
 
 def transform_to_world_frame(points_cam, T_world_from_cam):
     """Transform points from camera frame to world frame.
@@ -391,24 +523,34 @@ def get_gripper_4_points_from_sriram_data(eef_pose_from_sriram):
 
     return eef_pos, eef_rot_6d, eef_gripper_width, eef_pos_robot_base, eef_rot_matrix_robot_base, eef_rot_6d_robot_base, eef_gripper_width_franka
     
-def compute_pcd(all_cam_depth_images, all_intrinsics=None, all_extrinsics=None, max_depth=1.5, num_points=4500):
+def compute_pcd(all_cam_depth_images, all_intrinsics=None, all_extrinsics=None, max_depth=1.5, num_points=4500, all_cam_rgb_images=None, use_dino=False):
     if all_intrinsics is None or all_extrinsics is None:
         all_intrinsics = default_intrinsics
         all_extrinsics = default_extrinsics
+    if all_cam_rgb_images is not None:
+        all_intrinsics = scaled_intrinsics
+
     all_pcd_in_world = []
     all_pcd_in_table_center = []
+    depth_masks = []
+
+
     for (depth, intrisincs, extrinsics) in zip(all_cam_depth_images, all_intrinsics, all_extrinsics):
         depth = depth / 1000.0
-        pcd_in_camera = get_scene_pcd_cam_frame(
+        pcd_in_camera, depth_mask = get_scene_pcd_cam_frame(
             depth, intrisincs, None, max_depth
         )
+
+        depth_masks.append(depth_mask.flatten())
         
+
         # import pdb; pdb.set_trace()
         pcd_in_world = transform_to_world_frame(pcd_in_camera, extrinsics)
+        x = pcd_in_world
         
         ### use open3d to visualize the point cloud
-        x = pcd_in_world[pcd_in_world[:, 1] < 0.6]
-        x = x[x[:, 1] > -0.4]
+        # x = pcd_in_world[pcd_in_world[:, 1] < 0.6]
+        # x = x[x[:, 1] > -0.4]
         
         all_pcd_in_table_center.append(x)
         x_in_robot_base = transform_from_table_center_to_robot_base(x)
@@ -416,14 +558,46 @@ def compute_pcd(all_cam_depth_images, all_intrinsics=None, all_extrinsics=None, 
     
         # import pdb; pdb.set_trace()
         all_pcd_in_world.append(x_in_robot_base)
+
+    depth_masks = np.concatenate(depth_masks, axis=0)  # (num_cams * H * W,)
+    # import pdb; pdb.set_trace()
+    if all_cam_rgb_images is not None:
+        all_rgb_flattend = [rgb.reshape(-1, 3) for rgb in all_cam_rgb_images]
+        all_rgb_flattend = np.concatenate(all_rgb_flattend, axis=0)  # (num_cams * H * W, 3)
+        all_rgb_flattend = all_rgb_flattend[depth_masks]
+
+
+    all_dino_features = None
+    # import pdb; pdb.set_trace()
+    if use_dino and all_cam_rgb_images is not None:
+        all_dino_features = [compute_dino_v2_features(rgb) for rgb in all_cam_rgb_images]
+        all_dino_features = np.concatenate(all_dino_features, axis=0)  # (num_cams * H * W, feat_dim)
+        all_dino_features = all_dino_features[depth_masks]
     
     all_pcd_in_world = np.concatenate(all_pcd_in_world, axis=0)  # (num_cams * num_points, 3)
     all_pcd_in_table_center = np.concatenate(all_pcd_in_table_center, axis=0)
+
+    filter_idx_1 = all_pcd_in_world[:, 1] < 0.6
+    filter_idx_2 = all_pcd_in_world[:, 1] > -0.4
+    filter_idx = np.logical_and(filter_idx_1, filter_idx_2)
+    all_pcd_in_world = all_pcd_in_world[filter_idx]
+    all_pcd_in_table_center = all_pcd_in_table_center[filter_idx]
+    if all_cam_rgb_images is not None:
+        all_rgb_flattend = all_rgb_flattend[filter_idx]
+    if use_dino and all_cam_rgb_images is not None:
+        all_dino_features = all_dino_features[filter_idx]
     
-    all_pcd_in_world = fpsample_pcd(all_pcd_in_world, num_points)
-    all_pcd_in_table_center = fpsample_pcd(all_pcd_in_table_center, num_points)
+    all_pcd_in_world, fps_idx = fpsample_pcd(all_pcd_in_world, num_points)
+    all_pcd_in_table_center = all_pcd_in_table_center[fps_idx]
+    if all_cam_rgb_images is not None:
+        all_rgb_flattend = all_rgb_flattend[fps_idx]
+        all_rgb_flattend = all_rgb_flattend.astype(np.float32) / 255.0
+        if use_dino:
+            all_dino_features = all_dino_features[fps_idx]
+    else:
+        all_rgb_flattend = None
     
-    return all_pcd_in_world, all_pcd_in_table_center
+    return all_pcd_in_world, all_pcd_in_table_center, all_rgb_flattend, all_dino_features
 
 
 def get_aloha_future_eef_poses_from_delta_actions(low_level_action, 

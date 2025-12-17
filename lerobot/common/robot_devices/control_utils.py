@@ -42,7 +42,9 @@ from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
 from lerobot.scripts.yufei_policy_utils import compute_pcd, get_gripper_4_points_from_sriram_data, \
     get_4_points_from_gripper_pos_orient, infer_multitask_high_level_model, low_level_policy_infer, \
-    get_aloha_future_eef_poses_from_delta_actions, rotation_transfer_6D_to_matrix
+    get_aloha_future_eef_poses_from_delta_actions, rotation_transfer_6D_to_matrix, \
+    depth_preprocess, rgb_preprocess
+
 from matplotlib import pyplot as plt
 
 def add_eef_pose(real_joints):
@@ -401,9 +403,32 @@ def control_loop(
                 all_cam_depth_images = []
                 for depth_key in depth_keys:
                     depth = Image.fromarray(observation[depth_key].numpy()[:, :, 0])
-                    depth = np.asarray(depth)
+                    if policy['high_level_args']['general'].get("use_rgb", False) or policy['high_level_args']['general'].get("use_dino", False):         
+                        depth = np.asarray(depth_preprocess(depth))
+                    else:
+                        depth = np.asarray(depth)
                     all_cam_depth_images.append(depth)
-                
+
+                all_cam_color_images = None
+                if policy['high_level_args']['general'].get("use_rgb", False) or policy['high_level_args']['general'].get("use_dino", False):         
+                    color_keys = ["observation.images.cam_azure_kinect_front.color", "observation.images.cam_azure_kinect_back.color"]
+                    all_cam_color_images = []
+                    for color_key in color_keys:
+                        rgb = (observation[color_key].numpy() * 255).astype(np.uint8)
+                        ### convert from rgb to bgr using openscv
+                        import cv2
+                        rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                        # plt.imshow(rgb)
+                        # plt.show()
+                        rgb = Image.fromarray(rgb)
+                        rgb = np.asarray(rgb_preprocess(rgb))
+                        # plt.imshow(rgb)
+                        # plt.show()
+                        all_cam_color_images.append(rgb)       
+
+                   
+
+
                 # import pdb; pdb.set_trace()
                 # fig, axes = plt.subplots(1, 2)
                 # axes = axes.reshape(-1)
@@ -413,8 +438,9 @@ def control_loop(
                 # plt.close("all")
                 
                 # import pdb; pdb.set_trace()
-                scene_pcd, scene_pcd_in_table_center = compute_pcd(all_cam_depth_images, num_points=4500)
-                
+                scene_pcd_dino = None
+                scene_pcd, scene_pcd_in_table_center, scene_pcd_color, scene_pcd_dino = compute_pcd(all_cam_depth_images, num_points=4500, all_cam_rgb_images=all_cam_color_images, 
+                                                                                     use_dino=policy['high_level_args']['general'].get("use_dino", False))
                 
                 # import pdb; pdb.set_trace()
                 ### NOTE: get the gripper 4 points
@@ -437,7 +463,9 @@ def control_loop(
                 obs_queue.append({
                     'scene_pcd': scene_pcd,
                     'eef_4_points': eef_4_points,
-                    'agent_pos': agent_pos
+                    'agent_pos': agent_pos,
+                    'scene_pcd_color': scene_pcd_color,
+                    "scene_pcd_dino": scene_pcd_dino,
                 })
                 debug_queue.append({
                     "eef_pos": eef_pos,
@@ -445,20 +473,46 @@ def control_loop(
                 })
 
                 if len(action_queue) == 0:
+                    # import open3d as o3d
+                    # pcd = o3d.geometry.PointCloud()
+                    # import pdb; pdb.set_trace()
+                    # pcd.points = o3d.utility.Vector3dVector(scene_pcd)
+                    # pcd.colors = o3d.utility.Vector3dVector(scene_pcd_color)
+                    # o3d.visualization.draw_geometries([pcd])
+
+
                     high_level_input_np = np.concatenate([scene_pcd, eef_4_points], axis=0)  # (N, 3)
                     high_level_input = torch.from_numpy(high_level_input_np).float().unsqueeze(0).cuda()
+                    if policy['high_level_args']['general'].get("use_rgb", False):
+                        scene_pcd_color_tensor = torch.from_numpy(scene_pcd_color).float().unsqueeze(0).cuda()
+                        gripper_pcd_color_tensor = torch.ones((4, 3)).float().unsqueeze(0).cuda()
+                        extra = {
+                            'rgb': scene_pcd_color_tensor,
+                            'rgb_gripper': gripper_pcd_color_tensor,
+                        } 
+                    else:
+                        extra = None
+
+                    if policy['high_level_args']['general'].get("use_dino", False):
+                        # import pdb; pdb.set_trace()
+                        scene_pcd_dino_tensor = torch.from_numpy(scene_pcd_dino).float().unsqueeze(0).cuda()
+                        gripper_pcd_dino_tensor = torch.ones((4, 1024)).float().unsqueeze(0).cuda()
+                        if extra is None:
+                            extra = {}
+                        extra['dino_features'] = scene_pcd_dino_tensor
+                        extra['dino_features_gripper'] = gripper_pcd_dino_tensor
 
                     # import pdb; pdb.set_trace()
                     with torch.no_grad():
                         high_level_predict = infer_multitask_high_level_model(
-                            high_level_input, high_level_policy, policy['cat_embedding'], policy['high_level_args'].articubot
+                            high_level_input, high_level_policy, policy['cat_embedding'], policy['high_level_args'].articubot,
+                            extra=extra,
                         )  # 1, 4, 3 ## torch tensor
 
                    
                     ### TODO: figure out how to use the history here
                     # import pdb; pdb.set_trace()
                     if len(obs_queue) == 1:
-                    # if True:
                         scene_pcd_history = torch.from_numpy(obs_queue[0]['scene_pcd']).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1,1)
                         agent_pos_history = torch.from_numpy(obs_queue[0]['agent_pos']).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1)
                         eef_4_points_history = torch.from_numpy(obs_queue[0]['eef_4_points']).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1,1)
@@ -496,11 +550,11 @@ def control_loop(
                     
 
                     ### 3d plot the scene pcd
-                    if False:
+                    if True:
                         fig = plt.figure(figsize=(10, 5))
 
                         ax = fig.add_subplot(1, 2, 1, projection='3d')
-                        ax.scatter(scene_pcd[:,0], scene_pcd[:,1], scene_pcd[:,2], s=1, color='grey')
+                        ax.scatter(scene_pcd[:,0], scene_pcd[:,1], scene_pcd[:,2], s=1, color=scene_pcd_color)
                         # ax.scatter(eef_4_points[:,0], eef_4_points[:,1], eef_4_points[:,2], s=50, color='green')
                         ax.scatter(eef_4_points[[0],0], eef_4_points[[0],1], eef_4_points[[0],2], s=50, color='red')
                         ax.scatter(eef_4_points[[1],0], eef_4_points[[1],1], eef_4_points[[1],2], s=50, color='green')
