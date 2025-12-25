@@ -20,9 +20,9 @@ from scipy.spatial.transform import Rotation
 import pytorch3d.transforms as transforms
 
 
-def generate_heatmap_images(index, gripper_pcds, subgoal_indices, K, img_shape, GRIPPER_IDX):
+def generate_heatmap_images(index, gripper_pcds, subgoal_indices, K, world_to_cam, img_shape, GRIPPER_IDX):
     """
-    gripper pointclouds are already rendered and stored in the camera frame (check r-pad/lfd3d)
+    gripper pointclouds are in world frame (check r-pad/lfd3d)
     Compute heatmaps with the gripper positions at the end of each subgoal.
 
     Create a video of heatmaps corresponding to the goal heatmap for each frame in the rgb video.
@@ -32,6 +32,11 @@ def generate_heatmap_images(index, gripper_pcds, subgoal_indices, K, img_shape, 
 
     for subgoal_idx in subgoal_indices:
         subgoal_pcd = gripper_pcds[subgoal_idx][GRIPPER_IDX]
+        homogenous_append = np.ones((subgoal_pcd.shape[0], 1))
+        gripper_urdf_3d_pos = np.concatenate([subgoal_pcd, homogenous_append], axis=-1)[
+            :, :, None
+        ]
+        subgoal_pcd = (world_to_cam @ gripper_urdf_3d_pos)[:, :3].squeeze(2)
         urdf_proj = project_points_to_image(subgoal_pcd, K)
         all_subgoal_heatmaps.append(generate_heatmap_from_points(urdf_proj, (height, width)))
 
@@ -264,9 +269,9 @@ def gen_droid_dataset(
 
         gripper_pcds = np.load(f"{gripper_pcd_dir}/{index}.npz")["arr_0"].astype(np.float32)
         cam1_heatmap_images = generate_heatmap_images(index, gripper_pcds, subgoal_indices,
-                                                      camera_data['cam1_K'], cam1_images.shape, GRIPPER_IDX)
+                                                      camera_data['cam1_K'], camera_data['world_to_cam1'], cam1_images.shape, GRIPPER_IDX)
         cam2_heatmap_images = generate_heatmap_images(index, gripper_pcds, subgoal_indices,
-                                                      camera_data['cam2_K'], cam2_images.shape, GRIPPER_IDX)
+                                                      camera_data['cam2_K'], camera_data['world_to_cam2'], cam2_images.shape, GRIPPER_IDX)
         next_event_indices = np.searchsorted(subgoal_indices, np.arange(subgoal_indices[-1]), side='right')
 
         # Process until the end of the last subgoal
