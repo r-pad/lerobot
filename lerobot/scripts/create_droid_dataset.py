@@ -20,7 +20,7 @@ from scipy.spatial.transform import Rotation
 import pytorch3d.transforms as transforms
 
 
-def generate_heatmap_images(index, gripper_pcd_dir, subgoal_indices, K, img_shape, GRIPPER_IDX):
+def generate_heatmap_images(index, gripper_pcds, subgoal_indices, K, img_shape, GRIPPER_IDX):
     """
     gripper pointclouds are already rendered and stored in the camera frame (check r-pad/lfd3d)
     Compute heatmaps with the gripper positions at the end of each subgoal.
@@ -28,9 +28,6 @@ def generate_heatmap_images(index, gripper_pcd_dir, subgoal_indices, K, img_shap
     Create a video of heatmaps corresponding to the goal heatmap for each frame in the rgb video.
     """
     n_imgs, height, width, _ = img_shape
-    gripper_pcds = np.load(f"{gripper_pcd_dir}/{index}.npz")["arr_0"].astype(
-        np.float32
-    )
     all_subgoal_heatmaps = []
 
     for subgoal_idx in subgoal_indices:
@@ -114,7 +111,6 @@ def get_goal_text(event_dir, index):
         subgoals = json.load(f)
     return " and ".join(d["subgoal"] for d in subgoals), subgoals
 
-
 def get_cam_to_world(cam_extrinsics):
     rotation = Rotation.from_euler("xyz", np.array(cam_extrinsics[3:])).as_matrix()
     translation = cam_extrinsics[:3]
@@ -130,26 +126,44 @@ def load_camera_params(droid_raw_dir, fname, camera_intrinsics_dict, scale_facto
     with open(metadata_file) as f:
         metadata = json.load(f)
 
-    # We work with camera-1 data across the dataset.
-    cam_serial = metadata["ext1_cam_serial"]
     wrist_cam_serial = metadata["wrist_cam_serial"]
-    extrinsics_left = metadata["ext1_cam_extrinsics"]
-    cam_to_world = get_cam_to_world(extrinsics_left)
-    world_to_cam = np.linalg.inv(cam_to_world)
 
-    cam_params = camera_intrinsics_dict[cam_serial]
-    K = np.array(
-        [
-            [cam_params["fx"], 0.0, cam_params["cx"]],
-            [0.0, cam_params["fy"], cam_params["cy"]],
-            [0.0, 0.0, 1.0],
-        ]
-    )
-    K = K * scale_factor
-    K[2, 2] = 1
-    baseline = cam_params["baseline"] / 1000
+    def process_camera(cam_key):
+        cam_serial = metadata[f"{cam_key}_cam_serial"]
+        extrinsics = metadata[f"{cam_key}_cam_extrinsics"]
+        cam_to_world = get_cam_to_world(extrinsics)
+        world_to_cam = np.linalg.inv(cam_to_world)
+        cam_params = camera_intrinsics_dict[cam_serial]
 
-    return cam_serial, wrist_cam_serial, K, baseline, world_to_cam
+        K = np.array(
+            [
+                [cam_params["fx"], 0.0, cam_params["cx"]],
+                [0.0, cam_params["fy"], cam_params["cy"]],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        K = K * scale_factor
+        K[2, 2] = 1
+        baseline = cam_params["baseline"] / 1000
+
+        return cam_serial, K, world_to_cam, baseline
+
+    cam1_serial, K1, world_to_cam1, baseline1 = process_camera("ext1")
+    cam2_serial, K2, world_to_cam2, baseline2 = process_camera("ext2")
+
+    camera_data = {
+        "cam1_serial": cam1_serial,
+        "cam2_serial": cam2_serial,
+        "wrist_cam_serial": wrist_cam_serial,
+        "cam1_K": K1,
+        "cam2_K": K2,
+        "world_to_cam1": world_to_cam1,
+        "world_to_cam2": world_to_cam2,
+        "baseline1": baseline1,
+        "baseline2": baseline2,
+    }
+
+    return camera_data
 
 def gen_droid_dataset(
     droid_path: str,
@@ -201,39 +215,89 @@ def gen_droid_dataset(
                             total=(num_episodes - droid_dataset.meta.total_episodes)):
         index = dataset_indexes[episode_idx]
         fname = idx_to_fname_mapping[index]
-        cam_serial, wrist_cam_serial, K, baseline, world_to_cam = load_camera_params(droid_raw_dir, fname, camera_intrinsics_dict, scale_factor)
+        camera_data = load_camera_params(droid_raw_dir, fname, camera_intrinsics_dict, scale_factor)
 
-        video_path = f"{droid_raw_dir}/1.0.1/{fname}/recordings/MP4/{cam_serial}.mp4"
-        images = iio.imread(video_path)
-        images = np.array(
-            [cv2.resize(i, (0,0), fx=scale_factor, fy=scale_factor) for i in images]
+        def load_camera_data(serial, cam_type="external", K=None, baseline=None):
+            # Load RGB video
+            video_path = f"{droid_raw_dir}/1.0.1/{fname}/recordings/MP4/{serial}.mp4"
+            images = iio.imread(video_path)
+            images = np.array(
+                [cv2.resize(i, (0,0), fx=scale_factor, fy=scale_factor) for i in images]
+            )
+
+            # Load depth (only for external cameras)
+            depth = None
+            if cam_type == "external":
+                assert K is not None
+                disp_name = f"{droid_raw_dir}/1.0.1/{fname}/{serial}_disp.npz"
+                disparity = np.load(disp_name)["arr_0"].astype(np.float32)
+                # Has already been resized
+                depth = np.divide(
+                    K[0, 0] * baseline,
+                    disparity,
+                    out=np.zeros_like(disparity),
+                    where=disparity != 0,
+                )
+                depth = (depth * 1000.0).astype(np.uint16)[..., None]  # 16-bit in mm
+            return images, depth
+
+        # Load camera data
+        cam1_images, cam1_depth = load_camera_data(
+            camera_data['cam1_serial'], "external",
+            camera_data['cam1_K'], camera_data['baseline1']
         )
-
-        wrist_video_path = f"{droid_raw_dir}/1.0.1/{fname}/recordings/MP4/{wrist_cam_serial}.mp4"
-        wrist_images = iio.imread(wrist_video_path)
-        wrist_images = np.array(
-            [cv2.resize(i, (0,0), fx=scale_factor, fy=scale_factor) for i in wrist_images]
+        cam2_images, cam2_depth = load_camera_data(
+            camera_data['cam2_serial'], "external",
+            camera_data['cam2_K'], camera_data['baseline2']
         )
+        wrist_images, _ = load_camera_data(camera_data['wrist_cam_serial'], "wrist")
 
-        if images.shape != wrist_images.shape:
-            print(f"Mismatched shapes of wrist and external camera. Skipping {episode_idx}")
+        if cam1_images.shape != wrist_images.shape or cam2_images.shape != wrist_images.shape:
+            print(f"Mismatched shapes between cameras. Skipping {episode_idx}")
             continue
 
         caption, subgoals = get_goal_text(event_dir, index)
         subgoal_indices = get_subgoal_indices(event_dir, index, subgoals)
-        obs, actions = load_trajectory(droid_raw_dir, fname)
-        heatmap_images = generate_heatmap_images(index, gripper_pcd_dir, subgoal_indices,
-                                                 K, images.shape, GRIPPER_IDX)
-
         if subgoal_indices[-1] == 0: continue # some edge cases ...
+
+        obs, actions = load_trajectory(droid_raw_dir, fname)
+
+        gripper_pcds = np.load(f"{gripper_pcd_dir}/{index}.npz")["arr_0"].astype(np.float32)
+        cam1_heatmap_images = generate_heatmap_images(index, gripper_pcds, subgoal_indices,
+                                                      camera_data['cam1_K'], cam1_images.shape, GRIPPER_IDX)
+        cam2_heatmap_images = generate_heatmap_images(index, gripper_pcds, subgoal_indices,
+                                                      camera_data['cam2_K'], cam2_images.shape, GRIPPER_IDX)
+        next_event_indices = np.searchsorted(subgoal_indices, np.arange(subgoal_indices[-1]), side='right')
 
         # Process until the end of the last subgoal
         for frame_idx in range(subgoal_indices[-1]):
             frame_data = {}
             frame_data["task"] = caption
-            frame_data["observation.images.cam_azure_kinect.color"] = images[frame_idx]
+
+            # Camera 1 data
+            frame_data["observation.images.cam_1.color"] = cam1_images[frame_idx]
+            frame_data["observation.images.cam_1.depth"] = cam1_depth[frame_idx]
+            frame_data["observation.images.cam_1.goal_gripper_proj"] = cam1_heatmap_images[frame_idx]
+            frame_data["observation.cam_1.intrinsics"] = camera_data['cam1_K'].astype(np.float32)
+            frame_data["observation.cam_1.extrinsics"] = np.linalg.inv(camera_data['world_to_cam1']).astype(np.float32)
+
+            # Camera 2 data
+            frame_data["observation.images.cam_2.color"] = cam2_images[frame_idx]
+            frame_data["observation.images.cam_2.depth"] = cam2_depth[frame_idx]
+            frame_data["observation.images.cam_2.goal_gripper_proj"] = cam2_heatmap_images[frame_idx]
+            frame_data["observation.cam_2.intrinsics"] = camera_data['cam2_K'].astype(np.float32)
+            frame_data["observation.cam_2.extrinsics"] = np.linalg.inv(camera_data['world_to_cam2']).astype(np.float32)
+
+            # Wrist camera
             frame_data["observation.images.cam_wrist"] = wrist_images[frame_idx]
-            frame_data["observation.images.cam_azure_kinect.goal_gripper_proj"] = heatmap_images[frame_idx]
+
+            # Gripper point cloud
+            frame_data["observation.points.gripper_pcds"] = gripper_pcds[frame_idx].astype(np.float32)
+
+            # Next event index
+            frame_data["next_event_idx"] = np.array([next_event_indices[frame_idx]], dtype=np.int32)
+
+            # Pose and action data
             frame_data["observation.right_eef_pose"] = obs[frame_idx]
             frame_data["action.right_eef_pose"] = actions[frame_idx]
             frame_data["action"] = np.zeros(18, dtype=np.float32)
@@ -267,10 +331,7 @@ if __name__ == "__main__":
     `right_eef_pose` is again misleading because there's no right/left arm in DROID but this is just following Aloha conventions
     since existing code has the right_eef_pose key. Should probably rename both keys to just be eef_pose.
 
-    Depth is available in this processed version of DROID with disparity from FoundationStereo, currently not saved.
-
-    The image keys are named "observation.images.cam_azure_kinect" but DROID isn't actually collected with a kinect.
-    The names are just for convenience to finetune without hassles, as LeRobot expects the same keys to be present.
+    Depth is available in this processed version of DROID with disparity from FoundationStereo.
     """
     features = {
         "observation.state": {
@@ -293,31 +354,57 @@ if __name__ == "__main__":
             'shape': (10,),
             'names': ['rot_6d_0', 'rot_6d_1', 'rot_6d_2', 'rot_6d_3', 'rot_6d_4', 'rot_6d_5', 'trans_0', 'trans_1', 'trans_2', 'gripper_articulation']
         },
-        # "observation.images.cam.depth": {
-        #     'dtype': 'video',
-        #     'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 1),
-        #     'names': ['height', 'width', 'channels'],
-        #     'info': 'Depth'
-        # },
-        "observation.images.cam_azure_kinect.color": {
-            'dtype': 'video',
-            'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
-            'names': ['height', 'width', 'channels'],
-            'info': 'RGB image'
-        },
         "observation.images.cam_wrist": {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
             'names': ['height', 'width', 'channels'],
             'info': 'Wrist camera image'
         },
-        "observation.images.cam_azure_kinect.goal_gripper_proj": {
+        "observation.points.gripper_pcds": {
+            'dtype': 'pcd',
+            'shape': [-1, 3],
+            'names': ['N', 'channels'],
+            'info': 'Raw gripper point cloud at current position'
+        },
+        "next_event_idx": {
+            'dtype': 'int32',
+            'shape': (1,),
+            'names': ['idx'],
+            'info': 'Index of next event in the dataset'
+        },
+    }
+
+    for cam_name in ["cam_1", "cam_2"]:
+        features[f"observation.images.{cam_name}.color"] = {
+            'dtype': 'video',
+            'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
+            'names': ['height', 'width', 'channels'],
+            'info': 'RGB image'
+        }
+        features[f"observation.images.{cam_name}.depth"] = {
+            'dtype': 'video',
+            'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 1),
+            'names': ['height', 'width', 'channels'],
+            'info': 'Depth'
+        }
+        features[f"observation.images.{cam_name}.goal_gripper_proj"] = {
             'dtype': 'video',
             'shape': (IMG_SHAPE[0], IMG_SHAPE[1], 3),
             'names': ['height', 'width', 'channels'],
             'info': 'Projection of gripper pcd at goal position onto image'
-        },
-    }
+        }
+        features[f"observation.{cam_name}.intrinsics"] = {
+            'dtype': 'float32',
+            'shape': (3, 3),
+            'names': ['rows', 'cols'],
+            'info': 'Camera intrinsic matrix (K)'
+        }
+        features[f"observation.{cam_name}.extrinsics"] = {
+            'dtype': 'float32',
+            'shape': (4, 4),
+            'names': ['rows', 'cols'],
+            'info': 'Camera extrinsic matrix (T_world_cam)'
+        }
 
     droid_dataset = gen_droid_dataset(
         droid_path=DROID_PATH,
