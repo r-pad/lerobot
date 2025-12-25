@@ -286,6 +286,16 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
             # Keep in world frame
             frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=np.eye(4), joint_state=joint_state).astype(np.float32)
 
+    # Add calibration data if feature is enabled
+    for cam_name in camera_names:
+        intrinsics_key = f"observation.{cam_name}.intrinsics"
+        extrinsics_key = f"observation.{cam_name}.extrinsics"
+
+        if intrinsics_key in new_features:
+            frame_data[intrinsics_key] = torch.from_numpy(calibrations[cam_name]["K"]).float()
+        if extrinsics_key in new_features:
+            frame_data[extrinsics_key] = torch.from_numpy(calibrations[cam_name]["T_world_cam"]).float()
+
     # Dummy values, replaced at the end of the episode
     for cam_name in camera_names:
         goal_key = f"observation.images.{cam_name}.goal_gripper_proj"
@@ -489,6 +499,10 @@ if __name__ == "__main__":
     """
     Examples:
 
+    # General command
+    python upgrade_dataset.py --source_repo_id sriramsk/robot_multiview --target_repo_id sriramsk/robot_multiview_upgraded \
+    --calibration_config /path/to/calibration_multiview.json --new_features gripper_pcds goal_gripper_proj calibration next_event_idx
+
     # Phantom retargeting mode
     python upgrade_dataset.py --source_repo_id sriramsk/human_mug_0718 --target_repo_id sriramsk/phantom_mug_0718 --discard_episodes 3 10 11 13 21 --new_features goal_gripper_proj \
     --phantomize --path_to_extradata /data/sriram/lerobot_extradata/sriramsk/human_mug_0718
@@ -496,14 +510,6 @@ if __name__ == "__main__":
     # Direct human data mode
     python upgrade_dataset.py --source_repo_id sriramsk/mug_on_platform_20250830_human --target_repo_id sriramsk/mug_on_platform_20250830_human_heatmapGoal --new_features gripper_pcds goal_gripper_proj next_event_idx subgoal \
     --humanize --path_to_extradata /data/sriram/lerobot_extradata/sriramsk/mug_on_platform_20250830_human
-
-    # Single camera mode
-    python upgrade_dataset.py --source_repo_id sriramsk/robot_data --target_repo_id sriramsk/robot_data_upgraded \
-    --calibration_config /path/to/calibration_single.json --new_features gripper_pcds goal_gripper_proj
-
-    # Multiview mode
-    python upgrade_dataset.py --source_repo_id sriramsk/robot_multiview --target_repo_id sriramsk/robot_multiview_upgraded \
-    --calibration_config /path/to/calibration_multiview.json --new_features gripper_pcds goal_gripper_proj
     """
     parser = argparse.ArgumentParser(description="Upgrade dataset with new keys and calibration.")
     parser.add_argument("--source_repo_id", type=str, default="sriramsk/fold_onesie_20250831_subsampled",
@@ -565,6 +571,21 @@ if __name__ == "__main__":
             'names': ['subgoal'],
             'info': 'Caption for subgoal in dataset'
         }
+    if "calibration" in args.new_features:
+        # Add intrinsics and extrinsics for each camera
+        for cam_name in camera_names:
+            new_features[f"observation.{cam_name}.intrinsics"] = {
+                'dtype': 'float32',
+                'shape': (3, 3),
+                'names': ['rows', 'cols'],
+                'info': 'Camera intrinsic matrix (K)'
+            }
+            new_features[f"observation.{cam_name}.extrinsics"] = {
+                'dtype': 'float32',
+                'shape': (4, 4),
+                'names': ['rows', 'cols'],
+                'info': 'Camera extrinsic matrix (T_world_cam)'
+            }
     remove_features = []
     if "cam_wrist" in args.remove_features:
         remove_features.append("observation.images.cam_wrist")
