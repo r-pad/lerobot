@@ -289,24 +289,32 @@ def record(
     # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer"
     # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer_keep_old_normalizer/"
     # checkpoint_name = "epoch-300.ckpt"
-    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_train_longer_keep_old_normalizer" ### trained with only one-hot
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_train_longer_keep_old_normalizer"
     checkpoint_name = "epoch-300.ckpt"
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_rgb_train_longer_keep_old_normalizer" 
+    # checkpoint_name = "epoch-240.ckpt"
 
-    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_rgb_train_longer_keep_old_normalizer" ### trained with color
-    checkpoint_name = "epoch-240.ckpt"
+
+    ### towel low-level policy
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_towel_train_longer_keep_old_normalizer"
+    # checkpoint_name = "epoch-300.ckpt"
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1230_finetune_ours_sriram_towel_rgb_dataset_train_longer_keep_old_normalizer"
+    checkpoint_name = "epoch-160.ckpt"
+
 
     # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1020_grasp_lift_closed_goal_full"
     # checkpoint_name = "epoch-92.ckpt"
     from lerobot.scripts.yufei_policy_utils import load_low_level_policy, load_multitask_high_level_model
     low_level_policy = load_low_level_policy(exp_dir, checkpoint_name)
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-04fine_tune_our_on_sriram_lr_decay/model_15001.pth"
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-09fine_tune_our_on_sriram_new_rot/model_32501.pth"
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-09fine_tune_our_on_sriram_new_rot/model_62501.pth"
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-10fine_tune_our_on_sriram_new_rot_w_one_hot/model_47501.pth"
     model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-10fine_tune_our_on_sriram_new_rot_w_one_hot/model_27501.pth" ### best withtout color but with one-hot
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-13fine_tune_our_on_sriram_new_rot_rgb/model_45001.pth" 
-    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-14fine_tune_our_on_sriram_new_rot_dino/model_47501.pth" 
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-14fine_tune_our_on_sriram_new_rot_dino/model_27501.pth" 
+    cat_idx = 13
+
+    ### towel high-level policy
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-17fine_tune_our_on_sriram_towel_one_hot/model_130001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_45001.pth"
+    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_35001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_40001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_30001.pth"
 
     high_level_policy, high_level_args = load_multitask_high_level_model(model_path)
     import torch
@@ -315,11 +323,12 @@ def record(
     from lerobot.common.policies.robot_adapters import AlohaAdapter
     robot_adapter = AlohaAdapter(action_space="right_eef")
     from collections import deque
-    cat_idx = 13
+
+    cat_idx = 0
     policy = {
         "high_level": high_level_policy,
         "low_level": low_level_policy,
-        "cat_embedding": siglip_text_features[cat_idx].float().to("cuda"),
+        "cat_embedding": siglip_text_features[0].float().to("cuda"),
         "cat_idx": cat_idx,
         "robot_adapter": robot_adapter,
         "action_queue": deque(),

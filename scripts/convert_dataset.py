@@ -292,6 +292,7 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
 # Let's take this one for this example
 # repo_id = "lerobot/aloha_mobile_cabinet"
 repo_id = "sriramsk/plate_table_multiview_20251113_ss_hg"
+repo_id = "sriramsk/fold_towel_MV_20251030_ss_hg"
 # We can have a look and fetch its metadata to know more about it:
 ds_meta = LeRobotDatasetMetadata(repo_id)
 
@@ -409,7 +410,7 @@ for traj_idx in range(dataset.num_episodes):
             x_in_robot_base = transform_from_table_center_to_robot_base(x)
             
             # fig, axes = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
-            # ### Plot in table coordinate
+            ### Plot in table coordinate
             # ax = axes[0]
             # ax.scatter(x[:, 0], x[:, 1], x[:, 2], s=1, color='blue')
             # ax.scatter([0], [0], [0], s=50, color='red')
@@ -470,9 +471,9 @@ for traj_idx in range(dataset.num_episodes):
         
         # print("all_pcd_in_world shape:", all_pcd_in_world.shape)
         traj_scene_pcd.append(all_pcd_in_world)
-        # ax = plt.subplot(projection='3d')
-        # ax.scatter(all_pcd_in_world[:, 0], all_pcd_in_world[:, 1], all_pcd_in_world[:, 2], s=1, color='blue')
-        # plt.show()
+        ax = plt.subplot(projection='3d')
+        ax.scatter(all_pcd_in_world[:, 0], all_pcd_in_world[:, 1], all_pcd_in_world[:, 2], s=1, color='blue')
+        plt.show()
         
         ### NOTE: get the goal event idx, goal eef pose and convert that to the goal gripper pcd
         episode_index = data_point["episode_index"].item()
@@ -571,6 +572,7 @@ for traj_idx in range(dataset.num_episodes):
         extract_actions(traj_eef_pose, traj_scene_pcd, traj_gripper_pcd, traj_goal_gripper_pcd, combine_action_steps=2)
 
     data_dir = "/data/yufei/lerobot/data/plate_new_rot_default_delta_finger_angle"
+    data_dir = "/data/yufei/lerobot/data/folding-towel"
     traj_dir = os.path.join(data_dir, f"traj_{traj_idx:04d}")
     if not os.path.exists(traj_dir):
         os.makedirs(traj_dir)

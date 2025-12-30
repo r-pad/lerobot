@@ -18,6 +18,7 @@ import time
 from torchvision import transforms
 import torch.nn.functional as F
 from sklearn.decomposition import PCA
+from matplotlib import pyplot as plt
 
 ### TODO: add torch transformations for resizing the rgb and depth images
 target_shape = 224
@@ -346,7 +347,8 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
     traj_pc = traj_pc[::combine_action_steps]
     traj_gripper_pcd = traj_gripper_pcd[::combine_action_steps]
     traj_goal_gripper_pcd = traj_goal_gripper_pcd[::combine_action_steps]
-    traj_rgb_features = traj_rgb_features[::combine_action_steps]
+    if traj_rgb_features is not None:
+        traj_rgb_features = traj_rgb_features[::combine_action_steps]
     traj_rgb_values = traj_rgb_values[::combine_action_steps]
     
     traj_actions = []
@@ -365,7 +367,8 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
     base_pc = traj_pc[0]
     base_pos_ori = traj_pos_ori[0]
     base_goal_gripper_pcd = traj_goal_gripper_pcd[0]
-    base_rgb_features = traj_rgb_features[0]
+    if traj_rgb_features is not None:
+        base_rgb_features = traj_rgb_features[0]
     base_rgb_values = traj_rgb_values[0]
     
     for i in range(len(traj_pos_ori) - 1):
@@ -400,7 +403,8 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
             filtered_gripper_pcds.append(base_gripper_pcd)
             filtered_pos_oris.append(base_pos_ori)
             filtered_goal_gripper_pcds.append(base_goal_gripper_pcd)
-            filtered_rgb_features.append(base_rgb_features)
+            if traj_rgb_features is not None:
+                filtered_rgb_features.append(base_rgb_features)
             filtered_rgb_values.append(base_rgb_values)
             
             base_pc = traj_pc[i+1]
@@ -410,7 +414,8 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
             base_ori_6d = target_ori_6d
             base_finger_angle = target_finger_angle
             base_goal_gripper_pcd = traj_goal_gripper_pcd[i+1]
-            base_rgb_features = traj_rgb_features[i+1]
+            if traj_rgb_features is not None:
+                base_rgb_features = traj_rgb_features[i+1]
             base_rgb_values = traj_rgb_values[i+1]
 
     return np.asarray(traj_actions), filtered_pcs, filtered_pos_oris, filtered_gripper_pcds, filtered_goal_gripper_pcds, filtered_rgb_values, filtered_rgb_features
@@ -418,6 +423,7 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
 # Let's take this one for this example
 # repo_id = "lerobot/aloha_mobile_cabinet"
 repo_id = "sriramsk/plate_table_multiview_20251113_ss_hg"
+repo_id = "sriramsk/fold_towel_MV_20251210_ss_hg"
 # We can have a look and fetch its metadata to know more about it:
 ds_meta = LeRobotDatasetMetadata(repo_id)
 
@@ -461,6 +467,7 @@ for cam_name, cam_cfg in cameras.items():
 
 num_points = 4500
 max_depth = 1.5
+store_dino = False
 
 for traj_idx in range(dataset.num_episodes):
 # for traj_idx in range(1):
@@ -515,16 +522,19 @@ for traj_idx in range(dataset.num_episodes):
             )
             rgb = Image.fromarray(rgb)
             rgb = np.asarray(rgb_preprocess(rgb))
+            plt.imshow(rgb)
+            plt.show()
             all_cam_color_images.append(rgb)
             
         ### NOTE: encode dino-v2 features for the rgb images here
         all_rgb_flattend = [rgb.reshape(-1, 3) for rgb in all_cam_color_images]
         all_rgb_flattend = np.concatenate(all_rgb_flattend, axis=0)  # (num_cams * H * W, 3)
-        all_rgb_features_flattened = []
-        for rgb in all_cam_color_images:
-            rgb_features = compute_dino_v2_features(rgb, target_shape=target_shape)
-            all_rgb_features_flattened.append(rgb_features)    
-        all_rgb_features_flattened = np.concatenate(all_rgb_features_flattened, axis=0)  # (num_cams * H * W, feat_dim)
+        if store_dino:
+            all_rgb_features_flattened = []
+            for rgb in all_cam_color_images:
+                rgb_features = compute_dino_v2_features(rgb, target_shape=target_shape)
+                all_rgb_features_flattened.append(rgb_features)    
+            all_rgb_features_flattened = np.concatenate(all_rgb_features_flattened, axis=0)  # (num_cams * H * W, feat_dim)
             
         # import pdb; pdb.set_trace()    
         # %matplotlib inline
@@ -579,7 +589,8 @@ for traj_idx in range(dataset.num_episodes):
         
         all_pcd_in_world = np.concatenate(all_pcd_in_world, axis=0)  # (num_cams * num_points, 3)
         depth_masks = np.concatenate(depth_masks, axis=0)  # (num_cams * H * W,)
-        all_rgb_features_flattened = all_rgb_features_flattened[depth_masks]
+        if store_dino:
+            all_rgb_features_flattened = all_rgb_features_flattened[depth_masks]
         all_rgb_flattend = all_rgb_flattend[depth_masks]
 
 
@@ -613,19 +624,22 @@ for traj_idx in range(dataset.num_episodes):
         filter_idx_2 = all_pcd_in_world[:, 1] > -0.4
         filter_idx = np.logical_and(filter_idx_1, filter_idx_2)
         all_pcd_in_world = all_pcd_in_world[filter_idx]
-        all_rgb_features_flattened = all_rgb_features_flattened[filter_idx]
+        if store_dino:
+            all_rgb_features_flattened = all_rgb_features_flattened[filter_idx]
         all_rgb_flattend = all_rgb_flattend[filter_idx]
 
 
         all_pcd_in_world, fps_index = fpsample_pcd(all_pcd_in_world, num_points)
-        rgb_features_fpsed = all_rgb_features_flattened[fps_index]
+        if store_dino:
+            rgb_features_fpsed = all_rgb_features_flattened[fps_index]
         rgb_value_fpsed = all_rgb_flattend[fps_index]  
         end = time.time()
         # print("time for fps of the scene pcd: ", end - beg)
         
         # print("all_pcd_in_world shape:", all_pcd_in_world.shape)
         traj_scene_pcd.append(all_pcd_in_world)
-        traj_fpsed_rgb_features.append(rgb_features_fpsed)
+        if store_dino:
+            traj_fpsed_rgb_features.append(rgb_features_fpsed)
         traj_fpsed_rgb_values.append(rgb_value_fpsed)
         # import pdb; pdb.set_trace()
         # ax = plt.subplot(projection='3d')
@@ -734,9 +748,10 @@ for traj_idx in range(dataset.num_episodes):
 
     ### TODO: extract the actions
     action_arrays, traj_scene_pcd, traj_eef_pose, traj_gripper_pcd, traj_goal_gripper_pcd, traj_fpsed_rgb_values, traj_fpsed_rgb_features = \
-        extract_actions(traj_eef_pose, traj_scene_pcd, traj_gripper_pcd, traj_goal_gripper_pcd, traj_fpsed_rgb_values, traj_fpsed_rgb_features, combine_action_steps=2)
+        extract_actions(traj_eef_pose, traj_scene_pcd, traj_gripper_pcd, traj_goal_gripper_pcd, traj_fpsed_rgb_values, traj_fpsed_rgb_features if store_dino else None, combine_action_steps=2)
 
-    data_dir = "/data/yufei/lerobot/data/plate_new_rot_rgb"
+    # data_dir = "/data/yufei/lerobot/data/plate_new_rot_rgb"
+    data_dir = "/data/yufei/lerobot/data/towel_1210_rgb"
     traj_dir = os.path.join(data_dir, f"traj_{traj_idx:04d}")
     if not os.path.exists(traj_dir):
         os.makedirs(traj_dir)
@@ -751,7 +766,8 @@ for traj_idx in range(dataset.num_episodes):
         pickle_data['gripper_pcd'] = traj_gripper_pcd[t_idx][None, :]
         pickle_data['goal_gripper_pcd'] = traj_goal_gripper_pcd[t_idx][None, :]
         pickle_data['rgb_values'] = traj_fpsed_rgb_values[t_idx][None, :].astype(np.float32) / 255.0
-        pickle_data['rgb_features'] = traj_fpsed_rgb_features[t_idx][None, :]
+        if store_dino:
+            pickle_data['rgb_features'] = traj_fpsed_rgb_features[t_idx][None, :]
         
         # with open(step_save_dir, 'wb') as f:
         #     pickle.dump(pickle_data, f)

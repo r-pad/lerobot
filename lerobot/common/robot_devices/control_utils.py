@@ -414,10 +414,11 @@ def control_loop(
                     color_keys = ["observation.images.cam_azure_kinect_front.color", "observation.images.cam_azure_kinect_back.color"]
                     all_cam_color_images = []
                     for color_key in color_keys:
-                        rgb = (observation[color_key].numpy() * 255).astype(np.uint8)
+                        # import pdb; pdb.set_trace()
+                        rgb = (observation[color_key]).numpy()
                         ### convert from rgb to bgr using openscv
                         import cv2
-                        rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                        # rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                         # plt.imshow(rgb)
                         # plt.show()
                         rgb = Image.fromarray(rgb)
@@ -550,7 +551,7 @@ def control_loop(
                     
 
                     ### 3d plot the scene pcd
-                    if True:
+                    if False:
                         fig = plt.figure(figsize=(10, 5))
 
                         ax = fig.add_subplot(1, 2, 1, projection='3d')
@@ -749,7 +750,7 @@ def control_loop(
                 joint_state = observation_new['observation.state'][9:]
                 diff = np.abs(action_to_send[9:] - joint_state).mean()
                 control_t = 0
-                while diff > 0.02 and control_t < 4:
+                while diff > 0.02 and control_t < 1:
                     action_joint = robot.send_action(action_to_send)
                     time.sleep(0.2)
                     observation_new = robot.capture_observation()
