@@ -239,6 +239,10 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         if key not in AUTO_FIELDS and key in expanded_features:
             frame_data[key] = original_frame[key]
 
+    # Add embodiment name
+    if humanize: frame_data["embodiment"] = "human"
+    else: frame_data["embodiment"] = "aloha"
+
     frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
     camera_names = list(calibrations.keys())
     rgb_data, depth_data = {}, {}
@@ -540,6 +544,12 @@ if __name__ == "__main__":
     camera_names = list(calibrations.keys())
 
     new_features = {}
+    new_features["embodiment"] = {
+        'dtype': 'string',
+        'shape': (1,),
+        "names": ['embodiment'],
+        'info': 'Name of embodiment'
+    }
     if "goal_gripper_proj" in args.new_features:
         # Create goal_gripper_proj feature for each camera
         for cam_name in camera_names:

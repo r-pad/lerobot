@@ -308,6 +308,8 @@ def gen_droid_dataset(
             frame_data["action"] = np.zeros(18, dtype=np.float32)
             frame_data["observation.state"] = np.zeros(18, dtype=np.float32)
 
+            frame_data["embodiment"] = "droid"
+
             droid_dataset.add_frame(frame_data)
 
         droid_dataset.save_episode()
@@ -376,6 +378,12 @@ if __name__ == "__main__":
             'shape': (1,),
             'names': ['idx'],
             'info': 'Index of next event in the dataset'
+        },
+        "embodiment": {
+            'dtype': 'string',
+            'shape': (1,),
+            "names": ['embodiment'],
+            'info': 'Name of embodiment'
         },
     }
 
