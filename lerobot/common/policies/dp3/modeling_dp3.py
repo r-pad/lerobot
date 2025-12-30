@@ -1,6 +1,7 @@
 import math
 from collections import deque
 from typing import Callable
+import json
 
 import einops
 import numpy as np
@@ -79,7 +80,7 @@ class DP3Policy(PreTrainedPolicy):
             'point_cloud': (4500, 3),
             'imagin_robot': (4, 3),
             'goal_gripper_pcd': (4, 3),
-            'agent_pos': dataset_stats['observation.state']['mean'].shape
+            'agent_pos': dataset_stats[self.obs_key]['mean'].shape
         }
         action_dim = dataset_stats[self.act_key]['mean'].shape[0]
         pointcloud_encoder_cfg = dict(in_channels=config.in_channels,
@@ -109,7 +110,14 @@ class DP3Policy(PreTrainedPolicy):
                 global_cond_dim = obs_feature_dim * config.n_obs_steps
         self.use_pc_color = config.use_pc_color
         self.pointnet_type = config.pointnet_type
-        self.aloha_gripper_idx = torch.tensor([6, 197, 174]) # Handpicked idxs for the aloha
+        # indexes of selected gripper points -> handpicked
+        self.GRIPPER_IDX = {
+            "aloha": np.array([6, 197, 174]),
+            "human": np.array([343, 763, 60]),
+            "libero_franka": np.array(
+                [0, 1, 2]
+            ),  # gripper pcd in dataset: [left right top grasp-center] in agentview; (right gripper, left gripper, top, grasp-center)
+        }
         model = ConditionalUnet1D(
             input_dim=input_dim,
             local_cond_dim=None,
@@ -138,6 +146,10 @@ class DP3Policy(PreTrainedPolicy):
             self.noise_scheduler = DDIMScheduler()
         else:
             raise NotImplementedError
+        # Load camera calibration from JSON
+        with open(self.config.calibration_json, 'r') as f:
+            calibration_data = json.load(f)
+        self.calibration_data = calibration_data
 
         if self.config.enable_goal_conditioning:
             hl_config = HighLevelConfig(
@@ -156,7 +168,7 @@ class DP3Policy(PreTrainedPolicy):
                 use_gemini=self.config.hl_use_gemini,
                 is_gmm=self.config.hl_is_gmm,
                 dino_model=self.config.hl_dino_model,
-                calibration_json=self.config.hl_calibration_json,
+                calibration_data=self.calibration_data,
                 use_fourier_pe=self.config.hl_use_fourier_pe,
                 fourier_num_frequencies=self.config.hl_fourier_num_frequencies,
                 fourier_include_input=self.config.hl_fourier_include_input,
@@ -320,19 +332,22 @@ class DP3Policy(PreTrainedPolicy):
                 [batch[key] for key in self.config.image_features], dim=-4
             )
         batch = self.normalize_targets(batch)
-        
+
+        assert [b == 'aloha' for b in batch['embodiment']]
+        gripper_idxs = torch.from_numpy(self.GRIPPER_IDX['aloha'])
+
         # compute loss
         # pre-process gripper pcds by selecting via indices
-        gripper_pcds = batch['observation.points.gripper_pcds'][..., self.aloha_gripper_idx, :]
+        gripper_pcds = batch['observation.points.gripper_pcds'][..., gripper_idxs, :]
         fourth_point = (gripper_pcds[..., 0, :] + gripper_pcds[..., 1, :]) / 2.
         gripper_pcds = torch.concat([gripper_pcds, fourth_point.unsqueeze(2)], dim=-2)
 
-        goal_gripper_pcds = batch['observation.points.goal_gripper_pcds'][..., self.aloha_gripper_idx, :]
+        goal_gripper_pcds = batch['observation.points.goal_gripper_pcds'][..., gripper_idxs, :]
         fourth_goal_point = (goal_gripper_pcds[..., 0, :] + goal_gripper_pcds[..., 1, :]) / 2.
         goal_gripper_pcds = torch.concat([goal_gripper_pcds, fourth_goal_point.unsqueeze(2)], dim=-2)
 
         nobs = {
-            'agent_pos': batch['observation.state'],
+            'agent_pos': batch[self.obs_key],
             'imagin_robot': gripper_pcds,
             'goal_gripper_pcd': goal_gripper_pcds,
             'point_cloud': batch['observation.points.point_cloud'],

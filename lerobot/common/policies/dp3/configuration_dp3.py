@@ -139,9 +139,8 @@ class DP3Config(PreTrainedConfig):
     use_mid_condition: bool = True
     use_up_condition: bool = True
     embedding_type: str = "shared"
-    num_inference_steps: int = 10
     obs_as_global_cond:bool = True
-    use_pc_color: bool = False
+    use_pc_color: bool = True
     pointnet_type: str = "act3d"
     in_channels: int = 6
     out_channels: int = 64
@@ -167,6 +166,7 @@ class DP3Config(PreTrainedConfig):
     clip_sample_range: float = 1.0
 
     use_text_embedding: bool = False
+    calibration_json: str = "lerobot/scripts/aloha_calibration/calibration_multiview.json"
 
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
@@ -185,7 +185,6 @@ class DP3Config(PreTrainedConfig):
     hl_use_gripper_pcd: bool = True
     hl_use_gemini: bool = False
     hl_in_channels: int = 7
-    hl_calibration_json: str = "lerobot/scripts/aloha_calibration/calibration_multiview.json"
 
     # dino_heatmap specific configs
     hl_dino_model: str = "facebook/dinov2-base"
