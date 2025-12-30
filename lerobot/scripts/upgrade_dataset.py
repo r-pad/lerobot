@@ -449,7 +449,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
             scaled_K = calibrations[cam_name]["scaled_K"]
             cam_to_world = calibrations[cam_name]["T_world_cam"]
             depth = frame_data["observation.images.{}.transformed_depth".format(cam_name)].squeeze()
-            pcd = compute_pcd(depth, scaled_K, 4500, 0.9, cam_to_world)
+            pcd = compute_pcd(depth, scaled_K, 4500, 1.5, cam_to_world)
             all_pcd.append(pcd)
 
         all_pcd = np.concatenate(all_pcd, axis=0)
