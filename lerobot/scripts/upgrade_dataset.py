@@ -21,6 +21,149 @@ import json
 from typing import Optional
 import av
 from pathlib import Path
+from torchvision import transforms
+from pytorch3d.ops import sample_farthest_points
+import PIL
+
+
+TARGET_SHAPE = 224
+depth_preprocess = transforms.Compose(
+    [
+        transforms.Resize(
+            TARGET_SHAPE,
+            interpolation=transforms.InterpolationMode.NEAREST,
+        ),
+        transforms.CenterCrop(TARGET_SHAPE),
+    ]
+)
+
+
+def depth_to_pointcloud(depth, K, cam_to_world):
+    """
+    depth: [H, W] depth map (meters)
+    K: [3, 3] intrinsics
+    cam_to_world: [4, 4] camera pose matrix
+    """
+    device = depth.device
+    H, W = depth.shape
+
+    # Make meshgrid
+    u, v = torch.meshgrid(
+        torch.arange(W, device=device),
+        torch.arange(H, device=device),
+        indexing="xy"
+    )
+
+    # Unproject to camera coordinates
+    fx, fy = K[0,0], K[1,1]
+    cx, cy = K[0,2], K[1,2]
+
+    z = depth
+    x = (u - cx) * z / fx
+    y = (v - cy) * z / fy
+
+    # Stack and homogenize
+    pc_cam = torch.stack((x, y, z, torch.ones_like(z)), dim=-1).float()  # [H, W, 4]
+    pc_cam = pc_cam.reshape(-1, 4)  # [HW, 4]
+
+    # Transform to world
+    pc_world = (torch.tensor(cam_to_world).float() @ pc_cam.T).T[:, :3]  # [HW, 3]
+
+    return pc_world
+
+
+def get_scaled_intrinsics(K, orig_shape, target_shape):
+    """
+    Scale camera intrinsics based on image resizing and cropping.
+
+    Args:
+        K (np.ndarray): Original 3x3 camera intrinsic matrix.
+        orig_shape (tuple): Original image shape (height, width).
+        target_shape (int): Target size for resize and crop.
+
+    Returns:
+        np.ndarray: Scaled 3x3 intrinsic matrix.
+    """
+    # Getting scale factor from torchvision.transforms.Resize behaviour
+    K_ = K.copy()
+
+    scale_factor = target_shape / min(orig_shape)
+
+    # Apply the scale factor to the intrinsics
+    K_[0, 0] *= scale_factor  # fx
+    K_[1, 1] *= scale_factor  # fy
+    K_[0, 2] *= scale_factor  # cx
+    K_[1, 2] *= scale_factor  # cy
+
+    # Adjust the principal point (cx, cy) for the center crop
+    crop_offset_x = (orig_shape[1] * scale_factor - target_shape) / 2
+    crop_offset_y = (orig_shape[0] * scale_factor - target_shape) / 2
+
+    # Adjust the principal point (cx, cy) for the center crop
+    K_[0, 2] -= crop_offset_x  # Adjust cx for crop
+    K_[1, 2] -= crop_offset_y  # Adjust cy for crop
+    return K_
+
+
+def compute_pcd(depth, K, num_points, max_depth, cam_to_world):
+    """
+    Compute a downsampled point cloud from RGB and depth images.
+
+    Args:
+        rgb (np.ndarray): RGB image array (H, W, 3). np.uint8
+        depth (np.ndarray): Depth image array (H, W). np.uint16
+        K (np.ndarray): 3x3 camera intrinsic matrix.
+        rgb_preprocess (transforms.Compose): Preprocessing for RGB.
+        depth_preprocess (transforms.Compose): Preprocessing for depth.
+        device (torch.device): Device for computations.
+        rng (np.random.Generator): Random number generator.
+        num_points (int): Number of points to sample.
+        max_depth (float): Maximum depth threshold.
+
+    Returns:
+        np.ndarray: Downsampled point cloud (N, 6) with XYZ and RGB.
+    """
+    depth_ = (depth.numpy() / 1000.0).squeeze().astype(np.float32)
+    depth_ = PIL.Image.fromarray(depth_)
+    depth_ = np.asarray(depth_preprocess(depth_))
+
+    height, width = depth_.shape
+    # Create pixel coordinate grid
+    x = np.arange(width)
+    y = np.arange(height)
+    x_grid, y_grid = np.meshgrid(x, y)
+
+    # Flatten grid coordinates and depth
+    x_flat = x_grid.flatten()
+    y_flat = y_grid.flatten()
+    z_flat = depth_.flatten()
+
+    # Remove points with invalid depth
+    valid_depth = np.logical_and(z_flat > 0, z_flat < max_depth)
+    x_flat = x_flat[valid_depth]
+    y_flat = y_flat[valid_depth]
+    z_flat = z_flat[valid_depth]
+
+    # Create homogeneous pixel coordinates
+    pixels = np.stack([x_flat, y_flat, np.ones_like(x_flat)], axis=0)
+
+    # Unproject points using K inverse
+    K_inv = np.linalg.inv(K)
+    points = K_inv @ pixels
+    points = points * z_flat
+    points = points.T  # Shape: (N, 3)
+
+    scene_pcd_pt3d = torch.from_numpy(points)
+    scene_pcd_downsample, scene_points_idx = sample_farthest_points(
+        scene_pcd_pt3d[None], K=num_points, random_start_point=False
+    )
+    scene_pcd = scene_pcd_downsample.squeeze().numpy()
+
+    pcd_xyz_hom = np.concatenate([scene_pcd, np.ones((scene_pcd.shape[0], 1))], axis=1)  # (N, 4)
+    pcd_xyz_world = (cam_to_world @ pcd_xyz_hom.T).T[:, :3]  # (N, 3)
+
+    # Get corresponding colors at the indices
+    return pcd_xyz_world
 
 
 def load_calibrations(calibration_config_path: str) -> Dict[str, Dict[str, np.ndarray]]:
@@ -239,6 +382,10 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         if key not in AUTO_FIELDS and key in expanded_features:
             frame_data[key] = original_frame[key]
 
+    # Add embodiment name
+    if humanize: frame_data["embodiment"] = "human"
+    else: frame_data["embodiment"] = "aloha"
+
     frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
     camera_names = list(calibrations.keys())
     rgb_data, depth_data = {}, {}
@@ -296,16 +443,40 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         if extrinsics_key in new_features:
             frame_data[extrinsics_key] = torch.from_numpy(calibrations[cam_name]["T_world_cam"]).float()
 
+    if "observation.points.point_cloud" in new_features:
+        all_pcd = []
+        for cam_name in camera_names:
+            scaled_K = calibrations[cam_name]["scaled_K"]
+            cam_to_world = calibrations[cam_name]["T_world_cam"]
+            depth = frame_data["observation.images.{}.transformed_depth".format(cam_name)].squeeze()
+            pcd = compute_pcd(depth, scaled_K, 4500, 1.5, cam_to_world)
+            all_pcd.append(pcd)
+
+        all_pcd = np.concatenate(all_pcd, axis=0)
+        scene_pcd_pt3d = torch.from_numpy(all_pcd)
+        # print(all_pcd.shape)
+        scene_pcd_downsample, scene_points_idx = sample_farthest_points(
+            scene_pcd_pt3d[None], K=4500, random_start_point=False
+        )
+        scene_pcd = scene_pcd_downsample.squeeze()
+        frame_data["observation.points.point_cloud"] = scene_pcd
+
     # Dummy values, replaced at the end of the episode
-    for cam_name in camera_names:
-        goal_key = f"observation.images.{cam_name}.goal_gripper_proj"
-        if goal_key in new_features:
-            frame_data[goal_key] = torch.zeros_like(frame_data[f"observation.images.{cam_name}.color"])
+    goal_key = f"observation.points.goal_gripper_pcds"
+    if goal_key in new_features:
+        frame_data[goal_key] = torch.zeros_like(frame_data[f"observation.points.gripper_pcds"])
 
     if "next_event_idx" in new_features:
         frame_data["next_event_idx"] = np.array([0], dtype=np.int32)
+    else:
+        frame_data["next_event_idx"] = frame_data["next_event_idx"].numpy().astype(np.int32).reshape(-1,)
     if "subgoal" in new_features:
         frame_data["subgoal"] = ""
+    
+    for cam_name in camera_names:
+        goal_key = f"observation.images.{cam_name}.goal_gripper_proj"
+        if goal_key not in new_features:
+            frame_data[goal_key] = np.transpose(frame_data[goal_key], (1, 2, 0))
 
     return frame_data
 
@@ -383,6 +554,10 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
 
             target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][current_goal_idx]
 
+    if "observation.points.goal_gripper_pcds" in new_features:
+        for i in range(episode_length):
+            current_goal_idx = target_dataset.episode_buffer["next_event_idx"][i]
+            target_dataset.episode_buffer["observation.points.goal_gripper_pcds"][i] = target_dataset.episode_buffer["observation.points.gripper_pcds"][current_goal_idx[0]]
 
 def upgrade_dataset(
     source_repo_id: str,
@@ -539,7 +714,19 @@ if __name__ == "__main__":
     calibrations = load_calibrations(args.calibration_config)
     camera_names = list(calibrations.keys())
 
+    for cam_name in camera_names:
+        K = calibrations[cam_name]["K"]
+        scaled_K = get_scaled_intrinsics(K, (720, 1280), TARGET_SHAPE)
+        calibrations[cam_name]["scaled_K"] = scaled_K
+    print('scaled K calculated')
+
     new_features = {}
+    new_features["embodiment"] = {
+        'dtype': 'string',
+        'shape': (1,),
+        "names": ['embodiment'],
+        'info': 'Name of embodiment'
+    }
     if "goal_gripper_proj" in args.new_features:
         # Create goal_gripper_proj feature for each camera
         for cam_name in camera_names:
@@ -555,6 +742,20 @@ if __name__ == "__main__":
             'shape': [-1, 3],
             'names': ['N', 'channels'],
             'info': 'Raw gripper point cloud at current position'
+        }
+    if "goal_gripper_pcds" in args.new_features:
+        new_features["observation.points.goal_gripper_pcds"] = {
+            'dtype': 'pcd',
+            'shape': [-1, 3],
+            'names': ['N', 'channels'],
+            'info': 'Goal gripper point cloud at current position'
+        }
+    if "point_cloud" in args.new_features:
+        new_features["observation.points.point_cloud"] = {
+            'dtype': 'pcd',
+            'shape': [-1, 3],
+            'names': ['N', 'channels'],
+            'info': 'Scene point cloud at current position'
         }
     if "next_event_idx" in args.new_features:
         new_features["next_event_idx"] = {
