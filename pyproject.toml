@@ -78,7 +78,7 @@ dependencies = [
     "wheel",
     "pybind11>=2.13.6,<3",
     "trimesh>=4.6.13,<5",
-    "transformers==4.45.2",
+    "transformers==4.56.0",
     "sentencepiece>=0.2.0,<0.3",
     "google-genai>=1.26.0,<2",
     "ipdb>=0.13.13,<0.14",
