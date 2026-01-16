@@ -105,8 +105,6 @@ class HighLevelWrapper:
 
         # Initialize model based on type
         if config.model_type == "articubot":
-            if self.num_cameras != 1:
-                raise NotImplementedError("articubot model type is not yet supported for multiview inference")
             self.model = initialize_articubot_model(
                 config.run_id, config.use_text_embedding, config.use_dual_head,
                 config.in_channels, self.device
@@ -262,8 +260,7 @@ class HighLevelWrapper:
                 )
 
         if self.config.model_type == "articubot":
-            raise NotImplementedError("Need to update after changing interface for multiview.")
-            return self._predict_articubot(text, rgb, depth, robot_type, robot_kwargs)
+            return self._predict_articubot(text, camera_obs, robot_type, robot_kwargs)
         elif self.config.model_type == "dino_heatmap":
             raise NotImplementedError("Need to update after changing interface for multiview.")
             return self._predict_dino_heatmap(text, rgb, depth, robot_type, robot_kwargs)
@@ -272,15 +269,40 @@ class HighLevelWrapper:
         else:
             raise ValueError(f"Unknown model_type: {self.config.model_type}")
 
-    def _predict_articubot(self, text, rgb, depth, robot_type, robot_kwargs):
+    def _predict_articubot(self, text, camera_obs, robot_type, robot_kwargs):
         """Prediction using Articubot point cloud model"""
-        if self.scaled_K is None:
-            self.scaled_K = get_scaled_intrinsics(self.original_K, (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE)
+        # Prepare lists for all camera data
+        all_pcd_xyz = []
+        all_pcd_rgb = []
 
-        pcd = compute_pcd(rgb, depth, self.scaled_K, rgb_preprocess,
-                            depth_preprocess, self.device, self.rng,
-                            self.config.num_points, self.config.max_depth)
-        pcd_xyz, pcd_rgb = pcd[:,:3], pcd[:, 3:]
+        # Process each camera
+        for cam_idx, cam_name in enumerate(self.camera_names):
+            rgb = camera_obs[cam_name]["rgb"]
+            depth = camera_obs[cam_name]["depth"]
+
+            # Scale intrinsics if needed
+            if self.scaled_Ks[cam_idx] is None:
+                self.scaled_Ks[cam_idx] = get_scaled_intrinsics(
+                    self.original_Ks[cam_idx], (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE
+                )
+
+            # Compute point cloud for this camera in camera frame
+            pcd = compute_pcd(rgb, depth, self.scaled_Ks[cam_idx], rgb_preprocess,
+                                depth_preprocess, self.device, self.rng,
+                                self.config.num_points // self.num_cameras, self.config.max_depth)
+            pcd_xyz, pcd_rgb = pcd[:, :3], pcd[:, 3:]
+
+            # Transform xyz to world frame
+            pcd_xyz_hom = np.concatenate([pcd_xyz, np.ones((pcd_xyz.shape[0], 1))], axis=1)  # (N, 4)
+            pcd_xyz_world = (self.cam_to_worlds[cam_idx] @ pcd_xyz_hom.T).T[:, :3]  # (N, 3)
+
+            all_pcd_xyz.append(pcd_xyz_world)
+            all_pcd_rgb.append(pcd_rgb)
+
+        # Concatenate all cameras
+        pcd_xyz = np.concatenate(all_pcd_xyz, axis=0)
+        pcd_rgb = np.concatenate(all_pcd_rgb, axis=0)
+
         # Store for rerun visualization
         self.last_pcd_xyz = pcd_xyz
         self.last_pcd_rgb = pcd_rgb
@@ -298,7 +320,8 @@ class HighLevelWrapper:
         else:
             pcd = pcd_xyz
 
-        text_embed = self._get_text_embedding(text, rgb, robot_type, robot_kwargs)
+        # Use first camera's RGB for text embedding
+        text_embed = self._get_text_embedding(text, camera_obs[self.camera_names[0]]["rgb"], robot_type, robot_kwargs)
 
         # Run inference
         goal_prediction = inference_articubot(self.model, pcd, text_embed, self.config.is_gmm, self.device)
@@ -429,7 +452,12 @@ class HighLevelWrapper:
     def project(self, goal_prediction, camera_obs, goal_repr="heatmap"):
         """Project goal prediction to image space"""
         if self.config.model_type == "articubot":
-            raise NotImplementedError("Not updated after multiview changes.")
+            # Project to each camera
+            goal_projections = {}
+            for idx, cam_name in enumerate(self.camera_names):
+                rgb_shape = camera_obs[cam_name]["rgb"].shape
+                goal_projections[cam_name] = self._project_to_camera(goal_prediction, rgb_shape, idx, goal_repr)
+            return goal_projections
         elif self.config.model_type == "dino_3dgp":
             # Project to each camera
             goal_projections = {}
