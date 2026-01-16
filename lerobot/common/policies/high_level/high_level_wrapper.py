@@ -58,7 +58,7 @@ class HighLevelConfig:
     use_rgb: bool = False
     use_gemini: bool = False
     is_gmm: bool = False
-    dino_model: str = "facebook/dinov2-base"
+    dino_model: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     calibration_data: Dict[str, Dict] = field(default_factory=dict)
 
     # dino_3dgp specific configs
@@ -388,7 +388,7 @@ class HighLevelWrapper:
 
         goal_prediction = inference_dino_3dgp(
             self.model, all_rgbs, all_depths, all_intrinsics, all_extrinsics,
-            gripper_token, text_embed, robot_type, self.config.is_gmm,
+            gripper_token, text, robot_type, self.config.is_gmm,
             self.config.max_depth, self.device
         )
 
@@ -435,7 +435,7 @@ class HighLevelWrapper:
             goal_projections = {}
             for idx, cam_name in enumerate(self.camera_names):
                 rgb_shape = camera_obs[cam_name]["rgb"].shape
-                goal_projections[cam_name] = self._project_to_camera(goal_prediction, rgb_shape, idx)
+                goal_projections[cam_name] = self._project_to_camera(goal_prediction, rgb_shape, idx, goal_repr)
             return goal_projections
         elif self.config.model_type == "dino_heatmap":
             raise NotImplementedError("Not updated after multiview changes.")
@@ -710,7 +710,7 @@ def inference_dino_heatmap(model, rgb, gripper_pcd, text_embedding, device):
         return sampled_coord.squeeze(0).cpu().numpy()  # (2,) [x, y]
 
 def inference_dino_3dgp(model, rgbs, depths, intrinsics_list, extrinsics_list,
-                        gripper_token, text_embedding, robot_type, is_gmm, max_depth, device):
+                        gripper_token, text, robot_type, is_gmm, max_depth, device):
     """
     Run DINO 3D Goal Prediction model inference on RGB+depth and predict 3D goal points.
 
@@ -721,7 +721,7 @@ def inference_dino_3dgp(model, rgbs, depths, intrinsics_list, extrinsics_list,
         intrinsics_list (list): List of camera intrinsics [(3, 3), ...], scaled to 224x224.
         extrinsics_list (list): List of camera extrinsics [(4, 4), ...], T_world_from_camera.
         gripper_token (np.ndarray): Optional gripper token (10,).
-        text_embedding (np.ndarray): Optional text embedding (1152,).
+        text (str): Optional text caption
         robot_type (str): Robot type (e.g., "aloha", "robot").
         is_gmm (bool): Whether to use GMM sampling or weighted average.
         max_depth (float): Maximum depth threshold in meters.
@@ -771,22 +771,17 @@ def inference_dino_3dgp(model, rgbs, depths, intrinsics_list, extrinsics_list,
         if gripper_token is not None:
             gripper_tok = torch.from_numpy(gripper_token.astype(np.float32)).unsqueeze(0).to(device)  # (1, 10)
 
-        # Convert text_embedding to torch if provided
-        text_embed = None
-        if text_embedding is not None:
-            text_embed = torch.from_numpy(text_embedding.astype(np.float32)).unsqueeze(0).to(device)  # (1, 1152)
-
         # Determine source
         source = [robot_type] if model.use_source_token else None
 
         # Forward through network
-        outputs, patch_coords = model(
+        outputs, patch_coords, tokens = model(
             image=rgbs_tensor,
             depth=depths_tensor,
             intrinsics=intrinsics_tensor,
             extrinsics=extrinsics_tensor,
             gripper_token=gripper_tok,
-            text_embedding=text_embed,
+            text=text,
             source=source
         )  # outputs: (1, N*256, 13), patch_coords: (1, N*256, 3) in WORLD frame
 

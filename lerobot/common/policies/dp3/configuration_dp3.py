@@ -187,7 +187,7 @@ class DP3Config(PreTrainedConfig):
     hl_in_channels: int = 7
 
     # dino_heatmap specific configs
-    hl_dino_model: str = "facebook/dinov2-base"
+    hl_dino_model: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
 
     # dino_3dgp specific configs
     hl_use_fourier_pe: bool = False
