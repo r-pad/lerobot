@@ -8,6 +8,7 @@ import trimesh
 from scipy.spatial.transform import Rotation as R
 import cv2
 import os
+from tqdm import tqdm
 
 
 ALOHA_PATH = os.path.join(
@@ -137,14 +138,15 @@ def inverse_kinematics(configuration, ee_pose):
     n_iter = 200
     dt = 0.01
     thresh = 1e-3
-    for i in range(n_iter):
+    pbar = tqdm(range(n_iter), desc="IK")
+    for i in pbar:
         vel = mink.solve_ik(configuration, [ee_task], dt=dt, solver='daqp')
         configuration.integrate_inplace(vel, dt)
 
-        err = ee_task.compute_error(configuration)
-        print(i, np.linalg.norm(err))
-        if np.linalg.norm(err) < thresh: break
-    
+        err = np.linalg.norm(ee_task.compute_error(configuration))
+        pbar.set_description(f"IK err: {err:.6f}")
+        if err < thresh: break
+
     Q = configuration.q
     vec = torch.tensor(
         [

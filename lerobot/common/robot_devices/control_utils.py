@@ -29,6 +29,7 @@ import rerun as rr
 import torch
 from deepdiff import DeepDiff
 from termcolor import colored
+import pytorch3d.transforms as transforms
 
 from lerobot.common.datasets.image_writer import safe_stop_image_writer
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -389,6 +390,18 @@ def control_loop(
                 for k, v in action.items():
                     for i, vv in enumerate(v):
                         rr.log(f"sent_{k}_{i}", rr.Scalar(vv.numpy()))
+
+                if "action.right_eef_pose" in action:
+                    eef_pose = action['action.right_eef_pose']
+                    eef_rot, eef_trans = transforms.rotation_6d_to_matrix(eef_pose[:6]), eef_pose[6:9]
+                    # Log EEF pose as a 3D coordinate frame
+                    origin = eef_trans.numpy()
+                    axes = eef_rot.numpy() @ (np.eye(3) * 0.1)
+                    rr.log("high_level/eef_frame", rr.Arrows3D(
+                        origins=[origin] * 3,
+                        vectors=axes,
+                        colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
+                    ))
 
             image_keys = [key for key in observation if "image" in key]
             for key in image_keys:
