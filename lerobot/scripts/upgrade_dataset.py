@@ -475,8 +475,8 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
     
     for cam_name in camera_names:
         goal_key = f"observation.images.{cam_name}.goal_gripper_proj"
-        if goal_key not in new_features:
-            frame_data[goal_key] = np.transpose(frame_data[goal_key], (1, 2, 0))
+        if goal_key in new_features:
+            frame_data[goal_key] = frame_data[goal_key] = torch.zeros_like(frame_data[f"observation.images.{cam_name}.color"])
 
     return frame_data
 
