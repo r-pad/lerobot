@@ -691,7 +691,7 @@ if __name__ == "__main__":
                         help="Source dataset repository ID")
     parser.add_argument("--target_repo_id", type=str, default="sriramsk/fold_onesie_20250831_subsampled_heatmapGoal",
                         help="Target dataset repository ID")
-    parser.add_argument("--calibration_config", type=str, default="aloha_calibration/calibration_single.json",
+    parser.add_argument("--calibration_config", type=str, default="aloha_calibration/calibration_multiview.json",
                         help="Path to calibration JSON config file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")
