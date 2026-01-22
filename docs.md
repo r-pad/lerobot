@@ -356,13 +356,13 @@ uv run scripts/calibrate.py --output-dir /home/sriram/Desktop/lfd3d-system/captu
 
 - First, kill the terminal where `teleop.py` is running. Then, run:
 ```
-pixi run python ros/src/aloha/scripts/teleop.py -r aloha_stationary
+pixi run python ros/src/aloha/scripts/sleep.py -r aloha_stationary
 ```
 - After `sleep.py` has finished executing, kill all the other terminals
 - Rename the latest capture:
 ```
 mv captures/output_20251011_195009 captures/camera_<cam-name>_<calibration-date>_
 ```
-- Copy the latest `T_world_from_camera_est.txt` into `lerobot/lerobot/scripts/aloha_calibration.txt`
+- Copy the latest `T_world_from_camera_est.txt` into `lerobot/lerobot/scripts/aloha_calibration/`
 - Update the corresponding `calibration.json`
 - And done!

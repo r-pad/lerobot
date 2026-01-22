@@ -475,8 +475,8 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
     
     for cam_name in camera_names:
         goal_key = f"observation.images.{cam_name}.goal_gripper_proj"
-        if goal_key not in new_features:
-            frame_data[goal_key] = np.transpose(frame_data[goal_key], (1, 2, 0))
+        if goal_key in new_features:
+            frame_data[goal_key] = frame_data[goal_key] = torch.zeros_like(frame_data[f"observation.images.{cam_name}.color"])
 
     return frame_data
 
@@ -691,7 +691,7 @@ if __name__ == "__main__":
                         help="Source dataset repository ID")
     parser.add_argument("--target_repo_id", type=str, default="sriramsk/fold_onesie_20250831_subsampled_heatmapGoal",
                         help="Target dataset repository ID")
-    parser.add_argument("--calibration_config", type=str, default="aloha_calibration/calibration_single.json",
+    parser.add_argument("--calibration_config", type=str, default="aloha_calibration/calibration_multiview.json",
                         help="Path to calibration JSON config file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")
