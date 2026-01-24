@@ -262,6 +262,7 @@ class DiffusionModel(nn.Module):
         self.act_key = robot_adapter.get_act_key()
 
         self.use_text_embedding = self.config.use_text_embedding
+        self.use_latent_plan = self.config.use_latent_plan
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
@@ -292,6 +293,9 @@ class DiffusionModel(nn.Module):
                 nn.Linear(64, self.text_proj_dim)
             )
             global_cond_dim += self.text_proj_dim
+        
+        if self.config.use_latent_plan:
+            global_cond_dim += self.config.latent_plan_dim
 
         self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
 
@@ -432,6 +436,11 @@ class DiffusionModel(nn.Module):
             text_feats = self.text_proj(text_feats)  # (B, 32)
             text_feats = text_feats.unsqueeze(1).repeat(1, n_obs_steps, 1)
             global_cond_feats.append(text_feats)
+        
+        if self.use_latent_plan:
+            latent_plans = batch['latent_plan']  # (B, latent_plan_dim)
+            latent_plans = latent_plans.unsqueeze(1).repeat(1, n_obs_steps, 1)
+            global_cond_feats.append(latent_plans)
 
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
