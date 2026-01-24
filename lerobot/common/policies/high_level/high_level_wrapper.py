@@ -19,6 +19,10 @@ from typing import Optional, Dict
 from PIL import Image
 import json
 from lerobot.scripts.dataset_utils import generate_heatmap_from_points
+import types
+from torch import nn, optim
+import torch.distributions as D
+import torch.nn.functional as F
 
 TARGET_SHAPE = 224
 rgb_preprocess = transforms.Compose(
@@ -44,7 +48,7 @@ depth_preprocess = transforms.Compose(
 @dataclass
 class HighLevelConfig:
     """Configuration for HighLevelWrapper"""
-    model_type: str = "articubot"  # "articubot", "dino_heatmap", or "dino_3dgp"
+    model_type: str = "articubot"  # "articubot", "dino_heatmap", "mimicplay", or "dino_3dgp"
     run_id: Optional[str] = None
     entity: str = "r-pad"
     project: str = "lfd3d"
@@ -118,6 +122,13 @@ class HighLevelWrapper:
             )
         elif config.model_type == "dino_3dgp":
             self.model = initialize_dino_3dgp_model(config.entity, config.project, config.checkpoint_type,
+                config.run_id, config.dino_model, config.use_text_embedding,
+                config.use_gripper_token, config.use_source_token, config.use_fourier_pe,
+                config.fourier_num_frequencies, config.fourier_include_input,
+                config.num_transformer_layers, config.dropout, self.device
+            )
+        elif config.model_type == "mimicplay":
+            self.model = initialize_mimicplay_model(config.entity, config.project, config.checkpoint_type,
                 config.run_id, config.dino_model, config.use_text_embedding,
                 config.use_gripper_token, config.use_source_token, config.use_fourier_pe,
                 config.fourier_num_frequencies, config.fourier_include_input,
@@ -266,6 +277,8 @@ class HighLevelWrapper:
             return self._predict_dino_heatmap(text, rgb, depth, robot_type, robot_kwargs)
         elif self.config.model_type == "dino_3dgp":
             return self._predict_dino_3dgp(text, camera_obs, robot_type, robot_kwargs)
+        elif self.config.model_type == "mimicplay":
+            return self._predict_mimicplay(text, camera_obs, robot_type, robot_kwargs)
         else:
             raise ValueError(f"Unknown model_type: {self.config.model_type}")
 
@@ -426,6 +439,77 @@ class HighLevelWrapper:
             )
 
         return goal_prediction
+
+    def _predict_mimicplay(self, text, camera_obs, robot_type, robot_kwargs):
+        """Prediction using mimicplay model"""
+
+        # Prepare lists for all camera data
+        all_rgbs = []
+        all_depths = []
+        all_intrinsics = []
+        all_extrinsics = []
+
+        # Process each camera
+        for cam_idx, cam_name in enumerate(self.camera_names):
+            rgb = camera_obs[cam_name]["rgb"]
+            depth = camera_obs[cam_name]["depth"]
+
+            # Scale intrinsics if needed
+            if self.scaled_Ks[cam_idx] is None:
+                self.scaled_Ks[cam_idx] = get_scaled_intrinsics(
+                    self.original_Ks[cam_idx], (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE
+                )
+
+            all_rgbs.append(rgb)
+            all_depths.append(depth)
+            all_intrinsics.append(self.scaled_Ks[cam_idx])
+            all_extrinsics.append(self.cam_to_worlds[cam_idx])
+
+        # For visualization, compute pcd from all cameras and transform to world frame
+        all_pcd_xyz = []
+        all_pcd_rgb = []
+        for cam_idx in range(len(all_rgbs)):
+            pcd = compute_pcd(all_rgbs[cam_idx], all_depths[cam_idx], self.scaled_Ks[cam_idx],
+                             rgb_preprocess, depth_preprocess, self.device, self.rng,
+                             1000, self.config.max_depth)
+            pcd_xyz, pcd_rgb = pcd[:, :3], pcd[:, 3:]
+
+            # Transform xyz to world frame
+            pcd_xyz_hom = np.concatenate([pcd_xyz, np.ones((pcd_xyz.shape[0], 1))], axis=1)  # (N, 4)
+            pcd_xyz_world = (self.cam_to_worlds[cam_idx] @ pcd_xyz_hom.T).T[:, :3]  # (N, 3)
+
+            all_pcd_xyz.append(pcd_xyz_world)
+            all_pcd_rgb.append(pcd_rgb)
+
+        # Concatenate all cameras
+        self.last_pcd_xyz = np.concatenate(all_pcd_xyz, axis=0)
+        self.last_pcd_rgb = np.concatenate(all_pcd_rgb, axis=0)
+
+        # Get gripper point cloud if needed
+        gripper_token = None
+        if self.config.use_gripper_token:
+            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            self.last_gripper_pcd = gripper_pcd
+            if robot_type == "aloha":
+                gripper_pcd_ = gripper_pcd[self.aloha_gripper_idx]
+            else:
+                gripper_pcd_ = gripper_pcd
+            gripper_token = self._gripper_pcd_to_token(gripper_pcd_)
+
+        # Get text embedding if needed
+        text_embed = None
+        if self.config.use_text_embedding:
+            text_embed = self._get_text_embedding(text, all_rgbs[0], robot_type, robot_kwargs)
+
+        latent, dist = inference_mimicplay(
+            self.model, all_rgbs, all_depths, all_intrinsics, all_extrinsics,
+            gripper_token, text, robot_type, self.config.is_gmm,
+            self.config.max_depth, self.device
+        )
+
+        self.last_goal_prediction = latent
+
+        return latent, dist
 
     def get_goal_text(self, text, rgb, robot_type, robot_kwargs):
         if not self.config.use_gemini:
@@ -665,6 +749,289 @@ def initialize_dino_3dgp_model(entity, project, checkpoint_type,
     model = model.to(device)
 
     return model
+
+def monkey_patch_mimicplay(network):
+    """
+    Monkey-patch in alternate functionality to train Mimicplay baseline.
+    """
+
+    def mimicplay_forward(
+        self,
+        image,
+        depth,
+        intrinsics,
+        extrinsics,
+        gripper_token=None,
+        text=None,
+        source=None,
+    ):
+        """
+        Modified version of forward() for Dino3DGP
+        """
+        B, N, C, H, W = image.shape
+
+        # Extract DINOv3 features for each camera
+        all_patch_features = []
+        for cam_idx in range(N):
+            with torch.no_grad():
+                cam_image = image[:, cam_idx, :, :, :]  # (B, 3, H, W)
+                inputs = self.backbone_processor(images=cam_image, return_tensors="pt")
+                inputs = {k: v.to(self.backbone.device) for k, v in inputs.items()}
+                dino_outputs = self.backbone(**inputs)
+
+            # Get patch features (skip CLS and register tokens)
+            patch_features = dino_outputs.last_hidden_state[
+                :, 5:
+            ]  # (B, 196, dino_hidden_dim)
+            all_patch_features.append(patch_features)
+
+        # Concatenate features from all cameras: (B, N*196, dino_hidden_dim)
+        patch_features = torch.cat(all_patch_features, dim=1)
+
+        # Get 3D positional encoding for patches (in world frame)
+        patch_coords = self.get_patch_centers(
+            H, W, intrinsics, depth, extrinsics
+        )  # (B, N*196, 3)
+        pos_encoding = self.pos_encoder(patch_coords)  # (B, N*196, 128)
+
+        # Combine patch features with positional encoding
+        tokens = torch.cat(
+            [patch_features, pos_encoding], dim=-1
+        )  # (B, N*196, hidden_dim)
+
+        # Apply image token dropout (training only)
+        tokens, patch_coords = self.apply_image_token_dropout(tokens, patch_coords, N)
+
+        # Number of tokens T <= N*196
+        num_patch_tokens = tokens.shape[1]
+        mask = torch.zeros(B, num_patch_tokens, dtype=torch.bool, device=tokens.device)
+
+        # Add language tokens
+        if self.use_text_embedding:
+            text_tokens = self.text_tokenizer(
+                text, return_tensors="pt", padding=True, truncation=True
+            )
+            text_tokens = {
+                k: v.to(self.text_encoder.device) for k, v in text_tokens.items()
+            }
+            text_embedding = self.text_encoder(**text_tokens).last_hidden_state
+
+            lang_tokens = self.text_proj(text_embedding)  # (B, J, hidden_dim)
+            tokens = torch.cat([tokens, lang_tokens], dim=1)  # (B, T+J, hidden_dim)
+            mask = torch.cat([mask, text_tokens["attention_mask"] == 0], dim=1)
+
+        # Add gripper token
+        if self.use_gripper_token:
+            grip_token = self.gripper_encoder(gripper_token).unsqueeze(
+                1
+            )  # (B, 1, hidden_dim)
+            tokens = torch.cat([tokens, grip_token], dim=1)  # (B, T+J+1, hidden_dim)
+            mask = torch.cat(
+                [mask, torch.zeros(B, 1, dtype=torch.bool, device=tokens.device)], dim=1
+            )
+
+        # Add source token
+        if self.use_source_token:
+            source_indices = torch.tensor(
+                [self.source_to_idx[s] for s in source], device=tokens.device
+            )
+            source_token = self.source_embeddings(source_indices).unsqueeze(
+                1
+            )  # (B, 1, hidden_dim)
+            tokens = torch.cat([tokens, source_token], dim=1)  # (B, T+J+2, hidden_dim)
+            mask = torch.cat(
+                [mask, torch.zeros(B, 1, dtype=torch.bool, device=tokens.device)], dim=1
+            )
+
+        tokens = torch.cat([tokens, self.registers.expand(B, -1, -1)], dim=1)
+        mask = torch.cat(
+            [
+                mask,
+                torch.zeros(
+                    B, self.num_registers, dtype=torch.bool, device=tokens.device
+                ),
+            ],
+            dim=1,
+        )
+
+        # NEW ###
+        # Add CLS token to hold latent plan
+        tokens = torch.cat([tokens, self.cls_token.expand(B, -1, -1)], dim=1)
+        mask = torch.cat(
+            [
+                mask,
+                torch.zeros(B, 1, dtype=torch.bool, device=tokens.device),
+            ],
+            dim=1,
+        )
+
+        # Apply transformer blocks
+        for block in self.transformer_blocks:
+            tokens = block(tokens, src_key_padding_mask=mask)
+
+        # NEW ###
+        # Take only the CLS token
+        latent_plan = tokens[:, -1, :]  # (B, hidden_dim)
+        # Predict GMM parameters
+        outputs = self.gmm_decoder(latent_plan)
+
+        means = outputs[:, :150].reshape(-1, 5, 30)  # (B, 5, 30)
+        raw_scales = outputs[:, 150:300].reshape(-1, 5, 30)  # (B, 5, 30)
+        logits = outputs[:, 300:305].reshape(-1, 5)  # (B, 5)
+
+        scales = F.softplus(raw_scales) + 0.0001
+        component_dist = D.Independent(D.Normal(means, scales), 1)
+        mixture_dist = D.Categorical(logits=logits)
+        gmm_dist = D.MixtureSameFamily(mixture_dist, component_dist)
+
+        return latent_plan, gmm_dist
+
+    # Add extra params for latent plan and GMM decoder
+    network.cls_token = nn.Parameter(torch.randn(1, 1, network.hidden_dim) * 0.02)
+    network.num_modes = 5
+    network.pred_timesteps = 10
+    # Predict 10-step trajectory of 4th gripper point (xyz only)
+    # Output: means (5, 30) + scales (5, 30) + logits (5) = 305 total
+    network.gmm_decoder = nn.Sequential(
+        nn.Linear(network.hidden_dim, 400),
+        nn.Softplus(),
+        nn.Linear(400, 400),
+        nn.Softplus(),
+        nn.Linear(
+            400,
+            network.num_modes * (network.pred_timesteps * 3 * 2) + network.num_modes,
+        ),
+        # 5 modes × (10 timesteps × 3 coords × 2 [mean+scale]) + 5 logits = 305
+    )
+    del network.output_head
+
+    # Add in a separate forward pass for MimicPlay
+    network.mimicplay_forward = types.MethodType(mimicplay_forward, network)
+
+    return network
+
+def initialize_mimicplay_model(entity, project, checkpoint_type,
+    run_id, dino_model, use_text_embedding, use_gripper_token, use_source_token,
+    use_fourier_pe, fourier_num_frequencies, fourier_include_input,
+    num_transformer_layers, dropout, device
+):
+    """Initialize Mimicplay model from wandb artifact"""
+
+    # Simple config object to match what Dino3DGPNetwork expects
+    class ModelConfig:
+        def __init__(self, dino_model, use_text_embedding, use_gripper_token,
+                     use_source_token, use_fourier_pe, fourier_num_frequencies,
+                     fourier_include_input, num_transformer_layers, dropout):
+            self.dino_model = dino_model
+            self.use_text_embedding = use_text_embedding
+            self.use_gripper_token = use_gripper_token
+            self.use_source_token = use_source_token
+            self.use_fourier_pe = use_fourier_pe
+            self.fourier_num_frequencies = fourier_num_frequencies
+            self.fourier_include_input = fourier_include_input
+            self.num_transformer_layers = num_transformer_layers
+            self.dropout = dropout
+            self.image_token_dropout = False # We only do inference here.
+
+    model_cfg = ModelConfig(
+        dino_model, use_text_embedding, use_gripper_token,
+        use_source_token, use_fourier_pe, fourier_num_frequencies,
+        fourier_include_input, num_transformer_layers, dropout
+    )
+    model = monkey_patch_mimicplay(Dino3DGPNetwork(model_cfg))
+
+    artifact_dir = "wandb"
+    checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
+    api = wandb.Api()
+    artifact = api.artifact(checkpoint_reference, type="model")
+    ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
+    ckpt = torch.load(ckpt_file)
+    # Remove the "network." prefix, since we're not using Lightning here.
+    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
+    model.load_state_dict(state_dict)
+
+    model = model.eval()
+    model = model.to(device)
+
+    return model
+
+def inference_mimicplay(model, rgbs, depths, intrinsics_list, extrinsics_list,
+                        gripper_token, text, robot_type, max_depth, device):
+    """
+    Run Mimicplay model inference on RGB+depth and predict latent plan.
+
+    Args:
+        model (Dino3DGPNetwork): Trained model.
+        rgbs (list): List of RGB images [(H, W, 3), ...], uint8, one per camera.
+        depths (list): List of depth images [(H, W), ...], uint16 in mm, one per camera.
+        intrinsics_list (list): List of camera intrinsics [(3, 3), ...], scaled to 224x224.
+        extrinsics_list (list): List of camera extrinsics [(4, 4), ...], T_world_from_camera.
+        gripper_token (np.ndarray): Optional gripper token (10,).
+        text (str): Optional text caption
+        robot_type (str): Robot type (e.g., "aloha", "robot").
+        max_depth (float): Maximum depth threshold in meters.
+        device (torch.device): Device for inference.
+
+    Returns:
+        latent_plan (torch.Tensor): Predicted latent plan (B, latent_dim).
+        gmm_dist : GMM distribution over future waypoints
+    """
+    N = len(rgbs)  # Number of cameras
+
+    # Preprocess all RGBs
+    rgbs_processed = []
+    for rgb in rgbs:
+        rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb))).copy()
+        rgb_ = torch.from_numpy(rgb_).permute(2, 0, 1).float()  # (3, 224, 224)
+        rgbs_processed.append(rgb_)
+
+    # Stack into (1, N, 3, 224, 224)
+    rgbs_tensor = torch.stack(rgbs_processed, dim=0).unsqueeze(0).to(device)
+
+    # Preprocess all depths
+    depths_processed = []
+    for depth in depths:
+        depth_ = (depth / 1000.0).squeeze().astype(np.float32)  # Convert mm to meters
+        depth_ = PIL.Image.fromarray(depth_)
+        depth_ = np.asarray(depth_preprocess(depth_)).copy()
+        depth_[depth_ > max_depth] = 0  # Mask out far depths
+        depth_ = torch.from_numpy(depth_).float()  # (224, 224)
+        depths_processed.append(depth_)
+
+    # Stack into (1, N, 224, 224)
+    depths_tensor = torch.stack(depths_processed, dim=0).unsqueeze(0).to(device)
+
+    # Stack intrinsics into (1, N, 3, 3)
+    intrinsics_tensor = torch.stack([
+        torch.from_numpy(K.astype(np.float32)) for K in intrinsics_list
+    ], dim=0).unsqueeze(0).to(device)
+
+    # Stack extrinsics into (1, N, 4, 4)
+    extrinsics_tensor = torch.stack([
+        torch.from_numpy(T.astype(np.float32)) for T in extrinsics_list
+    ], dim=0).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        # Convert gripper_token to torch if provided
+        gripper_tok = None
+        if gripper_token is not None:
+            gripper_tok = torch.from_numpy(gripper_token.astype(np.float32)).unsqueeze(0).to(device)  # (1, 10)
+
+        # Determine source
+        source = [robot_type] if model.use_source_token else None
+
+        # Forward through network
+        latent_plan, gmm_dist = model.mimicplay_forward(
+            image=rgbs_tensor,
+            depth=depths_tensor,
+            intrinsics=intrinsics_tensor,
+            extrinsics=extrinsics_tensor,
+            gripper_token=gripper_tok,
+            text=text,
+            source=source
+        )
+        
+        return latent_plan, gmm_dist
 
 def inference_articubot(model, pcd, text_embedding, is_gmm, device):
     """
