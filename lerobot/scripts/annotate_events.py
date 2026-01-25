@@ -13,6 +13,8 @@ TASK_SPEC = {
     "fold the shirt": ["grasp 1", "fold 1", "grasp 2", "fold 2", "grasp 3", "fold 3", "grasp 4", "fold 4"],
     "fold the towel": ["grasp 1", "fold 1", "grasp 2", "fold 2"],
     "grasp hammer and strike the purple pin": ["grasp hammer", "strike the purple pin", "place hammer on table"],
+    "grasp hammer and strike the blue pin": ["grasp hammer", "strike the blue pin", "place hammer on table"],
+    "grasp hammer and strike the pink pin": ["grasp hammer", "strike the pink pin", "place hammer on table"],
     "grasp hammer and strike the blue and purple pins": ["grasp hammer", "strike the blue pin", "strike the purple pin", "place hammer on table"],
 }
 

@@ -365,6 +365,12 @@ def _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata, c
             'episode_gripper_pcds': episode_gripper_pcds
         })
 
+    else:
+        EVENTS_DIR = f"{path_to_extradata}/events"
+        events_file = f"{EVENTS_DIR}/episode_{episode_idx:06d}.mp4.json"
+        if os.path.exists(events_file):
+            with open(events_file, 'r') as f:
+                episode_extras['episode_events'] = json.load(f)
     return episode_extras
 
 
@@ -484,19 +490,20 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 def _process_episode_goals(target_dataset, episode_length, new_features, humanize,
                           episode_extras, phantomize, calibrations, width, height):
     """Process goal projections, event indices, and subgoals for an episode."""
-    if humanize or phantomize:
-        # Use events from JSON for human data
+    joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
+
+    if humanize:
+        episode_gripper_pcds = episode_extras['episode_gripper_pcds']
+
+    # Determine goal indices
+    if 'episode_events' in episode_extras:
+        # Use events from external file (human data, phantom, or robot with manual annotation)
         goal_indices = episode_extras['episode_events']['event_idxs']
         # Ensure last frame is included as a goal
         if goal_indices[-1] != episode_length - 1:
             goal_indices = goal_indices + [episode_length - 1]
-
-        if humanize:
-            episode_gripper_pcds = episode_extras['episode_gripper_pcds']
-        elif phantomize:
-            joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
     else:
-        joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
+        # Fall back to gripper-based detection for robot data
         close_thresh, open_thresh = 25, 30
         goal_indices = extract_events_with_gripper_pos(
             joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
@@ -792,10 +799,7 @@ if __name__ == "__main__":
         remove_features.append("observation.images.cam_wrist")
 
     assert not (args.phantomize and args.humanize), "Cannot use both phantomize and humanize modes simultaneously"
-    if args.phantomize or args.humanize:
-        path_to_extradata = f"{args.path_to_extradata}/{args.source_repo_id}"
-    else:
-        path_to_extradata = None
+    path_to_extradata = f"{args.path_to_extradata}/{args.source_repo_id}"
 
     # Upgrade the dataset
     upgraded_dataset = upgrade_dataset(
