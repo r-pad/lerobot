@@ -296,7 +296,11 @@ class DiffusionModel(nn.Module):
             global_cond_dim += self.text_proj_dim
         
         if self.config.use_latent_plan:
-            assert self.config.hl_model_type == "mimicplay", "latent plan conditioning only supports mimicplay high-level model currently"            
+            assert self.config.hl_model_type == "mimicplay", "latent plan conditioning only supports mimicplay high-level model currently"  
+            with open(self.config.calibration_json, 'r') as f:
+                calibration_data = json.load(f)
+            self.calibration_data = calibration_data     
+                 
             hl_config = HighLevelConfig(
                 model_type=self.config.hl_model_type,
                 run_id=self.config.hl_run_id,
