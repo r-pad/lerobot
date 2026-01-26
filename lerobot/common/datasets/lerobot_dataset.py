@@ -756,7 +756,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if self.image_transforms is not None:
             image_keys = self.meta.camera_keys
             for cam in image_keys:
-                if "depth" in key: continue # HACK: skip for depth keys
+                if "depth" in cam: continue # HACK: skip for depth keys
                 item[cam] = self.image_transforms(item[cam])
 
         # Add task as a string
