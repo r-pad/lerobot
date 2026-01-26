@@ -48,7 +48,7 @@ depth_preprocess = transforms.Compose(
 @dataclass
 class HighLevelConfig:
     """Configuration for HighLevelWrapper"""
-    model_type: str = "articubot"  # "articubot", "dino_heatmap", "mimicplay", or "dino_3dgp"
+    model_type: str = "articubot"  # "articubot", "dino_heatmap", or "dino_3dgp"
     run_id: Optional[str] = None
     entity: str = "r-pad"
     project: str = "lfd3d"
@@ -127,20 +127,15 @@ class HighLevelWrapper:
                 config.fourier_num_frequencies, config.fourier_include_input,
                 config.num_transformer_layers, config.dropout, self.device
             )
-        elif config.model_type == "mimicplay":
-            self.model = initialize_mimicplay_model(config.entity, config.project, config.checkpoint_type,
-                config.run_id, config.dino_model, config.use_text_embedding,
-                config.use_gripper_token, config.use_source_token, config.use_fourier_pe,
-                config.fourier_num_frequencies, config.fourier_include_input,
-                config.num_transformer_layers, config.dropout, self.device
-            )
         else:
             raise ValueError(f"Unknown model_type: {config.model_type}")
 
         self.rng = np.random.default_rng()
-        self.aloha_gripper_idx = torch.tensor([6, 197, 174]) # Handpicked idxs for the aloha
-        self.libero_franka_idx = torch.tensor([1, 2, 0]) # top, left, right -> left, right, top in agentview 
-        print(f"libero franka gripper idx: {self.libero_franka_idx}")
+        self.GRIPPER_IDX = {
+            "aloha": torch.tensor([6, 197, 174]),
+            "human": torch.tensor([343, 763, 60]),
+            "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
+        }
 
         # For rerun visualization
         self.last_pcd_xyz = None
@@ -161,7 +156,7 @@ class HighLevelWrapper:
                 gripper_orn=robot_kwargs["ee_quat"],
                 cur_joint_angle=robot_kwargs["gripper_angle"],
                 world_to_cam_mat=np.eye(4), # render in world frame
-            )[self.libero_franka_idx]
+            )[self.GRIPPER_IDX[robot_type]]
         else:
             raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
 
@@ -277,8 +272,6 @@ class HighLevelWrapper:
             return self._predict_dino_heatmap(text, rgb, depth, robot_type, robot_kwargs)
         elif self.config.model_type == "dino_3dgp":
             return self._predict_dino_3dgp(text, camera_obs, robot_type, robot_kwargs)
-        elif self.config.model_type == "mimicplay":
-            return self._predict_mimicplay(text, camera_obs, robot_type, robot_kwargs)
         else:
             raise ValueError(f"Unknown model_type: {self.config.model_type}")
 
@@ -411,10 +404,7 @@ class HighLevelWrapper:
         if self.config.use_gripper_token:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
             self.last_gripper_pcd = gripper_pcd
-            if robot_type == "aloha":
-                gripper_pcd_ = gripper_pcd[self.aloha_gripper_idx]
-            else:
-                gripper_pcd_ = gripper_pcd
+            gripper_pcd_ = gripper_pcd[self.GRIPPER_IDX[robot_type]]
             gripper_token = self._gripper_pcd_to_token(gripper_pcd_)
 
         # Get text embedding if needed
@@ -439,77 +429,6 @@ class HighLevelWrapper:
             )
 
         return goal_prediction
-
-    def _predict_mimicplay(self, text, camera_obs, robot_type, robot_kwargs):
-        """Prediction using mimicplay model"""
-
-        # Prepare lists for all camera data
-        all_rgbs = []
-        all_depths = []
-        all_intrinsics = []
-        all_extrinsics = []
-
-        # Process each camera
-        for cam_idx, cam_name in enumerate(self.camera_names):
-            rgb = camera_obs[cam_name]["rgb"]
-            depth = camera_obs[cam_name]["depth"]
-
-            # Scale intrinsics if needed
-            if self.scaled_Ks[cam_idx] is None:
-                self.scaled_Ks[cam_idx] = get_scaled_intrinsics(
-                    self.original_Ks[cam_idx], (rgb.shape[0], rgb.shape[1]), TARGET_SHAPE
-                )
-
-            all_rgbs.append(rgb)
-            all_depths.append(depth)
-            all_intrinsics.append(self.scaled_Ks[cam_idx])
-            all_extrinsics.append(self.cam_to_worlds[cam_idx])
-
-        # For visualization, compute pcd from all cameras and transform to world frame
-        all_pcd_xyz = []
-        all_pcd_rgb = []
-        for cam_idx in range(len(all_rgbs)):
-            pcd = compute_pcd(all_rgbs[cam_idx], all_depths[cam_idx], self.scaled_Ks[cam_idx],
-                             rgb_preprocess, depth_preprocess, self.device, self.rng,
-                             1000, self.config.max_depth)
-            pcd_xyz, pcd_rgb = pcd[:, :3], pcd[:, 3:]
-
-            # Transform xyz to world frame
-            pcd_xyz_hom = np.concatenate([pcd_xyz, np.ones((pcd_xyz.shape[0], 1))], axis=1)  # (N, 4)
-            pcd_xyz_world = (self.cam_to_worlds[cam_idx] @ pcd_xyz_hom.T).T[:, :3]  # (N, 3)
-
-            all_pcd_xyz.append(pcd_xyz_world)
-            all_pcd_rgb.append(pcd_rgb)
-
-        # Concatenate all cameras
-        self.last_pcd_xyz = np.concatenate(all_pcd_xyz, axis=0)
-        self.last_pcd_rgb = np.concatenate(all_pcd_rgb, axis=0)
-
-        # Get gripper point cloud if needed
-        gripper_token = None
-        if self.config.use_gripper_token:
-            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
-            self.last_gripper_pcd = gripper_pcd
-            if robot_type == "aloha":
-                gripper_pcd_ = gripper_pcd[self.aloha_gripper_idx]
-            else:
-                gripper_pcd_ = gripper_pcd
-            gripper_token = self._gripper_pcd_to_token(gripper_pcd_)
-
-        # Get text embedding if needed
-        text_embed = None
-        if self.config.use_text_embedding:
-            text_embed = self._get_text_embedding(text, all_rgbs[0], robot_type, robot_kwargs)
-
-        latent, dist = inference_mimicplay(
-            self.model, all_rgbs, all_depths, all_intrinsics, all_extrinsics,
-            gripper_token, text, robot_type, 
-            self.config.max_depth, self.device
-        )
-
-        self.last_goal_prediction = latent
-
-        return latent, dist
 
     def get_goal_text(self, text, rgb, robot_type, robot_kwargs):
         if not self.config.use_gemini:
@@ -954,84 +873,6 @@ def initialize_mimicplay_model(entity, project, checkpoint_type,
     model = model.to(device)
 
     return model
-
-def inference_mimicplay(model, rgbs, depths, intrinsics_list, extrinsics_list,
-                        gripper_token, text, robot_type, max_depth, device):
-    """
-    Run Mimicplay model inference on RGB+depth and predict latent plan.
-
-    Args:
-        model (Dino3DGPNetwork): Trained model.
-        rgbs (list): List of RGB images [(H, W, 3), ...], uint8, one per camera.
-        depths (list): List of depth images [(H, W), ...], uint16 in mm, one per camera.
-        intrinsics_list (list): List of camera intrinsics [(3, 3), ...], scaled to 224x224.
-        extrinsics_list (list): List of camera extrinsics [(4, 4), ...], T_world_from_camera.
-        gripper_token (np.ndarray): Optional gripper token (10,).
-        text (str): Optional text caption
-        robot_type (str): Robot type (e.g., "aloha", "robot").
-        max_depth (float): Maximum depth threshold in meters.
-        device (torch.device): Device for inference.
-
-    Returns:
-        latent_plan (torch.Tensor): Predicted latent plan (B, latent_dim).
-        gmm_dist : GMM distribution over future waypoints
-    """
-    N = len(rgbs)  # Number of cameras
-
-    # Preprocess all RGBs
-    rgbs_processed = []
-    for rgb in rgbs:
-        rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb))).copy()
-        rgb_ = torch.from_numpy(rgb_).permute(2, 0, 1).float()  # (3, 224, 224)
-        rgbs_processed.append(rgb_)
-
-    # Stack into (1, N, 3, 224, 224)
-    rgbs_tensor = torch.stack(rgbs_processed, dim=0).unsqueeze(0).to(device)
-
-    # Preprocess all depths
-    depths_processed = []
-    for depth in depths:
-        depth_ = (depth / 1000.0).squeeze().astype(np.float32)  # Convert mm to meters
-        depth_ = PIL.Image.fromarray(depth_)
-        depth_ = np.asarray(depth_preprocess(depth_)).copy()
-        depth_[depth_ > max_depth] = 0  # Mask out far depths
-        depth_ = torch.from_numpy(depth_).float()  # (224, 224)
-        depths_processed.append(depth_)
-    breakpoint()
-    # Stack into (1, N, 224, 224)
-    depths_tensor = torch.stack(depths_processed, dim=0).unsqueeze(0).to(device)
-
-    # Stack intrinsics into (1, N, 3, 3)
-    intrinsics_tensor = torch.stack([
-        torch.from_numpy(K.astype(np.float32)) for K in intrinsics_list
-    ], dim=0).unsqueeze(0).to(device)
-
-    # Stack extrinsics into (1, N, 4, 4)
-    extrinsics_tensor = torch.stack([
-        torch.from_numpy(T.astype(np.float32)) for T in extrinsics_list
-    ], dim=0).unsqueeze(0).to(device)
-
-    with torch.no_grad():
-        # Convert gripper_token to torch if provided
-        gripper_tok = None
-        if gripper_token is not None:
-            gripper_tok = torch.from_numpy(gripper_token.astype(np.float32)).unsqueeze(0).to(device)  # (1, 10)
-
-        # Determine source
-        source = [robot_type] if model.use_source_token else None
-
-        # Forward through network
-        latent_plan, gmm_dist = model.mimicplay_forward(
-            image=rgbs_tensor,
-            depth=depths_tensor,
-            intrinsics=intrinsics_tensor,
-            extrinsics=extrinsics_tensor,
-            gripper_token=gripper_tok,
-            text=text,
-            source=source
-        )
-        
-        return latent_plan, gmm_dist
 
 def inference_articubot(model, pcd, text_embedding, is_gmm, device):
     """

@@ -264,6 +264,11 @@ class DiffusionModel(nn.Module):
 
         self.use_text_embedding = self.config.use_text_embedding
         self.use_latent_plan = self.config.use_latent_plan
+        self.GRIPPER_IDX = {
+            "aloha": torch.tensor([6, 197, 174]),
+            "human": torch.tensor([343, 763, 60]),
+            "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
+        }
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
@@ -317,7 +322,7 @@ class DiffusionModel(nn.Module):
                 self.extrinsics.append(torch.from_numpy(extrinsics).to(device=self.config.device, dtype=torch.float32))
 
             self.mimicplay_model = initialize_mimicplay_model(self.config.hl_entity, self.config.hl_project, self.config.hl_checkpoint_type,
-                self.config.hl_run_id, self.config.hl_dino_model, self.config.use_text_embedding,
+                self.config.hl_run_id, self.config.hl_dino_model, self.config.hl_use_text_embedding,
                 self.config.hl_use_gripper_token, self.config.hl_use_source_token, self.config.hl_use_fourier_pe,
                 self.config.hl_fourier_num_frequencies, self.config.hl_fourier_include_input,
                 self.config.hl_num_transformer_layers, self.config.hl_dropout, self.config.device
@@ -513,11 +518,11 @@ class DiffusionModel(nn.Module):
             states = einops.rearrange(batch["observation.state"], "b s ... -> (b s) ...")
 
             for i in range(batch_size * n_obs_steps):
+                gripper_idx = self.GRIPPER_IDX[batch['embodiment'][0]]
+                gripper_idx = torch.stack(gripper_idx)
+
                 gripper_pcd = HighLevelWrapper._get_gripper_pcd(self, self.config.robot_type, robot_kwargs={"observation.state": states[i].detach().cpu().numpy()})
-                if self.config.robot_type == "aloha":
-                    gripper_pcd_ = gripper_pcd[self.aloha_gripper_idx]
-                else:
-                    gripper_pcd_ = gripper_pcd
+                gripper_pcd_ = gripper_pcd[gripper_idx]
 
                 gripper_token = HighLevelWrapper._gripper_pcd_to_token(self, gripper_pcd_) # (10)
                 gripper_token = torch.from_numpy(gripper_token.astype(np.float32)).to(rgbs.device)  

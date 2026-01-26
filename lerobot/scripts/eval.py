@@ -225,7 +225,7 @@ def rollout(
                         gripper_orn=ee_quat_,
                         cur_joint_angle=gripper_angle_,
                         world_to_cam_mat=np.eye(4), # render in world frame
-                    )[torch.cat([policy.high_level.libero_franka_idx, torch.tensor([3])])]
+                    )[torch.cat([policy.high_level.GRIPPER_IDX["libero_franka"], torch.tensor([3])])]
                     
                     goal_gripper_pcds.append(goal_gripper_pcd)
                     goal_gripper_displacements.append(goal_gripper_displacement)

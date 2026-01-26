@@ -112,11 +112,9 @@ class DP3Policy(PreTrainedPolicy):
         self.pointnet_type = config.pointnet_type
         # indexes of selected gripper points -> handpicked
         self.GRIPPER_IDX = {
-            "aloha": np.array([6, 197, 174]),
-            "human": np.array([343, 763, 60]),
-            "libero_franka": np.array(
-                [0, 1, 2]
-            ),  # gripper pcd in dataset: [left right top grasp-center] in agentview; (right gripper, left gripper, top, grasp-center)
+            "aloha": torch.tensor([6, 197, 174]),
+            "human": torch.tensor([343, 763, 60]),
+            "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
         }
         model = ConditionalUnet1D(
             input_dim=input_dim,
