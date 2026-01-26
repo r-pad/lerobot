@@ -24,6 +24,7 @@ import math
 import json
 from collections import deque
 from typing import Callable
+import os
 
 import einops
 import numpy as np
@@ -44,7 +45,7 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, get_siglip_text_embedding
+from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, get_siglip_text_embedding, initialize_mimicplay_model, TARGET_SHAPE, rgb_preprocess, depth_preprocess, get_scaled_intrinsics
 from transformers import AutoModel, AutoProcessor
 
 
@@ -295,6 +296,48 @@ class DiffusionModel(nn.Module):
             global_cond_dim += self.text_proj_dim
         
         if self.config.use_latent_plan:
+            assert self.config.hl_model_type == "mimicplay", "latent plan conditioning only supports mimicplay high-level model currently"            
+            hl_config = HighLevelConfig(
+                model_type=self.config.hl_model_type,
+                run_id=self.config.hl_run_id,
+                entity=self.config.hl_entity,
+                project=self.config.hl_project,
+                checkpoint_type=self.config.hl_checkpoint_type,
+                max_depth=self.config.hl_max_depth,
+                num_points=self.config.hl_num_points,
+                in_channels=self.config.hl_in_channels,
+                use_gripper_pcd=self.config.hl_use_gripper_pcd,
+                use_text_embedding=self.config.hl_use_text_embedding,
+                use_dual_head=self.config.hl_use_dual_head,
+                use_rgb=self.config.hl_use_rgb,
+                use_gemini=self.config.hl_use_gemini,
+                is_gmm=self.config.hl_is_gmm,
+                dino_model=self.config.hl_dino_model,
+                calibration_data=self.calibration_data,
+                use_fourier_pe=self.config.hl_use_fourier_pe,
+                fourier_num_frequencies=self.config.hl_fourier_num_frequencies,
+                fourier_include_input=self.config.hl_fourier_include_input,
+                num_transformer_layers=self.config.hl_num_transformer_layers,
+                dropout=self.config.hl_dropout,
+                use_source_token=self.config.hl_use_source_token,
+                use_gripper_token=self.config.hl_use_gripper_token,
+            )
+
+            self.mimicplay_model = HighLevelWrapper(hl_config)
+    
+            # self.mimicplay_model = initialize_mimicplay_model(self.config.hl_entity, self.config.hl_project, self.config.hl_checkpoint_type,
+            #     self.config.hl_run_id, self.config.hl_dino_model, self.config.use_text_embedding,
+            #     self.config.hl_use_gripper_token, self.config.hl_use_source_token, self.config.hl_use_fourier_pe,
+            #     self.config.hl_fourier_num_frequencies, self.config.hl_fourier_include_input,
+            #     self.config.hl_num_transformer_layers, self.config.hl_dropout, self.config.device
+            # )
+                                                        
+            self.latent_proj = nn.Sequential(
+                nn.Linear(896, 256),
+                nn.ReLU(),
+                nn.Linear(256, self.config.latent_plan_dim)
+            )
+            
             global_cond_dim += self.config.latent_plan_dim
 
         self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
@@ -438,8 +481,53 @@ class DiffusionModel(nn.Module):
             global_cond_feats.append(text_feats)
         
         if self.use_latent_plan:
-            latent_plans = batch['latent_plan']  # (B, latent_plan_dim)
-            latent_plans = latent_plans.unsqueeze(1).repeat(1, n_obs_steps, 1)
+
+            tasks = batch["task"]* n_obs_steps
+            states = einops.rearrange(batch["observation.state"], "b s ... -> (b s) ...")
+            latent_plans = []
+
+            image_key_list = list(self.config.image_features.keys())
+
+            cam_names = []
+            for key in image_key_list:
+                cam = key.split(".")[-2]
+                if "wrist" in key or cam in cam_names:
+                    continue
+                cam_names.append(cam)
+
+            rgbs = {}
+            depths = {}
+            for cam in cam_names:
+                rgb_key = f"observation.images.{cam}.color"
+                depth_key = f"observation.images.{cam}.transformed_depth"
+
+                if rgb_key not in batch or depth_key not in batch:
+                    raise ValueError(f"Expected both {rgb_key} and {depth_key} in the batch for latent plan conditioning.")
+
+                # (B, S, C, H, W) -> (B*S, C, H, W)
+                rgbs[cam] = einops.rearrange(batch[rgb_key], "b s c h w -> (b s) c h w")
+                depths[cam] = einops.rearrange(batch[depth_key], "b s c h w -> (b s) c h w")
+        
+
+            for i in range(batch_size * n_obs_steps):
+                camera_obs = {}
+
+                for cam in cam_names:
+                    rgb = (rgbs[cam][i].permute(1, 2, 0).detach().cpu().numpy() * 255.0).astype(np.uint8) #H W C
+                    depth = (depths[cam][i].permute(1, 2, 0).detach().cpu().numpy()* 1000.0).astype(np.uint16)  # Convert meters to mm
+                    camera_obs[cam] = {"rgb": rgb, "depth": depth}
+
+                latent_plan, _ = self.mimicplay_model.predict(
+                    tasks[i], camera_obs,
+                    robot_type=self.config.robot_type,
+                    robot_kwargs={"observation.state": states[i].detach().cpu().numpy()},
+                )  # (1, 896)
+                latent_plans.append(latent_plan)
+            latent_plans = torch.cat(latent_plans, axis=0)  # (B*S, 896)
+            latent_plans = self.latent_proj(latent_plans)  
+            latent_plans = einops.rearrange(
+                latent_plans, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps   
+            )# (B, S, latent_plan_dim)
             global_cond_feats.append(latent_plans)
 
         # Concatenate features then flatten to (B, global_cond_dim).

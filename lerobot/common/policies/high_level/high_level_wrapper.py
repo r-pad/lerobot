@@ -503,7 +503,7 @@ class HighLevelWrapper:
 
         latent, dist = inference_mimicplay(
             self.model, all_rgbs, all_depths, all_intrinsics, all_extrinsics,
-            gripper_token, text, robot_type, self.config.is_gmm,
+            gripper_token, text, robot_type, 
             self.config.max_depth, self.device
         )
 
@@ -997,7 +997,7 @@ def inference_mimicplay(model, rgbs, depths, intrinsics_list, extrinsics_list,
         depth_[depth_ > max_depth] = 0  # Mask out far depths
         depth_ = torch.from_numpy(depth_).float()  # (224, 224)
         depths_processed.append(depth_)
-
+    breakpoint()
     # Stack into (1, N, 224, 224)
     depths_tensor = torch.stack(depths_processed, dim=0).unsqueeze(0).to(device)
 
