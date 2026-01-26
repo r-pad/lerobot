@@ -44,6 +44,65 @@ depth_preprocess = transforms.Compose(
     ]
 )
 
+def _gripper_pcd_to_token(gripper_pcd):
+    """
+    Convert gripper point cloud (3 points) to gripper token (10-dim).
+    Token format: [3 position, 6 rotation (6d), 1 gripper width]
+
+    Args:
+        gripper_pcd: (3, 3) numpy array with gripper points
+
+    Returns:
+        gripper_token: (10,) numpy array
+    """
+    # Gripper position (center of first two points - fingertips)
+    gripper_pos = (gripper_pcd[0, :] + gripper_pcd[1, :]) / 2
+
+    # Gripper width (distance between fingertips)
+    gripper_width = np.linalg.norm(gripper_pcd[0, :] - gripper_pcd[1, :])
+
+    # Gripper orientation from the three points
+    # Use palm->center as primary axis
+    forward = gripper_pos - gripper_pcd[2, :]
+    x_axis = forward / np.linalg.norm(forward)
+
+    # Use finger direction for secondary axis
+    finger_vec = gripper_pos - gripper_pcd[0, :]
+
+    # Project finger vector onto plane perpendicular to forward
+    finger_projected = finger_vec - np.dot(finger_vec, x_axis) * x_axis
+    y_axis = finger_projected / np.linalg.norm(finger_projected)
+
+    # Z completes the frame
+    z_axis = np.cross(x_axis, y_axis)
+
+    # Create rotation matrix
+    rotation_matrix = np.stack([x_axis, y_axis, z_axis], axis=-1)
+
+    # Convert to 6D rotation representation
+    rotation_matrix_torch = torch.from_numpy(rotation_matrix).float()
+    rotation_6d = matrix_to_rotation_6d(rotation_matrix_torch).numpy()
+
+    # Combine into token
+    gripper_token = np.concatenate([gripper_pos, rotation_6d, [gripper_width]])
+
+    return gripper_token
+
+def _get_gripper_pcd(robot_type, robot_kwargs):
+    """Extract gripper point cloud for different robot types"""
+    if robot_type == "aloha":
+        joint_state = robot_kwargs["observation.state"]
+        return render_aloha_gripper_pcd(np.eye(4), joint_state) # render in world frame
+    elif robot_type == "libero_franka":
+        from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
+        return get_4_points_from_gripper_pos_orient(
+            gripper_pos=robot_kwargs["ee_pos"],
+            gripper_orn=robot_kwargs["ee_quat"],
+            cur_joint_angle=robot_kwargs["gripper_angle"],
+            world_to_cam_mat=np.eye(4), # render in world frame
+        )#[self.GRIPPER_IDX[robot_type]]
+    else:
+        raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
 
 @dataclass
 class HighLevelConfig:
@@ -53,7 +112,7 @@ class HighLevelConfig:
     entity: str = "r-pad"
     project: str = "lfd3d"
     checkpoint_type: str = "rmse"
-    max_depth: float = 1.0
+    max_depth: float = 1.5
     num_points: int = 8192
     in_channels: int = 3
     use_gripper_pcd: bool = False
@@ -144,66 +203,6 @@ class HighLevelWrapper:
         self.last_goal_prediction = None
         self.last_goal_gripper_mesh = None
 
-    def _get_gripper_pcd(self, robot_type, robot_kwargs):
-        """Extract gripper point cloud for different robot types"""
-        if robot_type == "aloha":
-            joint_state = robot_kwargs["observation.state"]
-            return render_aloha_gripper_pcd(np.eye(4), joint_state) # render in world frame
-        elif robot_type == "libero_franka":
-            from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
-            return get_4_points_from_gripper_pos_orient(
-                gripper_pos=robot_kwargs["ee_pos"],
-                gripper_orn=robot_kwargs["ee_quat"],
-                cur_joint_angle=robot_kwargs["gripper_angle"],
-                world_to_cam_mat=np.eye(4), # render in world frame
-            )[self.GRIPPER_IDX[robot_type]]
-        else:
-            raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
-
-    def _gripper_pcd_to_token(self, gripper_pcd):
-        """
-        Convert gripper point cloud (3 points) to gripper token (10-dim).
-        Token format: [3 position, 6 rotation (6d), 1 gripper width]
-
-        Args:
-            gripper_pcd: (3, 3) numpy array with gripper points
-
-        Returns:
-            gripper_token: (10,) numpy array
-        """
-        # Gripper position (center of first two points - fingertips)
-        gripper_pos = (gripper_pcd[0, :] + gripper_pcd[1, :]) / 2
-
-        # Gripper width (distance between fingertips)
-        gripper_width = np.linalg.norm(gripper_pcd[0, :] - gripper_pcd[1, :])
-
-        # Gripper orientation from the three points
-        # Use palm->center as primary axis
-        forward = gripper_pos - gripper_pcd[2, :]
-        x_axis = forward / np.linalg.norm(forward)
-
-        # Use finger direction for secondary axis
-        finger_vec = gripper_pos - gripper_pcd[0, :]
-
-        # Project finger vector onto plane perpendicular to forward
-        finger_projected = finger_vec - np.dot(finger_vec, x_axis) * x_axis
-        y_axis = finger_projected / np.linalg.norm(finger_projected)
-
-        # Z completes the frame
-        z_axis = np.cross(x_axis, y_axis)
-
-        # Create rotation matrix
-        rotation_matrix = np.stack([x_axis, y_axis, z_axis], axis=-1)
-
-        # Convert to 6D rotation representation
-        rotation_matrix_torch = torch.from_numpy(rotation_matrix).float()
-        rotation_6d = matrix_to_rotation_6d(rotation_matrix_torch).numpy()
-
-        # Combine into token
-        gripper_token = np.concatenate([gripper_pos, rotation_6d, [gripper_width]])
-
-        return gripper_token
-
     def _compute_goal_gripper_mesh(self, goal_prediction, gripper_token, joint_state, robot_type):
         """
         Transform gripper mesh from current pose to goal pose for visualization.
@@ -228,7 +227,7 @@ class HighLevelWrapper:
         current_pose_mat[:3, 3] = gripper_token[:3]
 
         # Build goal gripper pose matrix from predicted points
-        goal_pose = self._gripper_pcd_to_token(goal_prediction)
+        goal_pose = _gripper_pcd_to_token(goal_prediction)
         goal_pose_mat = np.eye(4)
         goal_pose_mat[:3, :3] = rotation_6d_to_matrix(torch.from_numpy(goal_pose[3:9])).numpy()
         goal_pose_mat[:3, 3] = goal_pose[:3]
@@ -405,7 +404,7 @@ class HighLevelWrapper:
             gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
             self.last_gripper_pcd = gripper_pcd
             gripper_pcd_ = gripper_pcd[self.GRIPPER_IDX[robot_type]]
-            gripper_token = self._gripper_pcd_to_token(gripper_pcd_)
+            gripper_token = _gripper_pcd_to_token(gripper_pcd_)
 
         # Get text embedding if needed
         text_embed = None

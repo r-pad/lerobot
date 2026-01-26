@@ -45,7 +45,9 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, get_siglip_text_embedding, initialize_mimicplay_model, TARGET_SHAPE, rgb_preprocess, depth_preprocess, get_scaled_intrinsics
+from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, \
+    get_siglip_text_embedding, initialize_mimicplay_model, TARGET_SHAPE, rgb_preprocess, depth_preprocess, \
+    get_scaled_intrinsics, _gripper_pcd_to_token, _get_gripper_pcd
 from transformers import AutoModel, AutoProcessor
 
 
@@ -118,6 +120,11 @@ class DiffusionPolicy(PreTrainedPolicy):
         with open(self.config.calibration_json, 'r') as f:
             calibration_data = json.load(f)
         self.calibration_data = calibration_data
+        self.GRIPPER_IDX = {
+            "aloha": torch.tensor([6, 197, 174]),
+            "human": torch.tensor([343, 763, 60]),
+            "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
+        }
 
         if self.config.enable_goal_conditioning:
             hl_config = HighLevelConfig(
@@ -229,6 +236,61 @@ class DiffusionPolicy(PreTrainedPolicy):
         if self.config.action_space == "right_eef_relative":
             batch = self.robot_adapter.compute_relative_actions(batch)
 
+        if self.config.use_latent_plan:
+            rgbs, depths, intrinsics, extrinsics = [], [], [], []
+            batch_size = batch[self.obs_key].shape[0]
+            n_obs_steps = batch[self.obs_key].shape[1]
+
+            def get_camera_names(batch):
+                """Get the camera names matching a given pattern from the observation, exclude the wrist camera."""
+                return [s.split('.')[2] for s in batch.keys() if s.startswith('observation.images.cam_') and s.endswith('.color') and 'wrist' not in s]
+
+            camera_names = get_camera_names(batch)
+            for i, cam in enumerate(camera_names):
+                rgb_key = f"observation.images.{cam}.color"
+                depth_key = f"observation.images.{cam}.transformed_depth"
+                intrinsics_key = f"observation.{cam}.intrinsics"
+                extrinsics_key = f"observation.{cam}.extrinsics"
+
+                rgb = (einops.rearrange(batch[rgb_key], "b s c h w -> (b s) c h w") * 255).to(torch.uint8)  # Convert to [0, 255] uint8
+                depth = ((einops.rearrange(batch[depth_key], "b s c h w -> (b s) h w c"))).to(torch.float32).squeeze()
+
+                rgbs.append(rgb_preprocess(rgb))  # (B*S, 3, H, W)
+                depths.append(depth_preprocess(depth))  # (B*S, H, W)
+                img_shape = batch[rgb_key].shape[-2:]  # (H, W)
+                scaled_intrinsics =  torch.from_numpy(get_scaled_intrinsics(
+                        batch[intrinsics_key][0,0].cpu().numpy(),
+                        img_shape,
+                        TARGET_SHAPE)).to(rgb.device)
+                intrinsics.append(scaled_intrinsics[None].repeat(batch_size, 1, 1))
+                extrinsics.append(batch[extrinsics_key][:, -1])
+
+            rgbs = torch.stack(rgbs, dim=1)  # (B*S, num_cams, C, H, W)
+            depths = torch.stack(depths, dim=1)  # (B*S, num_cams, H, W)
+            intrinsics = torch.stack(intrinsics, axis=1).repeat(n_obs_steps, 1, 1, 1)  # (B*S, num_cams, 3, 3)
+            extrinsics = torch.stack(extrinsics, axis=1).repeat(n_obs_steps, 1, 1, 1)  # (B*S, num_cams, 4, 4)
+            text = batch['task'] * n_obs_steps
+            source = batch['embodiment'] * n_obs_steps
+
+            gripper_tokens = []
+            states = einops.rearrange(batch["observation.state"], "b s ... -> (b s) ...")
+            for i in range(batch_size * n_obs_steps):
+                gripper_idx = self.GRIPPER_IDX[source[i]]
+                gripper_pcd = _get_gripper_pcd(self.config.robot_type, robot_kwargs={"observation.state": states[i].detach().cpu().numpy()})
+                gripper_pcd_ = gripper_pcd[gripper_idx]
+
+                gripper_token = _gripper_pcd_to_token(gripper_pcd_) # (10)
+                gripper_token = torch.from_numpy(gripper_token.astype(np.float32)).to(rgbs.device)
+                gripper_tokens.append(gripper_token)
+            gripper_tokens = torch.stack(gripper_tokens, dim=0)  # (B*S, 10)
+
+            latent_plan, _ = self.diffusion.mimicplay_model.mimicplay_forward(
+                image=rgbs, depth=depths, intrinsics=intrinsics, extrinsics=extrinsics,
+                gripper_token=gripper_tokens, text=text, source=source)
+            batch['latent_plan'] = einops.rearrange(latent_plan,
+                                                    "(b s) ... -> b s ...",
+                                                    b=batch_size, s=n_obs_steps) # (B, S, latent_plan_dim)
+
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
@@ -264,11 +326,6 @@ class DiffusionModel(nn.Module):
 
         self.use_text_embedding = self.config.use_text_embedding
         self.use_latent_plan = self.config.use_latent_plan
-        self.GRIPPER_IDX = {
-            "aloha": torch.tensor([6, 197, 174]),
-            "human": torch.tensor([343, 763, 60]),
-            "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
-        }
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
@@ -302,32 +359,13 @@ class DiffusionModel(nn.Module):
         
         if self.config.use_latent_plan:
             assert self.config.hl_model_type == "mimicplay", "latent plan conditioning only supports mimicplay high-level model currently"
-            with open(self.config.calibration_json, 'r') as f:
-                calibration_data = json.load(f)
-            self.calibration_data = calibration_data
-            self.camera_names = list(self.calibration_data.keys())
-            self.intrinsics = []
-            self.scaled_intrinsics = []
-            self.extrinsics = []
-
-            for cam_name in self.camera_names:
-                cam_config = self.calibration_data[cam_name]
-                intrinsics_path = os.path.join("lerobot/scripts/", cam_config["intrinsics"])
-                extrinsics_path = os.path.join("lerobot/scripts/", cam_config["extrinsics"])
-
-                intrinsics = np.loadtxt(intrinsics_path)
-                extrinsics = np.loadtxt(extrinsics_path)
-
-                self.intrinsics.append(intrinsics)
-                self.extrinsics.append(torch.from_numpy(extrinsics).to(device=self.config.device, dtype=torch.float32))
-
             self.mimicplay_model = initialize_mimicplay_model(self.config.hl_entity, self.config.hl_project, self.config.hl_checkpoint_type,
                 self.config.hl_run_id, self.config.hl_dino_model, self.config.hl_use_text_embedding,
                 self.config.hl_use_gripper_token, self.config.hl_use_source_token, self.config.hl_use_fourier_pe,
                 self.config.hl_fourier_num_frequencies, self.config.hl_fourier_include_input,
                 self.config.hl_num_transformer_layers, self.config.hl_dropout, self.config.device
             )
-                                                        
+
             self.latent_proj = nn.Sequential(
                 nn.Linear(896, 256),
                 nn.ReLU(),
@@ -477,66 +515,8 @@ class DiffusionModel(nn.Module):
             global_cond_feats.append(text_feats)
         
         if self.use_latent_plan:
-            
-            self.aloha_gripper_idx = torch.tensor([6, 197, 174])
-
-            rgbs = []
-            depths = []
-            for i, cam in enumerate(self.camera_names):
-                rgb_key = f"observation.images.{cam}.color"
-                depth_key = f"observation.images.{cam}.transformed_depth"
-
-                if rgb_key not in batch or depth_key not in batch:
-                    raise ValueError(f"Expected both {rgb_key} and {depth_key} in the batch for latent plan conditioning.")
-
-                # (B, S, ...) -> (B*S, ...)
-                rgb = (einops.rearrange(batch[rgb_key], "b s c h w -> (b s) c h w") * 255).to(torch.uint8)  # Convert to [0, 255] uint8
-                depth = ((einops.rearrange(batch[depth_key], "b s c h w -> (b s) h w c")) / 1000.0).to(torch.float32).squeeze()   # Convert mm to m
-
-                rgbs.append(rgb_preprocess(rgb))  # (B*S, 3, H, W)
-                depths.append(depth_preprocess(depth))  # (B*S, H, W)
-                
-                if len(self.scaled_intrinsics) < len(self.camera_names):
-                    img_shape = batch[rgb_key].shape[-2:]  # (H, W)
-                    scaled_intrinsics = get_scaled_intrinsics(
-                        np.array(self.intrinsics[i]),
-                        img_shape,
-                        TARGET_SHAPE,
-                    )
-                    self.scaled_intrinsics.append(torch.from_numpy(scaled_intrinsics).to(device=self.config.device, dtype=torch.float32))
-                
-            rgbs = torch.stack(rgbs, dim=1)  # (B*S, num_cams, C, H, W)
-            depths = torch.stack(depths, dim=1)  # (B*S, num_cams, H, W)
-
-            intrinsics = torch.stack(self.scaled_intrinsics, axis=0).repeat(batch_size * n_obs_steps, 1, 1, 1)  # (B*S, num_cams, 3, 3)
-            extrinsics = torch.stack(self.extrinsics, axis=0).repeat(batch_size * n_obs_steps, 1, 1, 1)  # (B*S, num_cams, 4, 4)
-            
-            text = batch['task'] * n_obs_steps
-            source = [self.config.robot_type] * batch_size * n_obs_steps
-
-            gripper_tokens = []
-            states = einops.rearrange(batch["observation.state"], "b s ... -> (b s) ...")
-
-            for i in range(batch_size * n_obs_steps):
-                gripper_idx = self.GRIPPER_IDX[batch['embodiment'][0]]
-                gripper_idx = torch.stack(gripper_idx)
-
-                gripper_pcd = HighLevelWrapper._get_gripper_pcd(self, self.config.robot_type, robot_kwargs={"observation.state": states[i].detach().cpu().numpy()})
-                gripper_pcd_ = gripper_pcd[gripper_idx]
-
-                gripper_token = HighLevelWrapper._gripper_pcd_to_token(self, gripper_pcd_) # (10)
-                gripper_token = torch.from_numpy(gripper_token.astype(np.float32)).to(rgbs.device)  
-                gripper_tokens.append(gripper_token)
-            gripper_tokens = torch.stack(gripper_tokens, dim=0)  # (B*S, 10)
-
-            latent_plans, _ = self.mimicplay_model.mimicplay_forward(image=rgbs, depth=depths, intrinsics=intrinsics, extrinsics=extrinsics, 
-                                                                     gripper_token=gripper_tokens, text=text, source=source,)
-                                                                    
-            latent_plans = self.latent_proj(latent_plans)  # (B*S, latent_plan_dim)
-            latent_plans = einops.rearrange(
-                latent_plans, "(b s) ... -> b s ...", b=batch_size, s=n_obs_steps   
-            )# (B, S, latent_plan_dim)
-            global_cond_feats.append(latent_plans)
+            latent_plan = self.latent_proj(batch['latent_plan'])
+            global_cond_feats.append(latent_plan)
 
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
