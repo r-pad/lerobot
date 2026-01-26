@@ -26,6 +26,7 @@ from collections import deque
 from typing import Callable
 import os
 
+from PIL import Image
 import einops
 import numpy as np
 import torch
@@ -485,11 +486,30 @@ class DiffusionModel(nn.Module):
                     raise ValueError(f"Expected both {rgb_key} and {depth_key} in the batch for latent plan conditioning.")
 
                 # (B, S, ...) -> (B*S, ...)
-                rgb = (einops.rearrange(batch[rgb_key], "b s c h w -> (b s) c h w") * 255).to(torch.uint8)  # Convert to [0, 255] uint8
-                depth = ((einops.rearrange(batch[depth_key], "b s c h w -> (b s) h w c")) / 1000.0).to(torch.float32).squeeze()   # Convert mm to m
+                rgb = (
+                    einops.rearrange(batch[rgb_key], "b s c h w -> (b s) h w c") * 255
+                ).detach().cpu().numpy().astype(np.uint8)  # [0,255] uint8
 
-                rgbs.append(rgb_preprocess(rgb))  # (B*S, 3, H, W)
-                depths.append(depth_preprocess(depth))  # (B*S, H, W)
+                depth = (
+                    einops.rearrange(batch[depth_key], "b s c h w -> (b s) h w c") * 1000.0
+                ).detach().cpu().numpy().astype(np.uint16)  # meters -> mm (uint16)
+
+                rgbs = []
+                depths = []
+                for i in range(batch_size * n_obs_steps):
+                    rgb_ = np.asarray(rgb_preprocess(Image.fromarray(rgb[i]))).copy()
+                    rgb_ = torch.from_numpy(rgb_).permute(2, 0, 1).float() 
+                    rgbs.append(rgb_)
+
+                    depth_ = (depth[i] / 1000.0).squeeze().astype(np.float32)  # Convert mm to meters
+                    depth_ = Image.fromarray(depth_)
+                    depth_ = np.asarray(depth_preprocess(depth_)).copy()
+                    depth_[depth_ > self.config.hl_max_depth] = 0  # Mask out far depths
+                    depth_ = torch.from_numpy(depth_).float()
+                    depths.append(depth_)
+
+                rgbs = torch.stack(rgbs, dim=0)  # (B*S, 3, H, W)
+                depths = torch.stack(depths, dim=0)  # (B*S, H, W)
                 
                 if len(self.scaled_intrinsics) < len(self.camera_names):
                     img_shape = batch[rgb_key].shape[-2:]  # (H, W)
