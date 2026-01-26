@@ -162,7 +162,7 @@ class DiffusionConfig(PreTrainedConfig):
 
     #Mimicplay latent plan conditioning
     use_latent_plan: bool = False
-    latent_plan_dim: int = 896
+    latent_plan_dim: int = 128
 
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
