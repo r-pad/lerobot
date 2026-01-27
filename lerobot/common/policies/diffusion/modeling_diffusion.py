@@ -188,6 +188,198 @@ class DiffusionPolicy(PreTrainedPolicy):
         if self.config.use_latent_plan:
             self._queues["latent_plan"] = deque(maxlen=self.config.n_obs_steps)
 
+    def _visualize_mimicplay_inference(self, rgbs, depths, intrinsics, extrinsics, pred_eef_dist, gripper_pcd):
+        """Visualize point clouds from cameras and predicted EEF trajectory in rerun.
+
+        Args:
+            rgbs: (B, num_cams, C, H, W) preprocessed RGB images in [0, 255] uint8
+            depths: (B, num_cams, H, W) preprocessed depth images (meters)
+            intrinsics: (B, num_cams, 3, 3) camera intrinsics scaled to image size
+            extrinsics: (B, num_cams, 4, 4) camera extrinsics (T_world_from_cam)
+            pred_eef_dist: GMM distribution for predicted EEF trajectory
+            gripper_pcd: (3, 3) gripper point cloud (3 key points)
+        """
+        import rerun as rr
+
+        B, num_cams, C, H, W = rgbs.shape
+
+        # Compute point clouds from each camera and transform to world frame
+        all_pcd_xyz = []
+        all_pcd_rgb = []
+
+        for cam_idx in range(num_cams):
+            # Get depth and intrinsics for this camera
+            depth = depths[0, cam_idx].cpu().numpy()  # (H, W)
+            K = intrinsics[0, cam_idx].cpu().numpy()  # (3, 3)
+            T_world_cam = extrinsics[0, cam_idx].cpu().numpy()  # (4, 4)
+            rgb = rgbs[0, cam_idx].permute(1, 2, 0).cpu().numpy()  # (H, W, 3), uint8 [0, 255]
+
+            # Create pixel coordinate grid
+            y_coords, x_coords = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+            x_flat = x_coords.flatten()
+            y_flat = y_coords.flatten()
+            z_flat = depth.flatten()
+
+            # Filter valid depth points
+            valid_mask = (z_flat > 0) & (z_flat < self.config.hl_max_depth)
+            x_flat = x_flat[valid_mask]
+            y_flat = y_flat[valid_mask]
+            z_flat = z_flat[valid_mask]
+
+            # Unproject to camera frame
+            pixels = np.stack([x_flat, y_flat, np.ones_like(x_flat)], axis=0)  # (3, N)
+            K_inv = np.linalg.inv(K)
+            points_cam = (K_inv @ pixels) * z_flat  # (3, N)
+            points_cam = points_cam.T  # (N, 3)
+
+            # Transform to world frame
+            points_cam_hom = np.concatenate([points_cam, np.ones((points_cam.shape[0], 1))], axis=1)  # (N, 4)
+            points_world = (T_world_cam @ points_cam_hom.T).T[:, :3]  # (N, 3)
+
+            # Get RGB values for points (already in [0, 255] uint8)
+            rgb_flat = rgb.reshape(-1, 3)[valid_mask]
+
+            all_pcd_xyz.append(points_world)
+            all_pcd_rgb.append(rgb_flat)
+
+        # Concatenate point clouds from all cameras
+        pcd_xyz = np.concatenate(all_pcd_xyz, axis=0)
+        pcd_rgb = np.concatenate(all_pcd_rgb, axis=0).astype(np.uint8)
+
+        # Downsample for visualization (keep at most 5000 points)
+        if pcd_xyz.shape[0] > 5000:
+            indices = np.random.choice(pcd_xyz.shape[0], 5000, replace=False)
+            pcd_xyz = pcd_xyz[indices]
+            pcd_rgb = pcd_rgb[indices]
+
+        # Log scene point cloud
+        rr.log("mimicplay/scene_pointcloud", rr.Points3D(pcd_xyz, colors=pcd_rgb))
+
+        # Log gripper point cloud (current position)
+        rr.log("mimicplay/gripper_pcd", rr.Points3D(gripper_pcd, colors=[0, 255, 0], radii=0.01))
+
+        # Visualize the mean trajectory from the best GMM mode
+        # pred_eef_dist is a MixtureSameFamily with means of shape (B, 5, 30)
+        # 30 = 10 timesteps * 3 coords
+        mean_trajectory = pred_eef_dist.component_distribution.mean  # (B, 5, 30)
+        weights = pred_eef_dist.mixture_distribution.probs  # (B, 5)
+        best_mode = weights[0].argmax().item()
+        mean_traj = mean_trajectory[0, best_mode].cpu().numpy().reshape(10, 3)
+
+        rr.log("mimicplay/pred_eef_trajectory", rr.LineStrips3D(
+            [mean_traj],
+            colors=[[255, 0, 0]],
+            radii=0.005
+        ))
+
+        # Log trajectory points
+        rr.log("mimicplay/pred_eef_points", rr.Points3D(
+            mean_traj,
+            colors=[[0, 0, 255]] * 10,
+            radii=0.008
+        ))
+
+    def _visualize_pred_eef_open3d(self, rgbs, depths, intrinsics, extrinsics, pred_eef_dist, gripper_pcd, sample_idx=0):
+        """Visualize point clouds and predicted EEF trajectory using open3d during training.
+
+        Args:
+            rgbs: (1, num_cams, C, H, W) preprocessed RGB images in [0, 255] uint8
+            depths: (1, num_cams, H, W) preprocessed depth images (meters)
+            intrinsics: (1, num_cams, 3, 3) camera intrinsics
+            extrinsics: (1, num_cams, 4, 4) camera extrinsics (T_world_from_cam)
+            pred_eef_dist: GMM distribution for predicted EEF trajectory
+            gripper_pcd: (N, 3) gripper point cloud
+            sample_idx: which sample from batch to visualize
+        """
+        import open3d as o3d
+
+        _, num_cams, C, H, W = rgbs.shape
+
+        # Compute point clouds from each camera
+        all_pcd_xyz = []
+        all_pcd_rgb = []
+
+        for cam_idx in range(num_cams):
+            depth = depths[0, cam_idx].cpu().numpy()  # (H, W)
+            K = intrinsics[0, cam_idx].cpu().numpy()  # (3, 3)
+            T_world_cam = extrinsics[0, cam_idx].cpu().numpy()  # (4, 4)
+            rgb = rgbs[0, cam_idx].permute(1, 2, 0).cpu().numpy()  # (H, W, 3)
+
+            # Create pixel coordinate grid
+            y_coords, x_coords = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+            x_flat = x_coords.flatten()
+            y_flat = y_coords.flatten()
+            z_flat = depth.flatten()
+
+            # Filter valid depth points
+            valid_mask = (z_flat > 0) & (z_flat < self.config.hl_max_depth)
+            x_flat = x_flat[valid_mask]
+            y_flat = y_flat[valid_mask]
+            z_flat = z_flat[valid_mask]
+
+            # Unproject to camera frame
+            pixels = np.stack([x_flat, y_flat, np.ones_like(x_flat)], axis=0)
+            K_inv = np.linalg.inv(K)
+            points_cam = (K_inv @ pixels) * z_flat
+            points_cam = points_cam.T  # (N, 3)
+
+            # Transform to world frame
+            points_cam_hom = np.concatenate([points_cam, np.ones((points_cam.shape[0], 1))], axis=1)
+            points_world = (T_world_cam @ points_cam_hom.T).T[:, :3]
+
+            # Get RGB values
+            rgb_flat = rgb.reshape(-1, 3)[valid_mask]
+
+            all_pcd_xyz.append(points_world)
+            all_pcd_rgb.append(rgb_flat)
+
+        # Concatenate point clouds
+        pcd_xyz = np.concatenate(all_pcd_xyz, axis=0)
+        pcd_rgb = np.concatenate(all_pcd_rgb, axis=0).astype(np.float64) / 255.0
+
+        # Downsample
+        if pcd_xyz.shape[0] > 5000:
+            indices = np.random.choice(pcd_xyz.shape[0], 5000, replace=False)
+            pcd_xyz = pcd_xyz[indices]
+            pcd_rgb = pcd_rgb[indices]
+
+        # Create open3d point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pcd_xyz)
+        pcd.colors = o3d.utility.Vector3dVector(pcd_rgb)
+
+        # Get mean trajectory from GMM (best mode)
+        mean_trajectory = pred_eef_dist.component_distribution.mean  # (B, 5, 30)
+        weights = pred_eef_dist.mixture_distribution.probs  # (B, 5)
+        best_mode = weights[sample_idx].argmax().item()
+        mean_traj = mean_trajectory[sample_idx, best_mode].cpu().numpy().reshape(10, 3)
+
+        # Create trajectory line set
+        lines = [[i, i + 1] for i in range(9)]
+        line_set = o3d.geometry.LineSet()
+        line_set.points = o3d.utility.Vector3dVector(mean_traj)
+        line_set.lines = o3d.utility.Vector2iVector(lines)
+        line_set.colors = o3d.utility.Vector3dVector([[1, 0, 0]] * len(lines))  # Red
+
+        # Create trajectory points as spheres with color gradient (red -> green)
+        traj_spheres = []
+        for i, pt in enumerate(mean_traj):
+            t = i / 9.0  # 0 to 1 over 10 points
+            color = [1 - t, t, 0]  # Red (1,0,0) -> Green (0,1,0)
+            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.008)
+            sphere.translate(pt)
+            sphere.paint_uniform_color(color)
+            traj_spheres.append(sphere)
+
+        # Create gripper points
+        gripper_pcd_o3d = o3d.geometry.PointCloud()
+        gripper_pcd_o3d.points = o3d.utility.Vector3dVector(gripper_pcd.cpu().numpy())
+        gripper_pcd_o3d.paint_uniform_color([0, 1, 0])  # Green
+
+        # Visualize
+        geometries = [pcd, line_set, gripper_pcd_o3d] + traj_spheres
+        o3d.visualization.draw_geometries(geometries, window_name="Training pred_eef visualization")
+
     @torch.no_grad
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
         """Select a single action given environment observations.
@@ -244,9 +436,13 @@ class DiffusionPolicy(PreTrainedPolicy):
             gripper_token = torch.from_numpy(gripper_token.astype(np.float32)).to(rgbs.device).unsqueeze(0)
 
             with torch.no_grad():
-                latent_plan, _ = self.diffusion.mimicplay_model.mimicplay_forward(
+                latent_plan, pred_eef = self.diffusion.mimicplay_model.mimicplay_forward(
                     image=rgbs, depth=depths, intrinsics=intrinsics, extrinsics=extrinsics,
                     gripper_token=gripper_token, text=text, source=[robot_type])
+
+            # Visualize point clouds and pred_eef in rerun
+            self._visualize_mimicplay_inference(rgbs, depths, intrinsics, extrinsics, pred_eef, gripper_pcd_)
+
             batch['latent_plan'] = latent_plan
 
         batch = self.normalize_inputs(batch)
@@ -320,8 +516,10 @@ class DiffusionPolicy(PreTrainedPolicy):
 
             rgbs = torch.stack(rgbs, dim=1)  # (B*S, num_cams, C, H, W)
             depths = torch.stack(depths, dim=1)  # (B*S, num_cams, H, W)
-            intrinsics = torch.stack(intrinsics, axis=1).repeat(n_obs_steps, 1, 1, 1)  # (B*S, num_cams, 3, 3)
-            extrinsics = torch.stack(extrinsics, axis=1).repeat(n_obs_steps, 1, 1, 1)  # (B*S, num_cams, 4, 4)
+            intrinsics = torch.stack(intrinsics, axis=1)  # (B, num_cams, 3, 3)
+            intrinsics = einops.repeat(intrinsics, "b n h w -> (b s) n h w", s=n_obs_steps)  # (B*S, num_cams, 3, 3)
+            extrinsics = torch.stack(extrinsics, axis=1)  # (B, num_cams, 4, 4)
+            extrinsics = einops.repeat(extrinsics, "b n h w -> (b s) n h w", s=n_obs_steps)  # (B*S, num_cams, 4, 4)
             text = batch['task'] * n_obs_steps
             source = batch['embodiment'] * n_obs_steps
             gripper_pcd = (einops.rearrange(batch[gripper_pcd_key], "b s n p -> (b s) n p"))
@@ -335,9 +533,16 @@ class DiffusionPolicy(PreTrainedPolicy):
             gripper_tokens = torch.stack(gripper_tokens, dim=0)  # (B*S, 10)
 
             with torch.no_grad():
-                latent_plan, _ = self.diffusion.mimicplay_model.mimicplay_forward(
+                latent_plan, pred_eef = self.diffusion.mimicplay_model.mimicplay_forward(
                     image=rgbs, depth=depths, intrinsics=intrinsics, extrinsics=extrinsics,
                     gripper_token=gripper_tokens, text=text, source=source)
+
+            # # Visualize pred_eef during training (first sample in batch)
+            # self._visualize_pred_eef_open3d(
+            #     rgbs[0:1], depths[0:1], intrinsics[0:1], extrinsics[0:1],
+            #     pred_eef, gripper_pcd[0], sample_idx=0
+            # )
+
             batch['latent_plan'] = einops.rearrange(latent_plan,
                                                     "(b s) ... -> b s ...",
                                                     b=batch_size, s=n_obs_steps) # (B, S, latent_plan_dim)
