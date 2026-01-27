@@ -47,7 +47,7 @@ from lerobot.common.policies.utils import (
 )
 from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, \
     get_siglip_text_embedding, initialize_mimicplay_model, TARGET_SHAPE, rgb_preprocess, depth_preprocess, \
-    get_scaled_intrinsics, _gripper_pcd_to_token
+    get_scaled_intrinsics, _gripper_pcd_to_token, _get_gripper_pcd
 from transformers import AutoModel, AutoProcessor
 
 
@@ -120,6 +120,19 @@ class DiffusionPolicy(PreTrainedPolicy):
         with open(self.config.calibration_json, 'r') as f:
             calibration_data = json.load(f)
         self.calibration_data = calibration_data
+        self.camera_names = list(self.calibration_data.keys())
+        self.num_cameras = len(self.camera_names)
+        self.intrinsics = []
+        self.extrinsics = []
+        for cam_name in self.camera_names:
+            cam_config = self.calibration_data[cam_name]
+            intrinsics_path = os.path.join("lerobot/scripts/", cam_config["intrinsics"])
+            extrinsics_path = os.path.join("lerobot/scripts/", cam_config["extrinsics"])
+
+            self.intrinsics.append(np.loadtxt(intrinsics_path))
+            self.extrinsics.append(np.loadtxt(extrinsics_path))
+        self.scaled_Ks = [None] * self.num_cameras  # Will be set during inference
+
         self.GRIPPER_IDX = {
             "aloha": torch.tensor([6, 197, 174]),
             "human": torch.tensor([343, 763, 60]),
@@ -172,6 +185,8 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
+        if self.config.use_latent_plan:
+            self._queues["latent_plan"] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -197,6 +212,42 @@ class DiffusionPolicy(PreTrainedPolicy):
         """
         state = batch['observation.state']
         current_obs = batch[self.obs_key]
+
+        if self.config.use_latent_plan:
+            rgbs, depths  = [], []
+            for cam_idx, cam in enumerate(self.camera_names):
+                rgb_key = f"observation.images.{cam}.color"
+                depth_key = f"observation.images.{cam}.transformed_depth"
+
+                rgb = (batch[rgb_key].squeeze() * 255).to(torch.uint8)  # Convert to [0, 255] uint8
+                depth = batch[depth_key].to(torch.float32).squeeze(0)
+                depth[depth > self.config.hl_max_depth] = 0
+
+                rgbs.append(rgb_preprocess(rgb))  # (3, H, W)
+                depths.append(depth_preprocess(depth))  # (H, W)
+                img_shape = batch[rgb_key].shape[-2:]  # (H, W)
+                if self.scaled_Ks[cam_idx] is None:
+                    self.scaled_Ks[cam_idx] = torch.from_numpy(get_scaled_intrinsics(
+                        self.intrinsics[cam_idx], img_shape, TARGET_SHAPE
+                    )).to(rgb.device)
+
+            rgbs = torch.stack(rgbs, dim=0)[None]  # (B, num_cams, C, H, W)
+            depths = torch.stack(depths, dim=1)  # (B, num_cams, H, W)
+            intrinsics = torch.stack(self.scaled_Ks).to(rgbs.device).float()[None]  # (B, num_cams, 3, 3)
+            extrinsics = torch.from_numpy(np.stack(self.extrinsics)).to(rgbs.device).float()[None] # (B, num_cams, 4, 4)
+            text = batch['task']
+            robot_type = self.config.robot_type
+            robot_kwargs = {"observation.state": batch["observation.state"].squeeze()}
+            gripper_pcd = _get_gripper_pcd(robot_type, robot_kwargs)
+            gripper_pcd_ = gripper_pcd[self.GRIPPER_IDX[robot_type]]
+            gripper_token = _gripper_pcd_to_token(gripper_pcd_) # (10)
+            gripper_token = torch.from_numpy(gripper_token.astype(np.float32)).to(rgbs.device).unsqueeze(0)
+
+            with torch.no_grad():
+                latent_plan, _ = self.diffusion.mimicplay_model.mimicplay_forward(
+                    image=rgbs, depth=depths, intrinsics=intrinsics, extrinsics=extrinsics,
+                    gripper_token=gripper_token, text=text, source=[robot_type])
+            batch['latent_plan'] = latent_plan
 
         batch = self.normalize_inputs(batch)
         if self.config.use_text_embedding:

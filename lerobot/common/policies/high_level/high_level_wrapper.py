@@ -313,7 +313,7 @@ class HighLevelWrapper:
         self.last_pcd_rgb = pcd_rgb
 
         if self.config.use_gripper_pcd:
-            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            gripper_pcd = _get_gripper_pcd(robot_type, robot_kwargs)
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
             if self.config.use_rgb:
                 gripper_rgb = np.zeros((gripper_pcd.shape[0], 3))
@@ -340,7 +340,7 @@ class HighLevelWrapper:
         # Get gripper point cloud if needed
         gripper_pcd = None
         if self.config.use_gripper_pcd:
-            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            gripper_pcd = _get_gripper_pcd(robot_type, robot_kwargs)
             self.last_gripper_pcd = gripper_pcd
 
         # Get text embedding if needed
@@ -401,7 +401,7 @@ class HighLevelWrapper:
         # Get gripper point cloud if needed
         gripper_token = None
         if self.config.use_gripper_token:
-            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            gripper_pcd = _get_gripper_pcd(robot_type, robot_kwargs)
             self.last_gripper_pcd = gripper_pcd
             gripper_pcd_ = gripper_pcd[self.GRIPPER_IDX[robot_type]]
             gripper_token = _gripper_pcd_to_token(gripper_pcd_)
