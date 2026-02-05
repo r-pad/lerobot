@@ -8,6 +8,7 @@ from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix
 from lerobot.common.policies.high_level.articubot import PointNet2_super, get_weighted_displacement, sample_from_gmm
 from lerobot.common.policies.high_level.dino_heatmap import DinoHeatmapNetwork, sample_from_heatmap
 from lerobot.common.policies.high_level.dino_3dgp import Dino3DGPNetwork, sample_from_gmm_3dgp, get_weighted_prediction_3dgp
+from lerobot.common.policies.high_level.vit_3dgp import ViT3DGPNetwork
 import wandb
 from transformers import AutoModel, AutoProcessor
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd, render_aloha_gripper_mesh
@@ -133,6 +134,14 @@ class HighLevelConfig:
     use_source_token: bool = False
     use_gripper_token: bool = True
 
+    # vit_3dgp specific configs
+    img_size: int = 224
+    patch_size: int = 16
+    vit_embed_dim: int = 384
+    vit_depth: int = 6
+    vit_num_heads: int = 6
+    vit_mlp_ratio: float = 4.0
+
 
 class HighLevelWrapper:
     def __init__(self, config: HighLevelConfig):
@@ -185,6 +194,15 @@ class HighLevelWrapper:
                 config.use_gripper_token, config.use_source_token, config.use_fourier_pe,
                 config.fourier_num_frequencies, config.fourier_include_input,
                 config.num_transformer_layers, config.dropout, self.device
+            )
+        elif config.model_type == "vit_3dgp":
+            self.model = initialize_vit_3dgp_model(config.entity, config.project, config.checkpoint_type,
+                config.run_id, config.use_text_embedding,
+                config.use_gripper_token, config.use_source_token, config.use_fourier_pe,
+                config.fourier_num_frequencies, config.fourier_include_input,
+                config.num_transformer_layers, config.dropout,
+                config.img_size, config.patch_size, config.vit_embed_dim,
+                config.vit_depth, config.vit_num_heads, config.vit_mlp_ratio, self.device
             )
         else:
             raise ValueError(f"Unknown model_type: {config.model_type}")
@@ -271,6 +289,8 @@ class HighLevelWrapper:
             return self._predict_dino_heatmap(text, rgb, depth, robot_type, robot_kwargs)
         elif self.config.model_type == "dino_3dgp":
             return self._predict_dino_3dgp(text, camera_obs, robot_type, robot_kwargs)
+        elif self.config.model_type == "vit_3dgp":
+            return self._predict_dino_3dgp(text, camera_obs, robot_type, robot_kwargs)  # Reuse since interface is identical
         else:
             raise ValueError(f"Unknown model_type: {self.config.model_type}")
 
@@ -460,7 +480,7 @@ class HighLevelWrapper:
                 rgb_shape = camera_obs[cam_name]["rgb"].shape
                 goal_projections[cam_name] = self._project_to_camera(goal_prediction, rgb_shape, idx, goal_repr)
             return goal_projections
-        elif self.config.model_type == "dino_3dgp":
+        elif self.config.model_type == "dino_3dgp" or self.config.model_type == "vit_3dgp":
             # Project to each camera
             goal_projections = {}
             for idx, cam_name in enumerate(self.camera_names):
@@ -652,6 +672,60 @@ def initialize_dino_3dgp_model(entity, project, checkpoint_type,
         fourier_include_input, num_transformer_layers, dropout
     )
     model = Dino3DGPNetwork(model_cfg)
+
+    artifact_dir = "wandb"
+    checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
+    api = wandb.Api()
+    artifact = api.artifact(checkpoint_reference, type="model")
+    ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
+    ckpt = torch.load(ckpt_file)
+    # Remove the "network." prefix, since we're not using Lightning here.
+    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
+    model.load_state_dict(state_dict)
+
+    model = model.eval()
+    model = model.to(device)
+
+    return model
+
+def initialize_vit_3dgp_model(entity, project, checkpoint_type,
+    run_id, use_text_embedding, use_gripper_token, use_source_token,
+    use_fourier_pe, fourier_num_frequencies, fourier_include_input,
+    num_transformer_layers, dropout,
+    img_size, patch_size, vit_embed_dim, vit_depth, vit_num_heads, vit_mlp_ratio,
+    device
+):
+    """Initialize ViT 3D Goal Prediction model from wandb artifact"""
+
+    # Simple config object to match what ViT3DGPNetwork expects
+    class ModelConfig:
+        def __init__(self, use_text_embedding, use_gripper_token,
+                     use_source_token, use_fourier_pe, fourier_num_frequencies,
+                     fourier_include_input, num_transformer_layers, dropout,
+                     img_size, patch_size, vit_embed_dim, vit_depth, vit_num_heads, vit_mlp_ratio):
+            self.use_text_embedding = use_text_embedding
+            self.use_gripper_token = use_gripper_token
+            self.use_source_token = use_source_token
+            self.use_fourier_pe = use_fourier_pe
+            self.fourier_num_frequencies = fourier_num_frequencies
+            self.fourier_include_input = fourier_include_input
+            self.num_transformer_layers = num_transformer_layers
+            self.dropout = dropout
+            self.image_token_dropout = False  # We only do inference here.
+            self.img_size = img_size
+            self.patch_size = patch_size
+            self.vit_embed_dim = vit_embed_dim
+            self.vit_depth = vit_depth
+            self.vit_num_heads = vit_num_heads
+            self.vit_mlp_ratio = vit_mlp_ratio
+
+    model_cfg = ModelConfig(
+        use_text_embedding, use_gripper_token,
+        use_source_token, use_fourier_pe, fourier_num_frequencies,
+        fourier_include_input, num_transformer_layers, dropout,
+        img_size, patch_size, vit_embed_dim, vit_depth, vit_num_heads, vit_mlp_ratio
+    )
+    model = ViT3DGPNetwork(model_cfg)
 
     artifact_dir = "wandb"
     checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
