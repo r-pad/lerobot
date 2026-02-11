@@ -160,6 +160,10 @@ class DiffusionConfig(PreTrainedConfig):
     use_text_embedding: bool = False
     calibration_json: str = "lerobot/scripts/aloha_calibration/calibration_multiview.json"
 
+    #Mimicplay latent plan conditioning
+    use_latent_plan: bool = False
+    latent_plan_dim: int = 128
+
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
     hl_model_type: str = "dino_3dgp"  # "articubot", "dino_heatmap", or "dino_3dgp"

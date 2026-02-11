@@ -8,6 +8,7 @@ from pytorch3d.transforms import matrix_to_rotation_6d, rotation_6d_to_matrix
 from lerobot.common.policies.high_level.articubot import PointNet2_super, get_weighted_displacement, sample_from_gmm
 from lerobot.common.policies.high_level.dino_heatmap import DinoHeatmapNetwork, sample_from_heatmap
 from lerobot.common.policies.high_level.dino_3dgp import Dino3DGPNetwork, sample_from_gmm_3dgp, get_weighted_prediction_3dgp
+from lerobot.common.policies.high_level.vit_3dgp import ViT3DGPNetwork
 import wandb
 from transformers import AutoModel, AutoProcessor
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd, render_aloha_gripper_mesh
@@ -40,6 +41,65 @@ depth_preprocess = transforms.Compose(
     ]
 )
 
+def _gripper_pcd_to_token(gripper_pcd):
+    """
+    Convert gripper point cloud (3 points) to gripper token (10-dim).
+    Token format: [3 position, 6 rotation (6d), 1 gripper width]
+
+    Args:
+        gripper_pcd: (3, 3) numpy array with gripper points
+
+    Returns:
+        gripper_token: (10,) numpy array
+    """
+    # Gripper position (center of first two points - fingertips)
+    gripper_pos = (gripper_pcd[0, :] + gripper_pcd[1, :]) / 2
+
+    # Gripper width (distance between fingertips)
+    gripper_width = np.linalg.norm(gripper_pcd[0, :] - gripper_pcd[1, :])
+
+    # Gripper orientation from the three points
+    # Use palm->center as primary axis
+    forward = gripper_pos - gripper_pcd[2, :]
+    x_axis = forward / np.linalg.norm(forward)
+
+    # Use finger direction for secondary axis
+    finger_vec = gripper_pos - gripper_pcd[0, :]
+
+    # Project finger vector onto plane perpendicular to forward
+    finger_projected = finger_vec - np.dot(finger_vec, x_axis) * x_axis
+    y_axis = finger_projected / np.linalg.norm(finger_projected)
+
+    # Z completes the frame
+    z_axis = np.cross(x_axis, y_axis)
+
+    # Create rotation matrix
+    rotation_matrix = np.stack([x_axis, y_axis, z_axis], axis=-1)
+
+    # Convert to 6D rotation representation
+    rotation_matrix_torch = torch.from_numpy(rotation_matrix).float()
+    rotation_6d = matrix_to_rotation_6d(rotation_matrix_torch).numpy()
+
+    # Combine into token
+    gripper_token = np.concatenate([gripper_pos, rotation_6d, [gripper_width]])
+
+    return gripper_token
+
+def _get_gripper_pcd(robot_type, robot_kwargs):
+    """Extract gripper point cloud for different robot types"""
+    if robot_type == "aloha":
+        joint_state = robot_kwargs["observation.state"]
+        return render_aloha_gripper_pcd(np.eye(4), joint_state) # render in world frame
+    elif robot_type == "libero_franka":
+        from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
+        return get_4_points_from_gripper_pos_orient(
+            gripper_pos=robot_kwargs["ee_pos"],
+            gripper_orn=robot_kwargs["ee_quat"],
+            cur_joint_angle=robot_kwargs["gripper_angle"],
+            world_to_cam_mat=np.eye(4), # render in world frame
+        )#[self.GRIPPER_IDX[robot_type]]
+    else:
+        raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
 
 @dataclass
 class HighLevelConfig:
@@ -49,7 +109,7 @@ class HighLevelConfig:
     entity: str = "r-pad"
     project: str = "lfd3d"
     checkpoint_type: str = "rmse"
-    max_depth: float = 1.0
+    max_depth: float = 1.5
     num_points: int = 8192
     in_channels: int = 3
     use_gripper_pcd: bool = False
@@ -69,6 +129,14 @@ class HighLevelConfig:
     dropout: float = 0.1
     use_source_token: bool = False
     use_gripper_token: bool = True
+
+    # vit_3dgp specific configs
+    img_size: int = 224
+    patch_size: int = 16
+    vit_embed_dim: int = 384
+    vit_depth: int = 6
+    vit_num_heads: int = 6
+    vit_mlp_ratio: float = 4.0
 
 
 class HighLevelWrapper:
@@ -123,13 +191,24 @@ class HighLevelWrapper:
                 config.fourier_num_frequencies, config.fourier_include_input,
                 config.num_transformer_layers, config.dropout, self.device
             )
+        elif config.model_type == "vit_3dgp":
+            self.model = initialize_vit_3dgp_model(config.entity, config.project, config.checkpoint_type,
+                config.run_id, config.use_text_embedding,
+                config.use_gripper_token, config.use_source_token, config.use_fourier_pe,
+                config.fourier_num_frequencies, config.fourier_include_input,
+                config.num_transformer_layers, config.dropout,
+                config.img_size, config.patch_size, config.vit_embed_dim,
+                config.vit_depth, config.vit_num_heads, config.vit_mlp_ratio, self.device
+            )
         else:
             raise ValueError(f"Unknown model_type: {config.model_type}")
 
         self.rng = np.random.default_rng()
-        self.aloha_gripper_idx = torch.tensor([6, 197, 174]) # Handpicked idxs for the aloha
-        self.libero_franka_idx = torch.tensor([1, 2, 0]) # top, left, right -> left, right, top in agentview 
-        print(f"libero franka gripper idx: {self.libero_franka_idx}")
+        self.GRIPPER_IDX = {
+            "aloha": torch.tensor([6, 197, 174]),
+            "human": torch.tensor([343, 763, 60]),
+            "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
+        }
 
         # For rerun visualization
         self.last_pcd_xyz = None
@@ -137,66 +216,6 @@ class HighLevelWrapper:
         self.last_gripper_pcd = None
         self.last_goal_prediction = None
         self.last_goal_gripper_mesh = None
-
-    def _get_gripper_pcd(self, robot_type, robot_kwargs):
-        """Extract gripper point cloud for different robot types"""
-        if robot_type == "aloha":
-            joint_state = robot_kwargs["observation.state"]
-            return render_aloha_gripper_pcd(np.eye(4), joint_state) # render in world frame
-        elif robot_type == "libero_franka":
-            from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
-            return get_4_points_from_gripper_pos_orient(
-                gripper_pos=robot_kwargs["ee_pos"],
-                gripper_orn=robot_kwargs["ee_quat"],
-                cur_joint_angle=robot_kwargs["gripper_angle"],
-                world_to_cam_mat=np.eye(4), # render in world frame
-            )[self.libero_franka_idx]
-        else:
-            raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
-
-    def _gripper_pcd_to_token(self, gripper_pcd):
-        """
-        Convert gripper point cloud (3 points) to gripper token (10-dim).
-        Token format: [3 position, 6 rotation (6d), 1 gripper width]
-
-        Args:
-            gripper_pcd: (3, 3) numpy array with gripper points
-
-        Returns:
-            gripper_token: (10,) numpy array
-        """
-        # Gripper position (center of first two points - fingertips)
-        gripper_pos = (gripper_pcd[0, :] + gripper_pcd[1, :]) / 2
-
-        # Gripper width (distance between fingertips)
-        gripper_width = np.linalg.norm(gripper_pcd[0, :] - gripper_pcd[1, :])
-
-        # Gripper orientation from the three points
-        # Use palm->center as primary axis
-        forward = gripper_pos - gripper_pcd[2, :]
-        x_axis = forward / np.linalg.norm(forward)
-
-        # Use finger direction for secondary axis
-        finger_vec = gripper_pos - gripper_pcd[0, :]
-
-        # Project finger vector onto plane perpendicular to forward
-        finger_projected = finger_vec - np.dot(finger_vec, x_axis) * x_axis
-        y_axis = finger_projected / np.linalg.norm(finger_projected)
-
-        # Z completes the frame
-        z_axis = np.cross(x_axis, y_axis)
-
-        # Create rotation matrix
-        rotation_matrix = np.stack([x_axis, y_axis, z_axis], axis=-1)
-
-        # Convert to 6D rotation representation
-        rotation_matrix_torch = torch.from_numpy(rotation_matrix).float()
-        rotation_6d = matrix_to_rotation_6d(rotation_matrix_torch).numpy()
-
-        # Combine into token
-        gripper_token = np.concatenate([gripper_pos, rotation_6d, [gripper_width]])
-
-        return gripper_token
 
     def _compute_goal_gripper_mesh(self, goal_prediction, gripper_token, joint_state, robot_type):
         """
@@ -222,7 +241,7 @@ class HighLevelWrapper:
         current_pose_mat[:3, 3] = gripper_token[:3]
 
         # Build goal gripper pose matrix from predicted points
-        goal_pose = self._gripper_pcd_to_token(goal_prediction)
+        goal_pose = _gripper_pcd_to_token(goal_prediction)
         goal_pose_mat = np.eye(4)
         goal_pose_mat[:3, :3] = rotation_6d_to_matrix(torch.from_numpy(goal_pose[3:9])).numpy()
         goal_pose_mat[:3, 3] = goal_pose[:3]
@@ -266,6 +285,8 @@ class HighLevelWrapper:
             return self._predict_dino_heatmap(text, rgb, depth, robot_type, robot_kwargs)
         elif self.config.model_type == "dino_3dgp":
             return self._predict_dino_3dgp(text, camera_obs, robot_type, robot_kwargs)
+        elif self.config.model_type == "vit_3dgp":
+            return self._predict_dino_3dgp(text, camera_obs, robot_type, robot_kwargs)  # Reuse since interface is identical
         else:
             raise ValueError(f"Unknown model_type: {self.config.model_type}")
 
@@ -308,7 +329,7 @@ class HighLevelWrapper:
         self.last_pcd_rgb = pcd_rgb
 
         if self.config.use_gripper_pcd:
-            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            gripper_pcd = _get_gripper_pcd(robot_type, robot_kwargs)
             pcd_xyz = concat_gripper_pcd(gripper_pcd, pcd_xyz)
             if self.config.use_rgb:
                 gripper_rgb = np.zeros((gripper_pcd.shape[0], 3))
@@ -335,7 +356,7 @@ class HighLevelWrapper:
         # Get gripper point cloud if needed
         gripper_pcd = None
         if self.config.use_gripper_pcd:
-            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            gripper_pcd = _get_gripper_pcd(robot_type, robot_kwargs)
             self.last_gripper_pcd = gripper_pcd
 
         # Get text embedding if needed
@@ -396,13 +417,10 @@ class HighLevelWrapper:
         # Get gripper point cloud if needed
         gripper_token = None
         if self.config.use_gripper_token:
-            gripper_pcd = self._get_gripper_pcd(robot_type, robot_kwargs)
+            gripper_pcd = _get_gripper_pcd(robot_type, robot_kwargs)
             self.last_gripper_pcd = gripper_pcd
-            if robot_type == "aloha":
-                gripper_pcd_ = gripper_pcd[self.aloha_gripper_idx]
-            else:
-                gripper_pcd_ = gripper_pcd
-            gripper_token = self._gripper_pcd_to_token(gripper_pcd_)
+            gripper_pcd_ = gripper_pcd[self.GRIPPER_IDX[robot_type]]
+            gripper_token = _gripper_pcd_to_token(gripper_pcd_)
 
         # Get text embedding if needed
         text_embed = None
@@ -458,7 +476,7 @@ class HighLevelWrapper:
                 rgb_shape = camera_obs[cam_name]["rgb"].shape
                 goal_projections[cam_name] = self._project_to_camera(goal_prediction, rgb_shape, idx, goal_repr)
             return goal_projections
-        elif self.config.model_type == "dino_3dgp":
+        elif self.config.model_type == "dino_3dgp" or self.config.model_type == "vit_3dgp":
             # Project to each camera
             goal_projections = {}
             for idx, cam_name in enumerate(self.camera_names):
@@ -650,6 +668,60 @@ def initialize_dino_3dgp_model(entity, project, checkpoint_type,
         fourier_include_input, num_transformer_layers, dropout
     )
     model = Dino3DGPNetwork(model_cfg)
+
+    artifact_dir = "wandb"
+    checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
+    api = wandb.Api()
+    artifact = api.artifact(checkpoint_reference, type="model")
+    ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)
+    ckpt = torch.load(ckpt_file)
+    # Remove the "network." prefix, since we're not using Lightning here.
+    state_dict = {k.replace("network.",""): v for k, v in ckpt["state_dict"].items()}
+    model.load_state_dict(state_dict)
+
+    model = model.eval()
+    model = model.to(device)
+
+    return model
+
+def initialize_vit_3dgp_model(entity, project, checkpoint_type,
+    run_id, use_text_embedding, use_gripper_token, use_source_token,
+    use_fourier_pe, fourier_num_frequencies, fourier_include_input,
+    num_transformer_layers, dropout,
+    img_size, patch_size, vit_embed_dim, vit_depth, vit_num_heads, vit_mlp_ratio,
+    device
+):
+    """Initialize ViT 3D Goal Prediction model from wandb artifact"""
+
+    # Simple config object to match what ViT3DGPNetwork expects
+    class ModelConfig:
+        def __init__(self, use_text_embedding, use_gripper_token,
+                     use_source_token, use_fourier_pe, fourier_num_frequencies,
+                     fourier_include_input, num_transformer_layers, dropout,
+                     img_size, patch_size, vit_embed_dim, vit_depth, vit_num_heads, vit_mlp_ratio):
+            self.use_text_embedding = use_text_embedding
+            self.use_gripper_token = use_gripper_token
+            self.use_source_token = use_source_token
+            self.use_fourier_pe = use_fourier_pe
+            self.fourier_num_frequencies = fourier_num_frequencies
+            self.fourier_include_input = fourier_include_input
+            self.num_transformer_layers = num_transformer_layers
+            self.dropout = dropout
+            self.image_token_dropout = False  # We only do inference here.
+            self.img_size = img_size
+            self.patch_size = patch_size
+            self.vit_embed_dim = vit_embed_dim
+            self.vit_depth = vit_depth
+            self.vit_num_heads = vit_num_heads
+            self.vit_mlp_ratio = vit_mlp_ratio
+
+    model_cfg = ModelConfig(
+        use_text_embedding, use_gripper_token,
+        use_source_token, use_fourier_pe, fourier_num_frequencies,
+        fourier_include_input, num_transformer_layers, dropout,
+        img_size, patch_size, vit_embed_dim, vit_depth, vit_num_heads, vit_mlp_ratio
+    )
+    model = ViT3DGPNetwork(model_cfg)
 
     artifact_dir = "wandb"
     checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"

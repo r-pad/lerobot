@@ -24,6 +24,7 @@ import math
 import json
 from collections import deque
 from typing import Callable
+import os
 
 import einops
 import numpy as np
@@ -44,7 +45,15 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, get_siglip_text_embedding
+from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, \
+    get_siglip_text_embedding
+from lerobot.common.policies.high_level.mimicplay import (
+    initialize_mimicplay_model,
+    prepare_mimicplay_batch_inference,
+    prepare_mimicplay_batch_train,
+    visualize_mimicplay_rerun,
+    visualize_mimicplay_open3d,
+)
 from transformers import AutoModel, AutoProcessor
 
 
@@ -117,6 +126,24 @@ class DiffusionPolicy(PreTrainedPolicy):
         with open(self.config.calibration_json, 'r') as f:
             calibration_data = json.load(f)
         self.calibration_data = calibration_data
+        self.camera_names = list(self.calibration_data.keys())
+        self.num_cameras = len(self.camera_names)
+        self.intrinsics = []
+        self.extrinsics = []
+        for cam_name in self.camera_names:
+            cam_config = self.calibration_data[cam_name]
+            intrinsics_path = os.path.join("lerobot/scripts/", cam_config["intrinsics"])
+            extrinsics_path = os.path.join("lerobot/scripts/", cam_config["extrinsics"])
+
+            self.intrinsics.append(np.loadtxt(intrinsics_path))
+            self.extrinsics.append(np.loadtxt(extrinsics_path))
+        self.scaled_Ks = [None] * self.num_cameras  # Will be set during inference
+
+        self.GRIPPER_IDX = {
+            "aloha": torch.tensor([6, 197, 174]),
+            "human": torch.tensor([343, 763, 60]),
+            "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
+        }
 
         if self.config.enable_goal_conditioning:
             hl_config = HighLevelConfig(
@@ -164,6 +191,8 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
+        if self.config.use_latent_plan:
+            self._queues["latent_plan"] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -189,6 +218,26 @@ class DiffusionPolicy(PreTrainedPolicy):
         """
         state = batch['observation.state']
         current_obs = batch[self.obs_key]
+
+        if self.config.use_latent_plan:
+            robot_type = self.config.robot_type
+            rgbs, depths, intrinsics, extrinsics, gripper_token, gripper_pcd_ = \
+                prepare_mimicplay_batch_inference(
+                    batch, self.camera_names, self.intrinsics, self.extrinsics,
+                    self.scaled_Ks, self.GRIPPER_IDX, robot_type, self.config.hl_max_depth,
+                )
+
+            with torch.no_grad():
+                latent_plan, pred_eef = self.diffusion.mimicplay_model.mimicplay_forward(
+                    image=rgbs, depth=depths, intrinsics=intrinsics, extrinsics=extrinsics,
+                    gripper_token=gripper_token, text=batch['task'], source=[robot_type])
+
+            visualize_mimicplay_rerun(
+                rgbs, depths, intrinsics, extrinsics, pred_eef,
+                gripper_pcd_, self.config.hl_max_depth,
+            )
+
+            batch['latent_plan'] = latent_plan
 
         batch = self.normalize_inputs(batch)
         if self.config.use_text_embedding:
@@ -228,6 +277,21 @@ class DiffusionPolicy(PreTrainedPolicy):
         if self.config.action_space == "right_eef_relative":
             batch = self.robot_adapter.compute_relative_actions(batch)
 
+        if self.config.use_latent_plan:
+            rgbs, depths, intrinsics, extrinsics, gripper_tokens, text, source, \
+                batch_size, n_obs_steps = prepare_mimicplay_batch_train(
+                    batch, self.obs_key, self.GRIPPER_IDX, self.config.hl_max_depth,
+                )
+
+            with torch.no_grad():
+                latent_plan, pred_eef = self.diffusion.mimicplay_model.mimicplay_forward(
+                    image=rgbs, depth=depths, intrinsics=intrinsics, extrinsics=extrinsics,
+                    gripper_token=gripper_tokens, text=text, source=source)
+
+            batch['latent_plan'] = einops.rearrange(latent_plan,
+                                                    "(b s) ... -> b s ...",
+                                                    b=batch_size, s=n_obs_steps) # (B, S, latent_plan_dim)
+
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
@@ -262,6 +326,7 @@ class DiffusionModel(nn.Module):
         self.act_key = robot_adapter.get_act_key()
 
         self.use_text_embedding = self.config.use_text_embedding
+        self.use_latent_plan = self.config.use_latent_plan
 
         # Build observation encoders (depending on which observations are provided).
         global_cond_dim = self.config.robot_state_feature[self.obs_key].shape[0]
@@ -292,6 +357,23 @@ class DiffusionModel(nn.Module):
                 nn.Linear(64, self.text_proj_dim)
             )
             global_cond_dim += self.text_proj_dim
+        
+        if self.config.use_latent_plan:
+            assert self.config.hl_model_type == "mimicplay", "latent plan conditioning only supports mimicplay high-level model currently"
+            self.mimicplay_model = initialize_mimicplay_model(self.config.hl_entity, self.config.hl_project, self.config.hl_checkpoint_type,
+                self.config.hl_run_id, self.config.hl_dino_model, self.config.hl_use_text_embedding,
+                self.config.hl_use_gripper_token, self.config.hl_use_source_token, self.config.hl_use_fourier_pe,
+                self.config.hl_fourier_num_frequencies, self.config.hl_fourier_include_input,
+                self.config.hl_num_transformer_layers, self.config.hl_dropout, self.config.device
+            )
+
+            self.latent_proj = nn.Sequential(
+                nn.Linear(896, 256),
+                nn.ReLU(),
+                nn.Linear(256, self.config.latent_plan_dim)
+            )
+            
+            global_cond_dim += self.config.latent_plan_dim
 
         self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
 
@@ -432,6 +514,10 @@ class DiffusionModel(nn.Module):
             text_feats = self.text_proj(text_feats)  # (B, 32)
             text_feats = text_feats.unsqueeze(1).repeat(1, n_obs_steps, 1)
             global_cond_feats.append(text_feats)
+        
+        if self.use_latent_plan:
+            latent_plan = self.latent_proj(batch['latent_plan'])
+            global_cond_feats.append(latent_plan)
 
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
