@@ -17,7 +17,14 @@ import importlib
 
 import gymnasium as gym
 
-from lerobot.common.envs.configs import AlohaEnv, EnvConfig, LiberoEnv, PushtEnv, XarmEnv
+from lerobot.common.envs.configs import (
+    AlohaEnv,
+    ArticuBotEnv as ArticuBotEnvConfig,
+    EnvConfig,
+    LiberoEnv as LiberoEnvConfig,
+    PushtEnv,
+    XarmEnv,
+)
 
 
 def make_env_config(env_type: str, **kwargs) -> EnvConfig:
@@ -28,7 +35,9 @@ def make_env_config(env_type: str, **kwargs) -> EnvConfig:
     elif env_type == "xarm":
         return XarmEnv(**kwargs)
     elif env_type == "libero":
-        return LiberoEnv(**kwargs)
+        return LiberoEnvConfig(**kwargs)
+    elif env_type == "articubot":
+        return ArticuBotEnvConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{env_type}' is not available.")
 
@@ -59,6 +68,16 @@ def make_env(cfg: EnvConfig, n_envs: int = 1, use_async_envs: bool = False) -> g
         env_cls = gym.vector.AsyncVectorEnv if use_async_envs else gym.vector.SyncVectorEnv
         env = env_cls(
             [lambda i=i: LiberoEnv(env_idx=i, **cfg.gym_kwargs) for i in range(n_envs)]
+        )
+        return env
+
+    # Handle ArticuBot environments
+    if cfg.type == "articubot":
+        from lerobot.common.envs.articubot_env import ArticuBotEnv
+
+        env_cls = gym.vector.AsyncVectorEnv if use_async_envs else gym.vector.SyncVectorEnv
+        env = env_cls(
+            [lambda i=i: ArticuBotEnv(env_idx=i, **cfg.gym_kwargs) for i in range(n_envs)]
         )
         return env
 
