@@ -94,6 +94,7 @@ dependencies = [
     "pyrealsense2>=2.55.1.6486",
     "pybullet >= 3.2.5, <4",
     "pyrobotiqgripper>=1.0.1,<2",
+    "ompl==1.7.0",
 ]
 
 [project.optional-dependencies]

@@ -212,3 +212,65 @@ class LiberoEnv(EnvConfig):
             "render_mode": self.render_mode,
             "max_episode_steps": self.episode_length,
         }
+
+
+@EnvConfig.register_subclass("articubot")
+@dataclass
+class ArticuBotEnv(EnvConfig):
+    task: str = "articubot_storagefurniture"
+    fps: int = 30
+    episode_length: int = 600
+    obs_type: str = "pixels_agent_pos"
+    camera_height: int = 256
+    camera_width: int = 256
+    task_config: str = ""  # path to YAML task config
+    init_state_file: str = ""  # path to initial state pkl
+    object_name: str = "storagefurniture"
+    link_name: str = "link_0"
+    init_angle: float | None = None
+    features: dict[str, PolicyFeature] = field(
+        default_factory=lambda: {
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(10,)),
+        }
+    )
+    features_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "action": ACTION,
+            "agent_pos": OBS_ROBOT,
+            "pixels/cam0": f"{OBS_IMAGES}.cam0",
+            "pixels/cam1": f"{OBS_IMAGES}.cam1",
+            "pixels/wrist": f"{OBS_IMAGES}.wrist",
+        }
+    )
+
+    def __post_init__(self):
+        if self.obs_type == "pixels_agent_pos":
+            self.features["agent_pos"] = PolicyFeature(
+                type=FeatureType.STATE, shape=(10,)
+            )
+            self.features["pixels/cam0"] = PolicyFeature(
+                type=FeatureType.VISUAL,
+                shape=(self.camera_height, self.camera_width, 3),
+            )
+            self.features["pixels/cam1"] = PolicyFeature(
+                type=FeatureType.VISUAL,
+                shape=(self.camera_height, self.camera_width, 3),
+            )
+            self.features["pixels/wrist"] = PolicyFeature(
+                type=FeatureType.VISUAL,
+                shape=(self.camera_height, self.camera_width, 3),
+            )
+
+    @property
+    def gym_kwargs(self) -> dict:
+        return {
+            "task_config": self.task_config,
+            "init_state_file": self.init_state_file,
+            "object_name": self.object_name,
+            "link_name": self.link_name,
+            "init_angle": self.init_angle,
+            "camera_height": self.camera_height,
+            "camera_width": self.camera_width,
+            "obs_type": self.obs_type,
+            "max_episode_steps": self.episode_length,
+        }
