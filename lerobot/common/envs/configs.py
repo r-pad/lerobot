@@ -223,7 +223,7 @@ class ArticuBotEnv(EnvConfig):
     obs_type: str = "pixels_agent_pos"
     camera_height: int = 256
     camera_width: int = 256
-    task_config: str = ""  # path to YAML task config
+    task_config: str = "open_the_door_40147/config_0.yaml"
     init_state_file: str = ""  # path to initial state pkl
     object_name: str = "storagefurniture"
     link_name: str = "link_0"
