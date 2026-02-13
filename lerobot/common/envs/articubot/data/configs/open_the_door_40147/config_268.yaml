@@ -1,0 +1,22 @@
+-   use_table: false
+-   center: (0.9250429824176836, -0.022043701043178585, 0)
+    initial_joint_angles: (-0.3312503592101148, 0.9821348001703112, 1.075387367700458,
+        -0.9587479557782987, 0.4289026858100813, 2.9388582373137897, -0.4413553164894062)
+    lang: a standard storage furniture
+    name: StorageFurniture
+    on_table: false
+    orientation: (0.0, 0.0, 0.10916260307384953, 0.9940239061964965)
+    path: storage_furniture.urdf
+    reward_asset_path: '40147'
+    size: 1.5
+    type: urdf
+-   solution_path: data/diverse_objects/open_the_door_40147/task_open_the_door_of_the_storagefurniture_by_its_handle
+-   joint_0: '0'
+    joint_1: '0'
+    set_joint_angle_joint_angle: 0.25499229058635814
+    set_joint_angle_joint_id: 1
+    set_joint_angle_object_name: storagefurniture
+-   spatial_relationships: []
+-   task_description: The robotic arm will open the door of the storage furniture
+        by manipulating its handle
+    task_name: open the door of the storagefurniture by its handle

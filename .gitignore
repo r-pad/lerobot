@@ -18,7 +18,7 @@ tmp
 wandb
 
 # Data
-data
+/data
 outputs
 
 # Apple
