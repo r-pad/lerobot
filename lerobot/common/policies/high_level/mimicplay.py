@@ -274,7 +274,7 @@ def prepare_mimicplay_batch_inference(
         depth[depth > max_depth] = 0
 
         rgbs.append(rgb_preprocess(rgb))          # (3, H, W)
-        depths_list.append(depth_preprocess(depth))  # (H, W)
+        depths_list.append(depth_preprocess(depth).squeeze())  # (H, W)
 
         if scaled_Ks[cam_idx] is None:
             img_shape = batch[rgb_key].shape[-2:]
