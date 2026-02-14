@@ -347,6 +347,12 @@ class ArticuBotEnv(gym.Env):
             ]).astype(np.float32)
             obs["agent_pos"] = agent_pos
 
+            obs["robot_data"] = {
+                "ee_pos": np.array(pos, dtype=np.float64),
+                "ee_quat": np.array(orient, dtype=np.float64),
+                "gripper_angle": float(gripper_angle),
+            }
+
         return obs
 
     # ------------------------------------------------------------------
