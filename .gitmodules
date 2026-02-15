@@ -1,3 +1,6 @@
 [submodule "third_party/deoxys_control"]
 	path = third_party/deoxys_control
 	url = https://github.com/UT-Austin-RPL/deoxys_control.git
+[submodule "third_party/gello"]
+	path = third_party/gello
+	url = https://github.com/wuphilipp/gello_software.git
