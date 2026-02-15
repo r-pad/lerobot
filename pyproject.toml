@@ -88,6 +88,9 @@ dependencies = [
     "easydict==1.9",
     "libero @ git+https://github.com/sriramsk1999/LIBERO.git@15a91548acf90c6f502a99c21ca18792c5ae8256",
     "pyrealsense2>=2.55.1.6486",
+    "pybullet >= 3.2.5, <4", 
+    "tyro>=1.0.6,<2", 
+    "dm-control>=1.0.37,<2",
 ]
 
 [project.optional-dependencies]
@@ -197,3 +200,11 @@ install-k4a = """
 CPLUS_INCLUDE_PATH=/usr/include:$CPLUS_INCLUDE_PATH CC=/usr/bin/gcc CXX=/usr/bin/g++ pip install --no-build-isolation --verbose --no-binary :all: pyk4a==1.5.0
 """
 install-pynput = "CC=/usr/bin/gcc CXX=/usr/bin/g++ pip install pynput==1.7.7"
+install-deoxys = """
+git submodule update --init third_party/deoxys_control && \
+cd third_party/deoxys_control/deoxys && \
+rm -rf deoxys.egg-info && \
+./InstallPackage && \
+make -j build_deoxys=1 && \
+pip install -e . --use-pep517 --no-build-isolation --no-deps
+"""
