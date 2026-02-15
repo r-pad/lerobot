@@ -40,9 +40,17 @@ from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
 
-def add_eef_pose(real_joints):
-    eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
-    eef_pose = torch.cat([eef_pose, real_joints[-1][None]], axis=0).float()
+def add_eef_pose(robot, real_joints):
+    if robot.robot_type == "aloha":
+        eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
+        eef_pose = torch.cat([eef_pose, real_joints[-1][None]], axis=0).float()
+    elif robot.robot_type == "droid":
+        eef_rot, eef_pos = robot.robot_interface.last_eef_rot_and_pos
+        rot_6d = transforms.matrix_to_rotation_6d(torch.from_numpy(eef_rot[None])).squeeze()
+        trans = torch.from_numpy(eef_pos.squeeze())
+        eef_pose = torch.cat([rot_6d, trans, real_joints[-1:]], axis=0).float()
+    else:
+        raise ValueError(f"Unknown robot type {robot.robot_type}")
     return eef_pose
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
@@ -65,7 +73,7 @@ def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, f
     log_dt("dt", dt_s)
 
     # TODO(aliberts): move robot-specific logs logic in robot.print_logs()
-    if not robot.robot_type.startswith("stretch"):
+    if robot.robot_type not in ["stretch", "droid"]:
         for name in robot.leader_arms:
             key = f"read_leader_{name}_pos_dt_s"
             if key in robot.logs:
@@ -354,12 +362,12 @@ def control_loop(
         if teleoperate:
             observation, action = robot.teleop_step(record_data=True)
             if robot.use_eef:
-                observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
-                action["action.right_eef_pose"] = add_eef_pose(action['action'])
+                observation["observation.right_eef_pose"] = add_eef_pose(robot, observation['observation.state'])
+                action["action.right_eef_pose"] = add_eef_pose(robot, action['action'])
         else:
             observation = robot.capture_observation()
             if robot.use_eef:
-                observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
+                observation["observation.right_eef_pose"] = add_eef_pose(robot, observation['observation.state'])
             action = None
 
             if policy is not None:

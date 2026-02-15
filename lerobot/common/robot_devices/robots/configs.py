@@ -19,6 +19,7 @@ from typing import Sequence
 import draccus
 
 from lerobot.common.robot_devices.cameras.configs import (
+    AzureKinectCameraConfig,
     CameraConfig,
     IntelRealSenseCameraConfig,
     OpenCVCameraConfig,
@@ -557,6 +558,56 @@ class So100RobotConfig(ManipulatorRobotConfig):
         }
     )
 
+    mock: bool = False
+
+
+@RobotConfig.register_subclass("droid")
+@dataclass
+class DroidRobotConfig(RobotConfig):
+    # GELLO leader arm config
+    gello_port: str | None = None  # Auto-detected from /dev/serial/by-id/* if None
+    gello_joint_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
+    gello_joint_offsets: tuple[float, ...] = (
+        3 * 3.141592653589793 / 2,
+        2 * 3.141592653589793 / 2,
+        1 * 3.141592653589793 / 2,
+        4 * 3.141592653589793 / 2,
+        -2 * 3.141592653589793 / 2 + 2 * 3.141592653589793,
+        3 * 3.141592653589793 / 2,
+        4 * 3.141592653589793 / 2,
+    )
+    gello_joint_signs: tuple[int, ...] = (1, -1, 1, 1, 1, -1, 1)
+    gello_gripper_joint_id: int = 8
+    gello_gripper_open_degrees: int = 195
+    gello_gripper_close_degrees: int = 152
+
+    # Deoxys / Franka config
+    deoxys_general_cfg_file: str = "lerobot/common/robot_devices/robots/droid_configs/charmander.yml"
+    deoxys_controller_type: str = "JOINT_IMPEDANCE"
+    deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/droid_configs/joint-impedance-controller.yml"
+
+    # Teleop mapping: scale + sign for delta mapping from GELLO to Franka
+    mapping_coefficients: tuple[float, ...] = (0.8, -0.8, 0.8, 0.8, 0.8, 0.8, 0.8)
+    gripper_threshold: float = 0.5
+    gripper_open_action: float = 1.0
+    gripper_close_action: float = 0.0
+
+    # Robotiq gripper config
+    robotiq_port: str | None = None  # Auto-detected by pyRobotiqGripper if None
+
+    cameras: dict[str, CameraConfig] = field(
+        default_factory=lambda: {
+            "cam_main": AzureKinectCameraConfig(
+                device_id=0,
+                fps=30,
+                width=1280,
+                height=720,
+            ),
+        }
+    )
+
+    # save end-effector pose info
+    use_eef: bool = True
     mock: bool = False
 
 

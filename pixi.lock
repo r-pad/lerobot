@@ -240,7 +240,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/a1/ee/48ca1a7c89ffec8b6a0c5d02b89c305671d5ffd8d3c94acf8b8c408575bb/anyio-4.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/25/8a/c46dcc25341b5bce5472c718902eb3d38600a903b14fa6aeecef3f21a46f/asttokens-3.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/77/06/bb80f5f86020c4551da315d78b3ab75e8228f89f0162f2c3a819e407941a/attrs-25.3.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/f8/9a/8ffabfcafb42154b4b3a67d63f9b69e68fa8c34cb39ddd5cb813dd049ed4/av-14.4.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/86/f6/0b473dab52dfdea05f28f3578b1c56b6c796ce85e76951bab7c4e38d5a74/av-14.4.0.tar.gz
       - pypi: https://files.pythonhosted.org/packages/5c/37/0211f82891a9f14efcfd2b2096f8d9e4351398ad637fdd1ee59cfc580b0e/bddl-1.0.1.tar.gz
       - pypi: https://files.pythonhosted.org/packages/50/cd/30110dc0ffcf3b131156077b90e9f60ed75711223f306da4db08eff8403b/beautifulsoup4-4.13.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/cb/f2ad4230dc2eb1a74edf38f1a38b9b52277f75bef262d8908e60d957e13c/blinker-1.9.0-py3-none-any.whl
@@ -313,9 +313,10 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fb/86/dd6e5db36df29e76c7a7699123569a4a18c1623ce68d826ed96c62643cae/mdit_py_plugins-0.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/2c/19/04f9b178c2d8a15b076c8b5140708fa6ffc5601fb6f1e975537072df5b2a/mergedeep-1.3.4-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/25/7b/b73ba3ec36687341e37a1c9df0ebec3e3b2b0f8d6ae14e109ec5076ebe58/minimalmodbus-2.1.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c2/39/dc1926d5c54a97c64e61dce98dedbc965af17cbb1ddeb2b33c82476591b5/mink-0.0.11-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/65/fa/5e72cdb37469264ec29e7c7d3b2612a0b7fe38156dd1a232870def6b6a3b/mujoco-3.3.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/47/14/d5bf98385354318ec2e6c466a8c7cf7fd76f8b711ed6d11d155e2baa81fb/mujoco-3.5.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/35/db/e1817dcbaa10b319c412769cf999b1016890849245d38905b73e9c286862/multidict-6.4.4-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/50/15/b56e50e8debaf439f44befec5b2af11db85f6e0f344c3113ae0be0593a91/multiprocess-0.70.16-py311-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/79/7b/2c79738432f5c924bef5071f933bcc9efd0473bac3b4aa584a6f7c1c8df8/mypy_extensions-1.1.0-py3-none-any.whl
@@ -359,6 +360,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c8/f1/d6a797abb14f6283c0ddff96bbdd46937f64122b8c925cab503dd37f8214/pyasn1-0.6.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/13/2f/0f24b288e2ce56f51c920137620b4434a38fd80583dbbe24fc2a1656c388/pybind11-2.13.6-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/20/78/a23a300110968586a9dbfd516ccd66906450d57567c9f60cddaeaaf10fa6/pybullet-3.2.7-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/13/a3/a812df4e2dd5696d1f351d58b8fe16a405b234ad2886a0dab9183fb78109/pycparser-2.22-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b5/69/831ed22b38ff9b4b64b66569f0e5b7b97cf3638346eb95a2147fdb49ad5f/pydantic-2.11.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/47/bc/cd720e078576bdb8255d5032c5d63ee5c0bf4b7173dd955185a1d658c456/pydantic_core-2.33.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
@@ -366,6 +368,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/d0/b2/d1d5c164642050ca52cbbd366f90842ee530f178aecc406be32b18460b67/pymunk-6.11.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/92/44/8634af40b0db528b5b37e901c0dc67321354880d251bf8965901d57693a5/PyOpenGL-3.1.9-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/1f/ab/f2c066a11f632dfcd79b467e728623da9489ed524eb36ec0cc14b497661a/pyrealsense2-2.56.5.9235-cp311-cp311-manylinux1_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/28/31/d211d8d0f503b23d8baa7cdfeb33cd3876b341736b1abf78277d29c49d34/pyrobotiqgripper-1.0.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8d/59/b4572118e098ac8e46e399a1dd0f2d85403ce8bbaad9ec79373ed6badaf9/PySocks-1.7.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/29/16/c8a903f4c4dffe7a12843191437d7cd8e32751d5de349d45d3fe69544e87/pytest-8.4.1-py3-none-any.whl
@@ -593,10 +596,10 @@ packages:
   - mypy>=1.11.1 ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'tests-mypy'
   - pytest-mypy-plugins ; python_full_version >= '3.10' and platform_python_implementation == 'CPython' and extra == 'tests-mypy'
   requires_python: '>=3.8'
-- pypi: https://files.pythonhosted.org/packages/f8/9a/8ffabfcafb42154b4b3a67d63f9b69e68fa8c34cb39ddd5cb813dd049ed4/av-14.4.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+- pypi: https://files.pythonhosted.org/packages/86/f6/0b473dab52dfdea05f28f3578b1c56b6c796ce85e76951bab7c4e38d5a74/av-14.4.0.tar.gz
   name: av
   version: 14.4.0
-  sha256: 6bed513cbcb3437d0ae47743edc1f5b4a113c0b66cdd4e1aafc533abf5b2fbf2
+  sha256: 3ecbf803a7fdf67229c0edada0830d6bfaea4d10bfb24f0c3f4e607cd1064b42
   requires_python: '>=3.9'
 - pypi: https://files.pythonhosted.org/packages/5c/37/0211f82891a9f14efcfd2b2096f8d9e4351398ad637fdd1ee59cfc580b0e/bddl-1.0.1.tar.gz
   name: bddl
@@ -3079,8 +3082,8 @@ packages:
   timestamp: 1718625640445
 - pypi: .
   name: lerobot
-  version: 0.1.0
-  sha256: b723637cdf7ef564106e001c12fb7c272c9caa15e7e83da3943173cfa60243e9
+  version: 0.2.0+rpad
+  sha256: 8c926aefb7f841566036b391093e0257b21a3621dcb0de553d1f114cffc61320
   requires_dist:
   - cmake>=3.29.0.1
   - datasets>=2.19.0
@@ -3125,6 +3128,8 @@ packages:
   - easydict==1.9
   - libero @ git+https://github.com/sriramsk1999/LIBERO.git@15a91548acf90c6f502a99c21ca18792c5ae8256
   - pyrealsense2>=2.55.1.6486
+  - pybullet>=3.2.5,<4
+  - pyrobotiqgripper>=1.0.1,<2
   - hf-doc-builder @ git+https://github.com/huggingface/doc-builder.git@main ; extra == 'docs'
   - watchdog>=6.0.0 ; extra == 'docs'
   - pre-commit>=3.7.0 ; extra == 'dev'
@@ -4138,6 +4143,13 @@ packages:
   version: 1.3.4
   sha256: 70775750742b25c0d8f36c55aed03d24c3384d17c951b3175d898bd778ef0307
   requires_python: '>=3.6'
+- pypi: https://files.pythonhosted.org/packages/25/7b/b73ba3ec36687341e37a1c9df0ebec3e3b2b0f8d6ae14e109ec5076ebe58/minimalmodbus-2.1.1-py3-none-any.whl
+  name: minimalmodbus
+  version: 2.1.1
+  sha256: 75c677e2f3ea901b762f8b2ab7cf8ad84de915bbea275d66e30b724e23887b1a
+  requires_dist:
+  - pyserial>=3.0
+  requires_python: '>=3.8'
 - pypi: https://files.pythonhosted.org/packages/c2/39/dc1926d5c54a97c64e61dce98dedbc965af17cbb1ddeb2b33c82476591b5/mink-0.0.11-py3-none-any.whl
   name: mink
   version: 0.0.11
@@ -4173,16 +4185,26 @@ packages:
   - sphinx ; extra == 'docs'
   - gmpy2>=2.1.0a4 ; platform_python_implementation != 'PyPy' and extra == 'gmpy'
   - pytest>=4.6 ; extra == 'tests'
-- pypi: https://files.pythonhosted.org/packages/65/fa/5e72cdb37469264ec29e7c7d3b2612a0b7fe38156dd1a232870def6b6a3b/mujoco-3.3.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+- pypi: https://files.pythonhosted.org/packages/47/14/d5bf98385354318ec2e6c466a8c7cf7fd76f8b711ed6d11d155e2baa81fb/mujoco-3.5.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
   name: mujoco
-  version: 3.3.2
-  sha256: f7e19ef4ded262d9ff454ac9346203dcb35a6f794e7d9406ee803f1c73702560
+  version: 3.5.0
+  sha256: ba54826121c6857fc4ca82df642d9a89174ce5537677c6ead34844bb692437e3
   requires_dist:
   - absl-py
   - etils[epath]
   - glfw
   - numpy
   - pyopengl
+  - absl-py ; extra == 'sysid'
+  - colorama ; extra == 'sysid'
+  - imageio[ffmpeg] ; extra == 'sysid'
+  - jinja2 ; extra == 'sysid'
+  - matplotlib ; extra == 'sysid'
+  - plotly ; extra == 'sysid'
+  - pyyaml ; extra == 'sysid'
+  - scipy ; extra == 'sysid'
+  - tabulate ; extra == 'sysid'
+  - typing-extensions ; extra == 'sysid'
   - usd-core ; extra == 'usd'
   - pillow ; extra == 'usd'
   requires_python: '>=3.9'
@@ -4878,6 +4900,10 @@ packages:
   requires_dist:
   - pybind11-global==2.13.6 ; extra == 'global'
   requires_python: '>=3.7'
+- pypi: https://files.pythonhosted.org/packages/20/78/a23a300110968586a9dbfd516ccd66906450d57567c9f60cddaeaaf10fa6/pybullet-3.2.7-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+  name: pybullet
+  version: 3.2.7
+  sha256: 5d858abf7c12a21ef3ed351cf81dac1b5e486ec25c9ab59bfc84beb89034edff
 - pypi: https://files.pythonhosted.org/packages/13/a3/a812df4e2dd5696d1f351d58b8fe16a405b234ad2886a0dab9183fb78109/pycparser-2.22-py3-none-any.whl
   name: pycparser
   version: '2.22'
@@ -4933,6 +4959,13 @@ packages:
   version: 2.56.5.9235
   sha256: 76d384ea99f257b4697a82cb3581b05cc69fadfd0701021ad76da098a3e240f0
   requires_python: '>=3.9'
+- pypi: https://files.pythonhosted.org/packages/28/31/d211d8d0f503b23d8baa7cdfeb33cd3876b341736b1abf78277d29c49d34/pyrobotiqgripper-1.0.1-py3-none-any.whl
+  name: pyrobotiqgripper
+  version: 1.0.1
+  sha256: 42ce40c00b67b9a4ccd2c9fe33d2083ba8daf8692252b15895eab9b6fba759d2
+  requires_dist:
+  - minimalmodbus>=2.1.1,<3.0.0
+  requires_python: '>=3.8.1,<4.0'
 - pypi: https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl
   name: pyserial
   version: '3.5'

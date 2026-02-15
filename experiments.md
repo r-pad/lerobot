@@ -16,6 +16,12 @@ Multiview:
 python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --control.type=teleoperate --control.display_data=true
 ```
 
+Multiview (DROID):
+
+```py
+python lerobot/scripts/control_robot.py --robot.type=droid --robot.cameras='{"cam_azure_kinect_left": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}}' --control.type=teleoperate --control.display_data=true
+```
+
 Need to be careful when setting up multiview, various things to keep in mind:
 - Check which camera is master/subordinate in the real world and set `wired_sync_mode` accordingly
 - Usb 10gb usb 3.0 ports and make sure the cameras are spread across different usb controllers (different ports on the outside might correspond to the same internal controller, check `lsusb -t`)
