@@ -13,15 +13,15 @@
 # limitations under the License.
 
 [project.urls]
-homepage = "https://github.com/huggingface/lerobot"
-issues = "https://github.com/huggingface/lerobot/issues"
-discord = "https://discord.gg/s3KuuzsPFb"
+homepage = "https://github.com/r-pad/lerobot"
+issues = "https://github.com/r-pad/lerobot/issues"
 
 [project]
 name = "lerobot"
-version = "0.1.0"
-description = "🤗 LeRobot: State-of-the-art Machine Learning for Real-World Robotics in Pytorch"
+version = "0.2.0+rpad"
+description = "r-pad research fork of HuggingFace LeRobot — goal-conditioned manipulation with Aloha and DROID hardware"
 authors = [
+    # Original LeRobot authors
     { name = "Rémi Cadène", email = "re.cadene@gmail.com" },
     { name = "Simon Alibert", email = "alibert.sim@gmail.com" },
     { name = "Alexander Soare", email = "alexander.soare159@gmail.com" },
@@ -29,6 +29,10 @@ authors = [
     { name = "Adil Zouitine", email = "adilzouitinegm@gmail.com" },
     { name = "Thomas Wolf", email = "thomaswolfcontact@gmail.com" },
     { name = "Steven Palma", email = "imstevenpmwork@ieee.org" },
+    # Fork contributors (r-pad, CMU)
+    { name = "Sriram Krishna" },
+    { name = "Haotian Zhan" },
+    { name = "Ben Eisner" },
 ]
 readme = "README.md"
 license = { text = "Apache-2.0" }

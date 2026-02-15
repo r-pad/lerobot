@@ -3084,8 +3084,8 @@ packages:
   timestamp: 1718625640445
 - pypi: ./
   name: lerobot
-  version: 0.1.0
-  sha256: 1548816781464d66572a9c9d190334aca40c3c4fcf7624910cf8717b545c1d91
+  version: 0.2.0+rpad
+  sha256: 8c926aefb7f841566036b391093e0257b21a3621dcb0de553d1f114cffc61320
   requires_dist:
   - cmake>=3.29.0.1
   - datasets>=2.19.0
