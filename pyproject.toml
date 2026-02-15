@@ -88,7 +88,8 @@ dependencies = [
     "easydict==1.9",
     "libero @ git+https://github.com/sriramsk1999/LIBERO.git@15a91548acf90c6f502a99c21ca18792c5ae8256",
     "pyrealsense2>=2.55.1.6486",
-    "pybullet >= 3.2.5, <4", 
+    "pybullet >= 3.2.5, <4",
+    "pyrobotiqgripper>=1.0.1,<2",
 ]
 
 [project.optional-dependencies]

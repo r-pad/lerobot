@@ -31,6 +31,7 @@ class DroidRobot:
         self.gello = None
         self.gello_home = None
         self.robot_home = None
+        self.robotiq_gripper = None
         self.is_connected = False
         self.logs = {}
         self.robot_type = self.config.type
@@ -114,6 +115,9 @@ class DroidRobot:
         # Initialize GELLO
         self._init_gello()
 
+        # Initialize Robotiq gripper (must happen after GELLO so we can exclude its port)
+        self._init_robotiq_gripper()
+
         # Connect cameras (two-phase init for multi-Azure Kinect setups)
         from threading import Thread
 
@@ -154,6 +158,8 @@ class DroidRobot:
             port = usb_ports[-1]
             print(f"using port {port}. HACK: One hardcoded port is selected. Needs to be handled properly.")
 
+        self._gello_port = port
+
         self.gello = DynamixelRobot(
             joint_ids=list(self.config.gello_joint_ids),
             joint_offsets=list(self.config.gello_joint_offsets),
@@ -165,6 +171,65 @@ class DroidRobot:
                 self.config.gello_gripper_open_degrees,
                 self.config.gello_gripper_close_degrees,
             ),
+        )
+
+    def _init_robotiq_gripper(self):
+        """Initialize and activate the Robotiq gripper via pyRobotiqGripper.
+
+        When robotiq_port is not set, auto-detects the Robotiq port by scanning
+        serial ports while explicitly skipping the GELLO port. This avoids
+        pyRobotiqGripper's default auto-detection which probes all ports with
+        Modbus RTU packets and corrupts the GELLO Dynamixel communication.
+        """
+        from pyrobotiqgripper import RobotiqGripper
+
+        port = self.config.robotiq_port
+        if port is None:
+            port = self._find_robotiq_port()
+        print(f"Connecting to Robotiq gripper on {port}")
+        self.robotiq_gripper = RobotiqGripper(portname=port)
+        print("Activating Robotiq gripper (will fully open/close during activation)...")
+        self.robotiq_gripper.activate()
+        print("Robotiq gripper activated.")
+
+    def _find_robotiq_port(self) -> str:
+        """Find the Robotiq gripper serial port, excluding the GELLO port.
+
+        Scans all serial ports and resolves symlinks so that /dev/serial/by-id/*
+        paths (used by GELLO) are correctly matched against /dev/ttyUSB* paths
+        (returned by pyserial).
+        """
+        import os
+        import serial.tools.list_ports
+
+        # Resolve the GELLO port symlink to its real device path (e.g. /dev/ttyUSB0)
+        gello_real = os.path.realpath(self._gello_port)
+
+        for port_info in serial.tools.list_ports.comports():
+            port_real = os.path.realpath(port_info.device)
+            if port_real == gello_real:
+                continue
+            # Probe this port for a Robotiq gripper
+            try:
+                import minimalmodbus as mm
+                import serial
+
+                ser = serial.Serial(port_info.device, 115200, 8, "N", 1, 0.2)
+                device = mm.Instrument(ser, 9, mm.MODE_RTU, close_port_after_each_call=False, debug=False)
+                device.write_registers(1000, [0, 100, 0])
+                registers = device.read_registers(2000, 3, 4)
+                echo = registers[1] & 0xFF
+                del device
+                ser.close()
+                if echo == 100:
+                    print(f"Robotiq gripper found on {port_info.device}")
+                    return port_info.device
+            except Exception:
+                continue
+
+        raise RuntimeError(
+            "No Robotiq gripper found. Please specify robotiq_port in the config, "
+            f"or check that the gripper is connected. (GELLO is on {self._gello_port})"
         )
 
     def run_calibration(self):
@@ -182,10 +247,13 @@ class DroidRobot:
         return np.array(self.robot_interface._state_buffer[-1].q)
 
     def _get_gripper_width(self) -> float:
-        """Read current gripper width from Franka."""
-        if len(self.robot_interface._gripper_state_buffer) > 0:
-            return float(self.robot_interface._gripper_state_buffer[-1].width)
-        return 0.0
+        """Read current gripper position from Robotiq, normalized to [0, 1].
+
+        Returns 1.0 for fully open, 0.0 for fully closed.
+        Robotiq convention: position 0 = open, 255 = closed.
+        """
+        pos = self.robotiq_gripper.getPosition()  # 0 (open) to 255 (closed)
+        return 1.0 - (pos / 255.0)
 
     def teleop_step(
         self, record_data=False
@@ -208,9 +276,16 @@ class DroidRobot:
         else:
             gripper_action = self.config.gripper_open_action
 
-        # Send to Franka — loop until convergence
+        # Send gripper command to Robotiq (non-blocking; gripper moves asynchronously)
+        if gripper_action == self.config.gripper_close_action:
+            self.robotiq_gripper.close()
+        else:
+            self.robotiq_gripper.open()
+
         # The deoxys controller needs to be fed commands continuously at a high rate;
         # a single control() call followed by a long gap causes oscillation/vibration.
+        # Send joint targets to Franka via deoxys (dummy gripper value; Robotiq handles it)
+        deoxys_action = list(robot_target) + [gripper_action]
         action = list(robot_target) + [gripper_action]
         before_fwrite_t = time.perf_counter()
         max_iterations = 60
@@ -219,17 +294,11 @@ class DroidRobot:
                 joint_error = np.max(np.abs(
                     np.array(self.robot_interface._state_buffer[-1].q) - robot_target
                 ))
-                if len(self.robot_interface._gripper_state_buffer) > 0:
-                    gripper_width = self.robot_interface._gripper_state_buffer[-1].width
-                    gripper_state = 0.0 if np.abs(gripper_width) < 0.01 else 1.0
-                    gripper_error = np.abs(gripper_state - gripper_action)
-                else:
-                    gripper_error = 0.0
-                if joint_error < 1e-3 and gripper_error < 1e-3:
+                if joint_error < 1e-3:
                     break
             self.robot_interface.control(
                 controller_type=self.config.deoxys_controller_type,
-                action=action,
+                action=deoxys_action,
                 controller_cfg=self.controller_cfg,
             )
         self.logs["write_follower_dt_s"] = time.perf_counter() - before_fwrite_t
@@ -320,6 +389,15 @@ class DroidRobot:
         action_list = action.tolist()
         joint_target = np.array(action_list[:7])
         gripper_action = action_list[7]
+
+        # Send gripper command to Robotiq (non-blocking)
+        if gripper_action == self.config.gripper_close_action:
+            self.robotiq_gripper.close()
+        else:
+            self.robotiq_gripper.open()
+
+        # Send joint targets to Franka via deoxys (dummy gripper value; Robotiq handles it)
+        deoxys_action = list(joint_target) + [gripper_action]
         before_fwrite_t = time.perf_counter()
         max_iterations = 60
         for _ in range(max_iterations):
@@ -327,17 +405,11 @@ class DroidRobot:
                 joint_error = np.max(np.abs(
                     np.array(self.robot_interface._state_buffer[-1].q) - joint_target
                 ))
-                if len(self.robot_interface._gripper_state_buffer) > 0:
-                    gripper_width = self.robot_interface._gripper_state_buffer[-1].width
-                    gripper_state = 0.0 if np.abs(gripper_width) < 0.01 else 1.0
-                    gripper_error = np.abs(gripper_state - gripper_action)
-                else:
-                    gripper_error = 0.0
-                if joint_error < 1e-3 and gripper_error < 1e-3:
+                if joint_error < 1e-3:
                     break
             self.robot_interface.control(
                 controller_type=self.config.deoxys_controller_type,
-                action=action_list,
+                action=deoxys_action,
                 controller_cfg=self.controller_cfg,
             )
         self.logs["write_follower_dt_s"] = time.perf_counter() - before_fwrite_t
@@ -358,6 +430,7 @@ class DroidRobot:
         self.gello = None
         self.gello_home = None
         self.robot_home = None
+        self.robotiq_gripper = None
 
         for name in self.cameras:
             self.cameras[name].disconnect()

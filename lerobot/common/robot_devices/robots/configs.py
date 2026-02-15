@@ -592,6 +592,9 @@ class DroidRobotConfig(RobotConfig):
     gripper_open_action: float = 1.0
     gripper_close_action: float = 0.0
 
+    # Robotiq gripper config
+    robotiq_port: str | None = None  # Auto-detected by pyRobotiqGripper if None
+
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {
             "cam_main": AzureKinectCameraConfig(
