@@ -276,32 +276,26 @@ class DroidRobot:
         else:
             gripper_action = self.config.gripper_open_action
 
-        # Send gripper command to Robotiq (non-blocking; gripper moves asynchronously)
-        if gripper_action == self.config.gripper_close_action:
-            self.robotiq_gripper.close()
-        else:
-            self.robotiq_gripper.open()
+        # Send gripper command to Robotiq only when state changes (avoid blocking
+        # Modbus RTU round-trips on every tick — open()/close() take ~30ms each)
+        if not hasattr(self, '_last_gripper_action') or gripper_action != self._last_gripper_action:
+            if gripper_action == self.config.gripper_close_action:
+                self.robotiq_gripper.close()
+            else:
+                self.robotiq_gripper.open()
+            self._last_gripper_action = gripper_action
 
-        # The deoxys controller needs to be fed commands continuously at a high rate;
-        # a single control() call followed by a long gap causes oscillation/vibration.
-        # Send joint targets to Franka via deoxys (dummy gripper value; Robotiq handles it)
+        # Send joint target to Franka via deoxys
         deoxys_action = list(robot_target) + [gripper_action]
         action = list(robot_target) + [gripper_action]
         before_fwrite_t = time.perf_counter()
-        max_iterations = 60
-        for _ in range(max_iterations):
-            if len(self.robot_interface._state_buffer) > 0:
-                joint_error = np.max(np.abs(
-                    np.array(self.robot_interface._state_buffer[-1].q) - robot_target
-                ))
-                if joint_error < 1e-3:
-                    break
-            self.robot_interface.control(
-                controller_type=self.config.deoxys_controller_type,
-                action=deoxys_action,
-                controller_cfg=self.controller_cfg,
-            )
-        self.logs["write_follower_dt_s"] = time.perf_counter() - before_fwrite_t
+        self.robot_interface.control(
+            controller_type=self.config.deoxys_controller_type,
+            action=deoxys_action,
+            controller_cfg=self.controller_cfg,
+        )
+        deoxys_dt = time.perf_counter() - before_fwrite_t
+        self.logs["write_follower_dt_s"] = deoxys_dt
 
         if not record_data:
             return
@@ -390,29 +384,22 @@ class DroidRobot:
         joint_target = np.array(action_list[:7])
         gripper_action = action_list[7]
 
-        # Send gripper command to Robotiq (non-blocking)
-        if gripper_action == self.config.gripper_close_action:
-            self.robotiq_gripper.close()
-        else:
-            self.robotiq_gripper.open()
+        # Send gripper command to Robotiq only on change
+        if not hasattr(self, '_last_gripper_action') or gripper_action != self._last_gripper_action:
+            if gripper_action == self.config.gripper_close_action:
+                self.robotiq_gripper.close()
+            else:
+                self.robotiq_gripper.open()
+            self._last_gripper_action = gripper_action
 
-        # Send joint targets to Franka via deoxys (dummy gripper value; Robotiq handles it)
+        # Send joint target to Franka via deoxys
         deoxys_action = list(joint_target) + [gripper_action]
-        before_fwrite_t = time.perf_counter()
-        max_iterations = 60
-        for _ in range(max_iterations):
-            if len(self.robot_interface._state_buffer) > 0:
-                joint_error = np.max(np.abs(
-                    np.array(self.robot_interface._state_buffer[-1].q) - joint_target
-                ))
-                if joint_error < 1e-3:
-                    break
-            self.robot_interface.control(
-                controller_type=self.config.deoxys_controller_type,
-                action=deoxys_action,
-                controller_cfg=self.controller_cfg,
-            )
-        self.logs["write_follower_dt_s"] = time.perf_counter() - before_fwrite_t
+        self.robot_interface.control(
+            controller_type=self.config.deoxys_controller_type,
+            action=deoxys_action,
+            controller_cfg=self.controller_cfg,
+        )
+        self.logs["write_follower_dt_s"] = 0.0
 
         return action
 

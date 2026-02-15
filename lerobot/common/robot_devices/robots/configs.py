@@ -583,8 +583,8 @@ class DroidRobotConfig(RobotConfig):
 
     # Deoxys / Franka config
     deoxys_general_cfg_file: str = "lerobot/common/robot_devices/robots/droid_configs/charmander.yml"
-    deoxys_controller_type: str = "JOINT_POSITION"
-    deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/droid_configs/joint-position-controller.yml"
+    deoxys_controller_type: str = "JOINT_IMPEDANCE"
+    deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/droid_configs/joint-impedance-controller.yml"
 
     # Teleop mapping: scale + sign for delta mapping from GELLO to Franka
     mapping_coefficients: tuple[float, ...] = (0.8, -0.8, 0.8, 0.8, 0.8, 0.8, 0.8)
