@@ -19,7 +19,7 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --robot.cameras='{"ca
 Multiview (DROID):
 
 ```py
-python lerobot/scripts/control_robot.py --robot.type=droid --robot.cameras='{"cam_azure_kinect_left": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}}' --control.type=teleoperate --control.display_data=true
+python lerobot/scripts/control_robot.py --robot.type=droid --robot.cameras='{"cam_azure_kinect_left": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "zed", "serial_number": "10296178", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --control.type=teleoperate --control.display_data=true
 ```
 
 Need to be careful when setting up multiview, various things to keep in mind:

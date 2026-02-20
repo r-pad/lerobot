@@ -215,3 +215,9 @@ rm -rf deoxys.egg-info && \
 make -j build_deoxys=1 && \
 pip install -e . --use-pep517 --no-build-isolation --no-deps
 """
+install-zed = """
+wget https://download.stereolabs.com/zedsdk/5.2/cu12/ubuntu24 && \
+chmod +x ubuntu24 && \
+./ubuntu24 && \
+rm ubuntu24
+"""
