@@ -657,3 +657,11 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 # Fold-onesie VIT-3DGP GC
 python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record --control.fps=15 --control.single_task="Fold the onesie." --control.repo_id=sriramsk/eval_fold_onesie_vit3dgp_gc_20260124 --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_MV_gc_vit3dgp_20260119_v2/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=240
 ```
+
+### DROID set-up
+
+```py
+python lerobot/scripts/control_robot.py --robot.type=droid --control.type=record --control.single_task="Move the red mug." --control.repo_id=sriramsk/move_red_mug_droid_20260220 --control.num_episodes=20 --robot.cameras='{"cam_azure_kinect_left": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "zed", "serial_number": "10296178", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=true
+```
+
+

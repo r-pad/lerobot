@@ -198,6 +198,7 @@ def say(text, blocking=False):
 
 def log_say(text, play_sounds, blocking=False):
     logging.info(text)
+    print(text)
 
     if play_sounds:
         say(text, blocking)
