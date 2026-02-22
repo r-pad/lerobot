@@ -397,7 +397,12 @@ class DroidRobot:
 
         action_list = action.tolist()
         joint_target = np.array(action_list[:7])
-        gripper_action = action_list[7]
+
+        # Threshold continuous gripper value into open/close
+        if action_list[7] < self.config.gripper_threshold:
+            gripper_action = self.config.gripper_close_action
+        else:
+            gripper_action = self.config.gripper_open_action
 
         # Send gripper command to Robotiq only on change
         if not hasattr(self, '_last_gripper_action') or gripper_action != self._last_gripper_action:

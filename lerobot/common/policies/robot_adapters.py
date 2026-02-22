@@ -155,6 +155,135 @@ class AlohaAdapter(RobotAdapter):
         # For joint space, return dummy eef
         return torch.zeros(10, device=action.device, dtype=action.dtype)
 
+class DroidAdapter(RobotAdapter):
+    """Droid (Franka via deoxys) adapter. Same EEF representation as Aloha
+    (6D rotation + xyz + gripper = 10 dims) but single-arm (7 joints + gripper)."""
+
+    def __init__(self, action_space: str):
+        assert action_space in ["right_eef", "joint", "right_eef_relative"]
+        self.action_space = action_space
+        if action_space in ["right_eef", "right_eef_relative"]:
+            from deoxys.utils.ik_utils import IKWrapper
+            self.ik_wrapper = IKWrapper()
+
+    def get_obs_key(self) -> str:
+        if self.action_space in ["right_eef", "right_eef_relative"]:
+            return "observation.right_eef_pose"
+        return "observation.state"
+
+    def get_act_key(self) -> str:
+        if self.action_space == "right_eef":
+            return "action.right_eef_pose"
+        elif self.action_space == "right_eef_relative":
+            return "action.right_eef_pose_relative"
+        return "action"
+
+    def _relative_to_absolute_eef(self, relative_action: torch.Tensor, current_eef: torch.Tensor) -> torch.Tensor:
+        """Convert relative EEF action to absolute.
+        Args:
+            relative_action: (1, 10) [6D_rot, xyz, gripper] relative delta
+            current_eef: (10,) [6D_rot, xyz, gripper] current absolute pose
+        Returns:
+            absolute_action: (1, 10) [6D_rot, xyz, gripper] absolute pose
+        """
+        rel_rot6d, rel_pos, rel_gripper = relative_action[0, :6], relative_action[0, 6:9], relative_action[0, 9:10]
+        obs_rot6d, obs_pos, obs_gripper = current_eef[:6], current_eef[6:9], current_eef[9:10]
+
+        R_obs = transforms.rotation_6d_to_matrix(obs_rot6d[None]).squeeze()
+        R_rel = transforms.rotation_6d_to_matrix(rel_rot6d[None]).squeeze()
+        R_abs = torch.matmul(R_obs, R_rel)
+
+        abs_rot6d = transforms.matrix_to_rotation_6d(R_abs[None]).squeeze()
+        abs_pos = obs_pos + rel_pos
+        abs_gripper = obs_gripper + rel_gripper
+
+        return torch.cat([abs_rot6d, abs_pos, abs_gripper])[None]
+
+    def compute_relative_actions(self, batch: dict) -> dict:
+        """Compute relative actions (delta from current observation)."""
+        obs_key = self.get_obs_key()
+        source_act_key = "action.right_eef_pose"
+        target_act_key = self.get_act_key()
+
+        current_obs = batch[obs_key][:, -1, :]  # (B, 10)
+        actions = batch[source_act_key]  # (B, horizon, 10)
+
+        B, horizon, _ = actions.shape
+
+        obs_rot6d, obs_pos, obs_gripper = current_obs[:, :6], current_obs[:, 6:9], current_obs[:, 9:10]
+        act_rot6d, act_pos, act_gripper = actions[:, :, :6], actions[:, :, 6:9], actions[:, :, 9:10]
+
+        R_obs = transforms.rotation_6d_to_matrix(obs_rot6d)
+        R_act = transforms.rotation_6d_to_matrix(act_rot6d.reshape(B * horizon, 6))
+        R_act = R_act.reshape(B, horizon, 3, 3)
+
+        R_obs_inv = R_obs.transpose(-2, -1)
+        R_relative = torch.matmul(R_obs_inv.unsqueeze(1), R_act)
+
+        relative_rot6d = transforms.matrix_to_rotation_6d(R_relative.reshape(B * horizon, 3, 3))
+        relative_rot6d = relative_rot6d.reshape(B, horizon, 6)
+        relative_pos = act_pos - obs_pos.unsqueeze(1)
+        relative_gripper = act_gripper - obs_gripper.unsqueeze(1)
+
+        batch[target_act_key] = torch.cat(
+            [relative_rot6d, relative_pos, relative_gripper], dim=-1
+        )
+        return batch
+
+    def _eef_to_joints(self, eef_action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+        """Convert EEF pose (10,) to joint positions (8,) using deoxys IK.
+        Args:
+            eef_action: (10,) [6D_rot, xyz, gripper]
+            state: (8,) current joint state [7 joints, gripper]
+        Returns:
+            (8,) joint positions [7 joints, gripper]
+        """
+        rot6d = eef_action[:6]
+        pos = eef_action[6:9]
+        gripper = eef_action[9:10]
+
+        # Convert 6D rotation to 3x3 matrix for deoxys IK
+        target_mat = transforms.rotation_6d_to_matrix(rot6d[None]).squeeze().cpu().numpy()
+        target_pos = pos.cpu().numpy()
+        current_joints = state[:7].cpu().numpy().tolist()
+
+        joint_positions = self.ik_wrapper.inverse_kinematics(
+            self.ik_wrapper.model, self.ik_wrapper.data,
+            target_mat, target_pos, current_joints
+        )
+        result = torch.cat([
+            torch.from_numpy(joint_positions).float().to(eef_action.device),
+            gripper,
+        ])
+        return result
+
+    def transform_action(self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None) -> torch.Tensor:
+        """Transform policy output to robot-executable action.
+        Args:
+            action: Policy output action
+                - For "right_eef": (10,) absolute EEF pose
+                - For "right_eef_relative": (10,) relative EEF delta
+                - For "joint": (8,) joint positions
+            state: Current robot state (8,) [7 joints + gripper]
+            reference_eef: Reference EEF pose for relative actions (10,) [6D_rot, xyz, gripper]
+        Returns:
+            Joint positions (8,) to execute on robot
+        """
+        if self.action_space in ["right_eef", "right_eef_relative"]:
+            if self.action_space == "right_eef_relative":
+                action = self._relative_to_absolute_eef(action, reference_eef)
+
+            eef = action.squeeze()
+            return self._eef_to_joints(eef, state.squeeze())[None]
+        return action
+
+    def get_eef_action(self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None) -> torch.Tensor:
+        if self.action_space == "right_eef":
+            return action
+        elif self.action_space == "right_eef_relative":
+            return self._relative_to_absolute_eef(action, reference_eef)
+        return torch.zeros(10, device=action.device, dtype=action.dtype)
+
 class LiberoFrankaAdapter(RobotAdapter):
     """Libero Franka adapter"""
     def __init__(self, obs_key: str, act_key: str):
