@@ -57,7 +57,7 @@ class DroidRobot:
 
     @property
     def motor_features(self) -> dict:
-        return {
+        motor_features = {
             "action": {
                 "dtype": "float32",
                 "shape": (len(self.joint_names),),
@@ -69,6 +69,21 @@ class DroidRobot:
                 "names": list(self.joint_names),
             },
         }
+
+        if self.use_eef:
+            eef_names = ["rot_6d_0", "rot_6d_1", "rot_6d_2", "rot_6d_3", "rot_6d_4", "rot_6d_5", "trans_0", "trans_1", "trans_2", "gripper_articulation"]
+            motor_features["observation.right_eef_pose"] = {
+                "dtype": "float32",
+                "shape": (len(eef_names),),
+                "names": eef_names,
+            }
+            motor_features["action.right_eef_pose"] = {
+                "dtype": "float32",
+                "shape": (len(eef_names),),
+                "names": eef_names,
+            }
+
+        return motor_features
 
     @property
     def features(self):
@@ -155,7 +170,7 @@ class DroidRobot:
                 raise ValueError(
                     "No GELLO port found. Please specify gello_port or plug in GELLO."
                 )
-            port = usb_ports[-1]
+            port = usb_ports[0]
             print(f"using port {port}. HACK: One hardcoded port is selected. Needs to be handled properly.")
 
         self._gello_port = port
@@ -382,7 +397,12 @@ class DroidRobot:
 
         action_list = action.tolist()
         joint_target = np.array(action_list[:7])
-        gripper_action = action_list[7]
+
+        # Threshold continuous gripper value into open/close
+        if action_list[7] < self.config.gripper_threshold:
+            gripper_action = self.config.gripper_close_action
+        else:
+            gripper_action = self.config.gripper_open_action
 
         # Send gripper command to Robotiq only on change
         if not hasattr(self, '_last_gripper_action') or gripper_action != self._last_gripper_action:

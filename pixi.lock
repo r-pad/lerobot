@@ -3083,7 +3083,7 @@ packages:
 - pypi: .
   name: lerobot
   version: 0.2.0+rpad
-  sha256: 8c926aefb7f841566036b391093e0257b21a3621dcb0de553d1f114cffc61320
+  sha256: f37fbbbc156e1d2cca519b688f695731e7e031b481e38625c1737ce385366eb8
   requires_dist:
   - cmake>=3.29.0.1
   - datasets>=2.19.0

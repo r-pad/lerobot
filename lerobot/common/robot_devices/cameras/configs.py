@@ -236,6 +236,7 @@ class AzureKinectCameraConfig(CameraConfig):
             raise ValueError(
                 f"wired_sync_mode must be None, 'master', or 'subordinate', got {self.wired_sync_mode}"
             )
+
         
     def get_feature_specs(self, cam_key: str) -> dict[str, dict]:
         feature_specs = {}
@@ -266,6 +267,76 @@ class AzureKinectCameraConfig(CameraConfig):
                 "shape": (self.height, self.width, self.channels),
                 "names": ["height", "width", "channels"],
                 "info": "Raw color image",
+            }
+
+        return feature_specs
+
+
+@CameraConfig.register_subclass("zed")
+@dataclass
+class ZedCameraConfig(CameraConfig):
+    """
+    Configuration for ZED stereo cameras (ZED, ZED Mini, ZED 2, ZED 2i, ZED X).
+
+    Example usage:
+    ```python
+    ZedCameraConfig(serial_number=12345, fps=30, width=1280, height=720)
+    ZedCameraConfig(serial_number=12345, fps=60, width=1280, height=720, use_depth=True)
+    ZedCameraConfig(serial_number=12345, fps=30, width=1920, height=1080, rotation=90)
+    ```
+    """
+
+    serial_number: int | None = None
+    fps: int | None = None
+    width: int | None = None
+    height: int | None = None
+    color_mode: str = "rgb"
+    channels: int | None = None
+    use_depth: bool = False
+    depth_mode: str = "neural"
+    rotation: int | None = None
+    mock: bool = False
+
+    def __post_init__(self):
+        if self.color_mode not in ["rgb", "bgr"]:
+            raise ValueError(
+                f"`color_mode` is expected to be 'rgb' or 'bgr', but {self.color_mode} is provided."
+            )
+
+        self.channels = 3
+
+        valid_depth_modes = ["performance", "quality", "ultra", "neural", "neural_plus"]
+        if self.depth_mode not in valid_depth_modes:
+            raise ValueError(
+                f"`depth_mode` must be one of {valid_depth_modes}, but {self.depth_mode} is provided."
+            )
+
+        at_least_one_is_not_none = self.fps is not None or self.width is not None or self.height is not None
+        at_least_one_is_none = self.fps is None or self.width is None or self.height is None
+        if at_least_one_is_not_none and at_least_one_is_none:
+            raise ValueError(
+                "For `fps`, `width` and `height`, either all of them need to be set, or none of them, "
+                f"but {self.fps=}, {self.width=}, {self.height=} were provided."
+            )
+
+        if self.rotation not in [-90, None, 90, 180]:
+            raise ValueError(f"`rotation` must be in [-90, None, 90, 180] (got {self.rotation})")
+
+    def get_feature_specs(self, cam_key: str) -> dict[str, dict]:
+        feature_specs = {}
+        base = f"observation.images.{cam_key}"
+
+        feature_specs[base] = {
+            "shape": (self.height, self.width, self.channels),
+            "names": ["height", "width", "channels"],
+            "info": f"{self.color_mode.upper()} color image",
+        }
+
+        if self.use_depth:
+            feature_specs[f"{base}.depth"] = {
+                "shape": (self.height, self.width, 1),
+                "names": ["height", "width", "channels"],
+                "info": "Depth image",
             }
 
         return feature_specs

@@ -20,6 +20,7 @@ from lerobot.common.robot_devices.cameras.configs import (
     CameraConfig,
     IntelRealSenseCameraConfig,
     OpenCVCameraConfig,
+    ZedCameraConfig,
 )
 
 
@@ -49,7 +50,12 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> list[C
             from lerobot.common.robot_devices.cameras.azure_kinect import AzureKinectCamera
 
             cameras[key] = AzureKinectCamera(cfg)
-        
+
+        elif cfg.type == "zed":
+            from lerobot.common.robot_devices.cameras.zed import ZedCamera
+
+            cameras[key] = ZedCamera(cfg)
+
         else:
             raise ValueError(f"The camera type '{cfg.type}' is not valid.")
 
@@ -68,6 +74,12 @@ def make_camera(camera_type, **kwargs) -> Camera:
 
         config = IntelRealSenseCameraConfig(**kwargs)
         return IntelRealSenseCamera(config)
+
+    elif camera_type == "zed":
+        from lerobot.common.robot_devices.cameras.zed import ZedCamera
+
+        config = ZedCameraConfig(**kwargs)
+        return ZedCamera(config)
 
     else:
         raise ValueError(f"The camera type '{camera_type}' is not valid.")
