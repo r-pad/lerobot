@@ -662,6 +662,8 @@ python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record
 
 ```py
 python lerobot/scripts/control_robot.py --robot.type=droid --control.type=record --control.single_task="Move the red mug." --control.repo_id=sriramsk/move_red_mug_droid_20260220 --control.num_episodes=20 --robot.cameras='{"cam_azure_kinect_left": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "zed", "serial_number": "10296178", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=true --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4 --control.display_data=true
+
+HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --dataset.repo_id="sriramsk/move_red_mug_droid_20260220_ss" --policy.type=diffusion --output_dir=outputs/train/diffPo_droid_debug --job_name=diffPo_droid_debug --wandb.enable=true --policy.use_text_embedding=true --steps=300_000 --policy.crop_shape="[700, 700]" --policy.crop_is_random=true --batch_size=4 > diffpo_droid.out &
 ```
 
 
