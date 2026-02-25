@@ -203,7 +203,7 @@ Train on LIBERO:
 python lerobot/scripts/train.py \
     --dataset.repo_id=<libero_dataset_id> \
     --policy.type=diffusion \
-    --policy.robot_type=libero_franka \
+    --policy.robot_type=sim_franka \
     --env.type=libero \
     --env.task=libero_object_0 \
     --eval.batch_size=10 \

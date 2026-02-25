@@ -124,6 +124,11 @@ class ArticuBotEnv(gym.Env):
             obs_dict["agent_pos"] = spaces.Box(
                 -np.inf, np.inf, (10,), np.float32
             )
+            obs_dict["robot_data"] = spaces.Dict({
+                "ee_pos": spaces.Box(-np.inf, np.inf, (3,), np.float64),
+                "ee_quat": spaces.Box(-np.inf, np.inf, (4,), np.float64),
+                "gripper_angle": spaces.Box(-np.inf, np.inf, (), np.float64),
+            })
         self.observation_space = spaces.Dict(obs_dict)
 
         self.current_step = 0
@@ -350,7 +355,7 @@ class ArticuBotEnv(gym.Env):
             obs["robot_data"] = {
                 "ee_pos": np.array(pos, dtype=np.float64),
                 "ee_quat": np.array(orient, dtype=np.float64),
-                "gripper_angle": float(gripper_angle),
+                "gripper_angle": np.float64(gripper_angle),
             }
 
         return obs

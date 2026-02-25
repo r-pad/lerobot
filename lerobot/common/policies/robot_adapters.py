@@ -284,8 +284,8 @@ class DroidAdapter(RobotAdapter):
             return self._relative_to_absolute_eef(action, reference_eef)
         return torch.zeros(10, device=action.device, dtype=action.dtype)
 
-class LiberoFrankaAdapter(RobotAdapter):
-    """Libero Franka adapter"""
+class SimFrankaAdapter(RobotAdapter):
+    """Sim Franka adapter. No-op because simulation handles everything."""
     def __init__(self, obs_key: str, act_key: str):
         self.obs_key = obs_key
         self.act_key = act_key

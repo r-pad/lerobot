@@ -161,6 +161,7 @@ def rollout(
         observation = add_envs_task(env, observation)
 
         if hasattr(policy.config, "enable_goal_conditioning") and policy.config.enable_goal_conditioning:
+            raise ValueError("refactor this code path.")
             from lerobot.common.utils.libero_franka_utils import get_4_points_from_gripper_pos_orient
 
             # Generate new goal prediction when queue is empty
@@ -234,12 +235,12 @@ def rollout(
                     goal_gripper_proj[cam_name] = cam_goal_projs
                 policy.latest_gripper_proj = goal_gripper_proj
 
-        # Add goal projection to each camera observation
-        for cam_name in policy.high_level.camera_names:
-            observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
+            # Add goal projection to each camera observation
+            for cam_name in policy.high_level.camera_names:
+                observation[f"observation.images.{cam_name}.goal_gripper_proj"] = policy.latest_gripper_proj[cam_name]
 
-        observation[f"observation.points.goal_gripper_pcds"] = torch.from_numpy(np.array(goal_gripper_pcds)).float().to(device)
-        observation[f"observation.points.gripper_pcds_displacement"] = torch.from_numpy(np.array(goal_gripper_displacements)).float().to(device)
+            observation[f"observation.points.goal_gripper_pcds"] = torch.from_numpy(np.array(goal_gripper_pcds)).float().to(device)
+            observation[f"observation.points.gripper_pcds_displacement"] = torch.from_numpy(np.array(goal_gripper_displacements)).float().to(device)
 
         # Save goal gripper proj frames if callback is provided
         if goal_gripper_proj_callback is not None and any(k.endswith(".goal_gripper_proj") for k in observation):
