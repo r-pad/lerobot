@@ -17,11 +17,37 @@ from pathlib import Path
 
 from huggingface_hub.constants import HF_HOME
 
+OBS_STR = "observation"
+OBS_PREFIX = OBS_STR + "."
 OBS_ENV = "observation.environment_state"
+OBS_ENV_STATE = OBS_ENV
 OBS_ROBOT = "observation.state"
+OBS_STATE = OBS_ROBOT  # alias used by PI05 / upstream
 OBS_IMAGE = "observation.image"
 OBS_IMAGES = "observation.images"
+OBS_LANGUAGE = OBS_STR + ".language"
+OBS_LANGUAGE_TOKENS = OBS_LANGUAGE + ".tokens"
+OBS_LANGUAGE_ATTENTION_MASK = OBS_LANGUAGE + ".attention_mask"
+OBS_LANGUAGE_SUBTASK = OBS_STR + ".subtask"
+OBS_LANGUAGE_SUBTASK_TOKENS = OBS_LANGUAGE_SUBTASK + ".tokens"
+OBS_LANGUAGE_SUBTASK_ATTENTION_MASK = OBS_LANGUAGE_SUBTASK + ".attention_mask"
 ACTION = "action"
+ACTION_PREFIX = ACTION + "."
+ACTION_TOKENS = ACTION + ".tokens"
+ACTION_TOKEN_MASK = ACTION + ".token_mask"
+REWARD = "next.reward"
+TRUNCATED = "next.truncated"
+DONE = "next.done"
+INFO = "info"
+
+ROBOTS = "robots"
+TELEOPERATORS = "teleoperators"
+
+POLICY_PREPROCESSOR_DEFAULT_NAME = "policy_preprocessor"
+POLICY_POSTPROCESSOR_DEFAULT_NAME = "policy_postprocessor"
+
+# openpi
+OPENPI_ATTENTION_MASK_VALUE = -2.3819763e38
 
 # files & directories
 CHECKPOINTS_DIR = "checkpoints"

@@ -1,4 +1,6 @@
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#!/usr/bin/env python
+
+# Copyright 2025 Physical Intelligence and The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,10 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .act.configuration_act import ACTConfig as ACTConfig
-from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
-from .pi0.configuration_pi0 import PI0Config as PI0Config
-from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
-from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig
-from .dp3.configuration_dp3 import DP3Config as DP3Config
-from .pi05.configuration_pi05 import PI05Config as PI05Config
+from .configuration_pi05 import PI05Config
+from .modeling_pi05 import PI05Policy
+from .processor_pi05 import make_pi05_pre_post_processors
+
+__all__ = ["PI05Config", "PI05Policy", "make_pi05_pre_post_processors"]

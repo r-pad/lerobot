@@ -64,6 +64,13 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
     # automatic gradient scaling is used.
     use_amp: bool = False
 
+    # Hub upload fields (present in upstream pretrained configs)
+    push_to_hub: bool = True
+    repo_id: str | None = None
+    private: bool | None = None
+    tags: list[str] | None = None
+    license: str | None = None
+
     def __post_init__(self):
         self.pretrained_path = None
         if not self.device or not is_torch_device_available(self.device):

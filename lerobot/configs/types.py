@@ -23,6 +23,13 @@ class FeatureType(str, Enum):
     VISUAL = "VISUAL"
     ENV = "ENV"
     ACTION = "ACTION"
+    REWARD = "REWARD"
+    LANGUAGE = "LANGUAGE"
+
+
+class PipelineFeatureType(str, Enum):
+    ACTION = "ACTION"
+    OBSERVATION = "OBSERVATION"
 
 
 class NormalizationMode(str, Enum):
@@ -30,6 +37,15 @@ class NormalizationMode(str, Enum):
     MEAN_STD = "MEAN_STD"
     IDENTITY = "IDENTITY"
     PER_TIMESTEP_PERCENTILE = "PER_TIMESTEP_PERCENTILE"  # Per-timestep normalization (TRI LBM paper)
+    QUANTILES = "QUANTILES"
+    QUANTILE10 = "QUANTILE10"
+
+
+class RTCAttentionSchedule(str, Enum):
+    ZEROS = "ZEROS"
+    ONES = "ONES"
+    LINEAR = "LINEAR"
+    EXP = "EXP"
 
 
 class DictLike(Protocol):
