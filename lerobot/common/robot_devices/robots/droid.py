@@ -248,14 +248,33 @@ class DroidRobot:
         )
 
     def run_calibration(self):
-        """Interactive home calibration: user aligns GELLO to Franka's pose."""
+        """Move Franka to match the GELLO's current pose for absolute control."""
         input(
-            "\n[DroidRobot] Align GELLO to match the Franka's current pose.\n"
-            "Press Enter when ready..."
+            "\n[DroidRobot] Position the GELLO at your desired starting pose.\n"
+            "Press Enter when ready — the Franka will move to match..."
         )
-        self.robot_home = np.array(self.robot_interface._state_buffer[-1].q)
-        self.gello_home = np.array(self.gello.get_joint_state())
-        print(f"Calibration done. Robot home: {self.robot_home}")
+
+        gello_joints = np.array(self.gello.get_joint_state())
+        gello_target = gello_joints[:7]
+        franka_current = np.array(self.robot_interface._state_buffer[-1].q)
+
+        print(f"  Franka current: {np.round(franka_current, 4)}")
+        print(f"  GELLO target:   {np.round(gello_target, 4)}")
+        print(f"  Moving Franka to match GELLO...")
+
+        # Interpolate smoothly from current Franka pose to GELLO pose
+        max_delta = np.max(np.abs(gello_target - franka_current))
+        num_steps = max(int(max_delta / 0.01), 1)  # ~0.01 rad per step
+        for i in range(num_steps):
+            alpha = (i + 1) / num_steps
+            waypoint = franka_current + alpha * (gello_target - franka_current)
+            deoxys_action = list(waypoint) + [self.config.gripper_open_action]
+            self.robot_interface.control(
+                controller_type=self.config.deoxys_controller_type,
+                action=deoxys_action,
+                controller_cfg=self.controller_cfg,
+            )
+        print(f"[DroidRobot] Franka aligned to GELLO. Ready for teleop.")
 
     def _get_franka_joints(self) -> np.ndarray:
         """Read current 7-DOF joint positions from Franka."""
@@ -281,9 +300,9 @@ class DroidRobot:
         gello_joints = np.array(self.gello.get_joint_state())
         self.logs["read_leader_dt_s"] = time.perf_counter() - before_lread_t
 
-        # Compute Franka target via delta mapping
-        coeffs = np.array(self.config.mapping_coefficients)
-        robot_target = coeffs * (gello_joints[:7] - self.gello_home[:7]) + self.robot_home
+        # Absolute control: GELLO is a kinematic replica of Franka, so joint
+        # angles map 1:1 (offsets/signs already applied by DynamixelRobot)
+        robot_target = gello_joints[:7]
 
         # Gripper thresholding
         if gello_joints[-1] > self.config.gripper_threshold:

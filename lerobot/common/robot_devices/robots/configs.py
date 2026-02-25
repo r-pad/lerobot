@@ -568,15 +568,15 @@ class DroidRobotConfig(RobotConfig):
     gello_port: str | None = None  # Auto-detected from /dev/serial/by-id/* if None
     gello_joint_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
     gello_joint_offsets: tuple[float, ...] = (
-        3 * 3.141592653589793 / 2,
-        2 * 3.141592653589793 / 2,
-        1 * 3.141592653589793 / 2,
         4 * 3.141592653589793 / 2,
-        -2 * 3.141592653589793 / 2 + 2 * 3.141592653589793,
-        3 * 3.141592653589793 / 2,
+        0 * 3.141592653589793 / 2,
+        2 * 3.141592653589793 / 2,
+        4 * 3.141592653589793 / 2,
+        8 * 3.141592653589793 / 2,
+        4 * 3.141592653589793 / 2,
         4 * 3.141592653589793 / 2,
     )
-    gello_joint_signs: tuple[int, ...] = (1, -1, 1, 1, 1, -1, 1)
+    gello_joint_signs: tuple[int, ...] = (1, 1, 1, 1, 1, -1, 1)
     gello_gripper_joint_id: int = 8
     gello_gripper_open_degrees: int = 195
     gello_gripper_close_degrees: int = 152
