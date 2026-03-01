@@ -255,7 +255,7 @@ class AzureKinectCamera:
 
     To find available cameras, run:
     ```bash
-    python lerobot/common/robot_devices/cameras/azurekinect.py --images-dir outputs/images_from_kinect_cameras
+    python lerobot/common/robot_devices/cameras/azure_kinect.py --images-dir outputs/images_from_kinect_cameras
     ```
 
     Basic usage (color only):
@@ -478,7 +478,7 @@ class AzureKinectCamera:
                 raise ValueError(
                     f"`device_id` is expected to be one of these available cameras {available_device_ids}, "
                     f"but {self.device_id} is provided instead. "
-                    "To find the device ID you should use, run `python lerobot/common/robot_devices/cameras/azurekinect.py`."
+                    "To find the device ID you should use, run `python lerobot/common/robot_devices/cameras/azure_kinect.py`."
                 )
             raise OSError(f"Can't access AzureKinectCamera({self.device_id}).")
 
