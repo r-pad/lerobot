@@ -606,6 +606,10 @@ class DroidRobotConfig(RobotConfig):
         }
     )
 
+    # Max joint delta (rad) before smooth interpolation kicks in during teleop.
+    # Prevents jerky motion when GELLO drifts between episodes.
+    max_safe_joint_delta: float = 0.3
+
     # save end-effector pose info
     use_eef: bool = True
     mock: bool = False

@@ -247,6 +247,25 @@ class DroidRobot:
             f"or check that the gripper is connected. (GELLO is on {self._gello_port})"
         )
 
+    def _smooth_move_to(self, target_joints: np.ndarray, step_rad: float = 0.01):
+        """Smoothly interpolate Franka from its current pose to target_joints."""
+        franka_current = self._get_franka_joints()
+        max_delta = np.max(np.abs(target_joints - franka_current))
+        num_steps = max(int(max_delta / step_rad), 1)
+
+        gripper_action = getattr(self, '_last_gripper_action', self.config.gripper_open_action)
+
+        for i in range(num_steps):
+            alpha = (i + 1) / num_steps
+            waypoint = franka_current + alpha * (target_joints - franka_current)
+            deoxys_action = list(waypoint) + [gripper_action]
+            self.robot_interface.control(
+                controller_type=self.config.deoxys_controller_type,
+                action=deoxys_action,
+                controller_cfg=self.controller_cfg,
+            )
+        return max_delta, num_steps
+
     def run_calibration(self):
         """Move Franka to match the GELLO's current pose for absolute control."""
         input(
@@ -256,24 +275,13 @@ class DroidRobot:
 
         gello_joints = np.array(self.gello.get_joint_state())
         gello_target = gello_joints[:7]
-        franka_current = np.array(self.robot_interface._state_buffer[-1].q)
+        franka_current = self._get_franka_joints()
 
         print(f"  Franka current: {np.round(franka_current, 4)}")
         print(f"  GELLO target:   {np.round(gello_target, 4)}")
         print(f"  Moving Franka to match GELLO...")
 
-        # Interpolate smoothly from current Franka pose to GELLO pose
-        max_delta = np.max(np.abs(gello_target - franka_current))
-        num_steps = max(int(max_delta / 0.01), 1)  # ~0.01 rad per step
-        for i in range(num_steps):
-            alpha = (i + 1) / num_steps
-            waypoint = franka_current + alpha * (gello_target - franka_current)
-            deoxys_action = list(waypoint) + [self.config.gripper_open_action]
-            self.robot_interface.control(
-                controller_type=self.config.deoxys_controller_type,
-                action=deoxys_action,
-                controller_cfg=self.controller_cfg,
-            )
+        self._smooth_move_to(gello_target)
         print(f"[DroidRobot] Franka aligned to GELLO. Ready for teleop.")
 
     def _get_franka_joints(self) -> np.ndarray:
@@ -303,6 +311,21 @@ class DroidRobot:
         # Absolute control: GELLO is a kinematic replica of Franka, so joint
         # angles map 1:1 (offsets/signs already applied by DynamixelRobot)
         robot_target = gello_joints[:7]
+
+        # If GELLO has drifted far from Franka (e.g. between episodes),
+        # smoothly interpolate to avoid jerky motion.
+        franka_current = self._get_franka_joints()
+        max_delta = np.max(np.abs(robot_target - franka_current))
+        if max_delta > self.config.max_safe_joint_delta:
+            print(
+                f"[DroidRobot] Large GELLO drift detected (max delta: {max_delta:.4f} rad). "
+                "Smoothly interpolating — move GELLO more slowly!\n"
+                f"  Franka: {np.round(franka_current, 4)}\n"
+                f"  GELLO:  {np.round(robot_target, 4)}\n"
+                f"  Delta:  {np.round(robot_target - franka_current, 4)}"
+            )
+            self._smooth_move_to(robot_target)
+            print("Done interepolating!")
 
         # Gripper thresholding
         if gello_joints[-1] > self.config.gripper_threshold:
