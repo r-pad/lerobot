@@ -9,6 +9,7 @@ from scipy.spatial.transform import Rotation as R
 import cv2
 import os
 from termcolor import cprint
+import open3d as o3d
 
 
 ALOHA_PATH = os.path.join(
@@ -19,8 +20,12 @@ ALOHA_CONFIGURATION = mink.Configuration(ALOHA_MODEL)
 ALOHA_REST_STATE = torch.tensor([[ 91.9336, 191.8652, 191.7773, 174.2871, 174.3750,   5.4492,  17.4023, -2.5488,  11.5245,  
                             92.1094, 193.5352, 193.0078, 169.6289, 169.6289, -3.7793,  21.0059,   2.2852, 100.7582]])
 ALOHA_REST_QPOS = np.array(
-    [0, -1.73, 1.49, 0, 0, 0, 0, 0, 0, -1.73, 1.49, 0, 0, 0, 0, 0]
+    [0, -1.73, 1.49, 0, 0, 0, 0, 0, 0, -1.73, 1.49, 0, 0, 0, 0, 0] 
+    # [0, -1.73, 1.49, 0, 0, 0, 0, 0, 0, -1.73, 1.49, 0, 0, 0, 0.06, 0.06]
 )
+
+ALOHA_ZERO_QPOS = np.zeros_like(ALOHA_REST_QPOS)
+
 # Map real camera names to virtual MuJoCo camera names
 # Available virtual cameras: teleoperator_pov, collaborator_pov, overhead_cam,
 # worms_eye_cam, wrist_cam_left, wrist_cam_right
@@ -143,8 +148,10 @@ def inverse_kinematics(configuration, ee_pose):
         configuration.integrate_inplace(vel, dt)
 
         err = ee_task.compute_error(configuration)
-        if np.linalg.norm(err) < thresh: break
-    cprint(f"ik error {i} {np.linalg.norm(err)}", "yellow"  )
+        if np.linalg.norm(err) < thresh: cprint(f"ik error minimized {i} {np.linalg.norm(err)}", "green"  ); break
+
+    if np.linalg.norm(err) >= thresh: cprint(f"ik error not minimized {i} {np.linalg.norm(err)}", "red")
+    
     
     Q = configuration.q
     vec = torch.tensor(
@@ -506,3 +513,337 @@ def render_and_overlay(renderer, ALOHA_MODEL, joint_state, real_rgb, downsample_
 
     real_rgb[seg_] = rgb_[seg_]
     return real_rgb
+
+def get_aloha_visual_meshes(mj_model, mj_data, visual_group=2, include_nonmesh=False):
+    """
+    Extract *all* visual geoms (default: group==2) from the Aloha MJCF model
+    and return them as Open3D TriangleMesh objects in world coordinates.
+
+    Args:
+        mj_model: MuJoCo model object.
+        mj_data: MuJoCo data object containing the current simulation state.
+        visual_group: MuJoCo geom group id used for visuals (Aloha uses 2).
+        include_nonmesh: If True, also approximate non-mesh visual geoms
+                         (box/sphere/capsule/cylinder/ellipsoid) as triangle meshes.
+
+    Returns:
+        List[o3d.geometry.TriangleMesh]: visual meshes in world coordinates.
+    """
+    import open3d as o3d # Local import to avoid cluster install issues
+    meshes = []
+
+    # Iterate over all geoms in the model
+    for geom_id in range(mj_model.ngeom):
+        # Keep only visual geoms
+        if mj_model.geom_group[geom_id] != visual_group:
+            continue
+
+        geom_type = mj_model.geom_type[geom_id]
+
+        # World pose of this geom (already includes body + joint state + geom local transform)
+        geom_pos = mj_data.geom_xpos[geom_id].copy()                 # (3,)
+        geom_mat = mj_data.geom_xmat[geom_id].reshape(3, 3).copy()   # (3,3)
+
+        # -----------------------
+        # Case 1: mesh geom
+        # -----------------------
+        if geom_type == mujoco.mjtGeom.mjGEOM_MESH:
+            mesh_id = int(mj_model.geom_dataid[geom_id])
+            if mesh_id < 0:
+                continue
+
+            vadr = mj_model.mesh_vertadr[mesh_id]
+            vnum = mj_model.mesh_vertnum[mesh_id]
+            fadr = mj_model.mesh_faceadr[mesh_id]
+            fnum = mj_model.mesh_facenum[mesh_id]
+
+            vertices_local = mj_model.mesh_vert[vadr : vadr + vnum].copy()
+            faces = mj_model.mesh_face[fadr : fadr + fnum].copy()
+
+            # MuJoCo stores mesh vertices already with the <mesh scale=...> applied.
+            # We still need to apply the geom's world transform:
+            vertices_world = vertices_local @ geom_mat.T + geom_pos
+
+            m = o3d.geometry.TriangleMesh()
+            m.vertices = o3d.utility.Vector3dVector(vertices_world)
+            m.triangles = o3d.utility.Vector3iVector(faces)
+
+            # Optional: nicer rendering
+            # m.compute_vertex_normals()
+
+            meshes.append(m)
+            continue
+
+        # -----------------------
+        # Case 2: non-mesh geom (optional)
+        # -----------------------
+        if not include_nonmesh:
+            continue
+
+        size = mj_model.geom_size[geom_id].copy()  # MuJoCo "size" params depend on geom type
+        m = None
+
+        if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
+            radius = float(size[0])
+            m = o3d.geometry.TriangleMesh.create_sphere(radius=radius, resolution=20)
+
+        elif geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+            # size = (hx, hy, hz) half-extents
+            hx, hy, hz = map(float, size[:3])
+            m = o3d.geometry.TriangleMesh.create_box(width=2 * hx, height=2 * hy, depth=2 * hz)
+            # Open3D box is created with corner at origin; center it
+            m.translate(np.array([-hx, -hy, -hz], dtype=np.float64))
+
+        elif geom_type == mujoco.mjtGeom.mjGEOM_CYLINDER:
+            # size = (radius, half_length, ?)
+            radius = float(size[0])
+            half_length = float(size[1])
+            m = o3d.geometry.TriangleMesh.create_cylinder(radius=radius, height=2 * half_length, resolution=30, split=4)
+
+        elif geom_type == mujoco.mjtGeom.mjGEOM_CAPSULE:
+            radius = float(size[0])
+            half_length = float(size[1])
+            m = o3d.geometry.TriangleMesh.create_capsule(radius=radius, height=2 * half_length, resolution=20)
+
+        elif geom_type == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
+            # approximate by scaling a sphere
+            rx, ry, rz = map(float, size[:3])
+            m = o3d.geometry.TriangleMesh.create_sphere(radius=1.0, resolution=20)
+            m.scale(rx, center=(0, 0, 0))
+            m.vertices = o3d.utility.Vector3dVector(
+                np.asarray(m.vertices) * np.array([1.0, ry / rx if rx != 0 else 1.0, rz / rx if rx != 0 else 1.0])
+            )
+
+        else:
+            # Skip other types unless you need them
+            continue
+
+        # Apply world transform: x_world = R * x_local + t
+        if m is not None:
+            verts = np.asarray(m.vertices)
+            verts_world = verts @ geom_mat.T + geom_pos
+            m.vertices = o3d.utility.Vector3dVector(verts_world)
+            # m.compute_vertex_normals()
+            meshes.append(m)
+
+    return meshes
+
+import numpy as np
+import mujoco
+
+
+def _set_named_joints(model, data, joint_names, joint_angles):
+    """Set data.qpos for the given joint names (hinge/slide only)."""
+    assert len(joint_names) == len(joint_angles)
+    for name, ang in zip(joint_names, joint_angles):
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        if jid < 0:
+            raise ValueError(f"Joint not found: {name}")
+        qpos_adr = model.jnt_qposadr[jid]
+        # For hinge/slide joints, qpos is 1 dof
+        data.qpos[qpos_adr] = ang
+
+
+def build_aloha_visual_pcd_cache_at_qzero(
+    model,
+    data,
+    num_points_per_geom=2000,
+    use_poisson_disk=True,
+    exclude_mesh_names=(),
+):
+    """
+    One-time precompute:
+      - sets specified joints to 0 (or leaves as-is if joint_names is None)
+      - for each visual mesh geom (geom_group==2 && mjGEOM_MESH),
+        samples a dense point cloud on its surface (in WORLD at q=0),
+        then transforms those points into the owning BODY frame (at q=0),
+        and stores them keyed by body_id.
+
+    Returns:
+        cache: dict with keys:
+          - "body_pcd_bodyframe": {body_id: (P_i,3) float32}
+          - "body_ids": np.ndarray of body_ids with points
+    """
+    mujoco.mj_forward(model, data)
+
+    # Resolve excluded mesh IDs once
+    exclude_mesh_ids = set()
+    for mn in exclude_mesh_names:
+        mid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MESH, mn)
+        if mid >= 0:
+            exclude_mesh_ids.add(mid)
+
+    body_pcd_bodyframe = {}
+
+    for geom_id in range(model.ngeom):
+        # Visual meshes only
+        if model.geom_group[geom_id] != 2:
+            continue
+        if model.geom_type[geom_id] != mujoco.mjtGeom.mjGEOM_MESH:
+            continue
+
+        mesh_id = int(model.geom_dataid[geom_id])
+        if mesh_id < 0:
+            continue
+        if mesh_id in exclude_mesh_ids:
+            continue
+
+        body_id = int(model.geom_bodyid[geom_id])
+
+        # --- Build Open3D triangle mesh in WORLD at q=0 ---
+        v_adr = model.mesh_vertadr[mesh_id]
+        v_num = model.mesh_vertnum[mesh_id]
+        f_adr = model.mesh_faceadr[mesh_id]
+        f_num = model.mesh_facenum[mesh_id]
+
+        vertices_local = model.mesh_vert[v_adr : v_adr + v_num].copy()
+        faces = model.mesh_face[f_adr : f_adr + f_num].copy()
+
+        # geom pose in world at q=0
+        geom_pos_w = data.geom_xpos[geom_id].copy()                        # (3,)
+        geom_R_w = data.geom_xmat[geom_id].reshape(3, 3).copy()            # (3,3)
+
+        # mesh vertices are in geom frame -> world
+        vertices_world = vertices_local @ geom_R_w.T + geom_pos_w
+
+        mesh_o3d = o3d.geometry.TriangleMesh()
+        mesh_o3d.vertices = o3d.utility.Vector3dVector(vertices_world)
+        mesh_o3d.triangles = o3d.utility.Vector3iVector(faces)
+        # normals help Poisson disk sampling stability
+        mesh_o3d.compute_vertex_normals()
+
+        if use_poisson_disk:
+            pcd = mesh_o3d.sample_points_poisson_disk(number_of_points=num_points_per_geom)
+        else:
+            pcd = mesh_o3d.sample_points_uniformly(number_of_points=num_points_per_geom)
+
+        pts_w = np.asarray(pcd.points)  # (K,3)
+
+        # --- Convert sampled WORLD points to owning BODY frame (at q=0) ---
+        body_pos_w = data.xpos[body_id].copy()
+        body_R_w = data.xmat[body_id].reshape(3, 3).copy()
+
+        # p_body = R_body^T (p_world - t_body)
+        pts_b = (pts_w - body_pos_w) @ body_R_w  # note: (p - t) @ R  ==  R^T (p - t)
+
+        if body_id not in body_pcd_bodyframe:
+            body_pcd_bodyframe[body_id] = pts_b.astype(np.float32, copy=False)
+        else:
+            body_pcd_bodyframe[body_id] = np.vstack(
+                [body_pcd_bodyframe[body_id], pts_b.astype(np.float32, copy=False)]
+            )
+
+    body_ids = np.array(sorted(body_pcd_bodyframe.keys()), dtype=np.int32)
+    return {
+        "body_pcd_bodyframe": body_pcd_bodyframe,
+        "body_ids": body_ids,
+    }
+
+
+def get_aloha_pc_from_cache(
+    model,
+    data,
+    cache,
+    return_by_body=False,
+):
+    """
+    Fast per-call:
+      - set joints to joint_angles
+      - mj_forward
+      - rigid transform each cached body-frame point cloud into WORLD using current body pose
+      - concatenate
+
+    Args:
+        cache: output of build_aloha_visual_pcd_cache_at_qzero
+        joint_names: list[str] joint names to set
+        joint_angles: list/np.ndarray same length
+        return_by_body: if True returns dict body_id->(P,3) instead of concatenated.
+
+    Returns:
+        robot_pc_world: (P,3) float32 if return_by_body=False
+        OR dict if return_by_body=True
+    """
+    mujoco.mj_forward(model, data)
+
+    body_pcd_bodyframe = cache["body_pcd_bodyframe"]
+    body_ids = cache["body_ids"]
+
+    out = {} if return_by_body else []
+
+    for body_id in body_ids:
+        pts_b = body_pcd_bodyframe[int(body_id)]  # (P_i,3) in body frame
+
+        body_pos_w = data.xpos[body_id]
+        body_R_w = data.xmat[body_id].reshape(3, 3)
+
+        # p_world = R_body * p_body + t_body
+        pts_w = pts_b @ body_R_w.T + body_pos_w
+
+        if return_by_body:
+            out[int(body_id)] = pts_w.astype(np.float32, copy=False)
+        else:
+            out.append(pts_w.astype(np.float32, copy=False))
+
+    if return_by_body:
+        return out
+    return np.concatenate(out, axis=0) if len(out) > 0 else np.zeros((0, 3), dtype=np.float32)
+
+
+
+if __name__ == "__main__":
+    data = mujoco.MjData(ALOHA_MODEL)
+    data.qpos = ALOHA_ZERO_QPOS
+    # cache = build_aloha_visual_pcd_cache_at_qzero(
+    #     ALOHA_MODEL,
+    #     data,
+    #     num_points_per_geom=10000,
+    #     use_poisson_disk=True,
+    # )
+
+    # with open("data/aloha_visual_pcd_cache.pkl", "wb") as f:
+    #     import pickle
+    #     pickle.dump(cache, f)
+
+    # exit()
+
+    # with open("data/aloha_visual_pcd_cache.pkl", "rb") as f:
+    #     import pickle
+    #     cache = pickle.load(f)
+
+    
+    # data = mujoco.MjData(ALOHA_MODEL)
+    # data.qpos = ALOHA_REST_QPOS
+    # pcd = get_aloha_pc_from_cache(
+    #     ALOHA_MODEL,
+    #     data,
+    #     cache,
+    #     return_by_body=False,
+    # )
+
+    # print("pcd shape:", pcd.shape)
+    
+    
+    data.qpos = ALOHA_REST_QPOS
+    mujoco.mj_forward(ALOHA_MODEL, data)
+
+    # meshes = get_right_gripper_mesh(ALOHA_MODEL, data)
+    meshes = get_aloha_visual_meshes(ALOHA_MODEL, data)  # whole robot visuals
+
+    mesh = combine_meshes(meshes)
+
+    ### visualize with open3d
+    o3d_mesh = o3d.geometry.TriangleMesh()
+    o3d_mesh.vertices = o3d.utility.Vector3dVector(np.asarray(mesh.vertices))
+    o3d_mesh.triangles = o3d.utility.Vector3iVector(np.asarray(mesh.triangles))
+    o3d_mesh.compute_vertex_normals()   
+    ### add a coordinate frame
+    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0,0,0])
+    o3d_mesh += coord_frame
+    o3d.visualization.draw_geometries([o3d_mesh])
+
+    ### also visualize the point cloud
+    # pcd_o3d = o3d.geometry.PointCloud()
+    # pcd_o3d.points = o3d.utility.Vector3dVector(pcd)
+    # pcd_o3d.paint_uniform_color([1.0, 0.0, 0.0])  # red color for the point cloud
+
+    # o3d.visualization.draw_geometries([o3d_mesh, pcd_o3d])

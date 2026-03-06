@@ -241,6 +241,65 @@ def teleoperate(robot: Robot, cfg: TeleoperateControlConfig):
     )
 
 
+def get_model_path():
+     ################## fine-tuning experiments ##########################
+    # Load pretrained policy
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_train_longer_keep_old_normalizer" 
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer"
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer_keep_old_normalizer/"
+    # checkpoint_name = "epoch-300.ckpt"
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_train_longer_keep_old_normalizer"
+    checkpoint_name = "epoch-300.ckpt"
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_rgb_train_longer_keep_old_normalizer" 
+    # checkpoint_name = "epoch-240.ckpt"
+
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1020_grasp_lift_closed_goal_full"
+    # checkpoint_name = "epoch-92.ckpt"
+    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-10fine_tune_our_on_sriram_new_rot_w_one_hot/model_27501.pth" ### best withtout color but with one-hot
+    cat_idx = 13
+
+    ############# towel folding policies ############
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-17fine_tune_our_on_sriram_towel_one_hot/model_130001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_45001.pth"
+    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_35001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_40001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_30001.pth"
+    cat_idx = 0
+    ### towel low-level policy
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_towel_train_longer_keep_old_normalizer"
+    # checkpoint_name = "epoch-300.ckpt"
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1230_finetune_ours_sriram_towel_rgb_dataset_train_longer_keep_old_normalizer"
+    checkpoint_name = "epoch-160.ckpt"
+    
+    
+    ###### folding onesie policies ####
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-10fine_tune_our_on_sriram_onesie_dino/model_45001.pth"
+    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-10fine_tune_our_on_sriram_onesie_dino/model_90001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-10fine_tune_our_on_sriram_onesie_dino/model_95001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-10fine_tune_our_on_sriram_onesie_dino/model_65001.pth"
+    cat_idx = 0
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/0210_finetune_ours_sriram_onesie_rgb_dataset_train_longer_keep_old_normalizer"
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/0211_finetune_ours_sriram_onesie_1_step_rgb_dataset_train_longer_keep_old_normalizer_full"
+    # checkpoint_name = "epoch-300.ckpt"
+    checkpoint_name = "epoch-200.ckpt"
+
+    ###### hammer policies ####
+    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-12finetune_our_on_sriram_hammer_dino/model_40001.pth"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-12finetune_our_on_sriram_hammer_dino/model_42001.pth"
+    cat_idx = 0
+    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/0211_finetune_ours_sriram_hammer_rgb_dataset_train_longer_keep_old_normalizer_full/"
+    checkpoint_name = "epoch-200.ckpt"
+
+
+    ############### zero-shot experiments ############
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-24just-pick-and-place-new-grasp-1204-place/model_200001.pth"
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1020_grasp_lift_closed_goal_full"
+    # checkpoint_name = "epoch-92.ckpt"
+    # cat_idx = 13
+    
+    return model_path, exp_dir, checkpoint_name, cat_idx
+
+
 @safe_disconnect
 def record(
     robot: Robot,
@@ -284,65 +343,50 @@ def record(
             extra_features=extra_features,
         )
 
-    # Load pretrained policy
-    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_train_longer_keep_old_normalizer" 
-    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer"
-    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_combine_2_step_new_rot_train_longer_keep_old_normalizer/"
-    # checkpoint_name = "epoch-300.ckpt"
-    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_train_longer_keep_old_normalizer"
-    checkpoint_name = "epoch-300.ckpt"
-    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_plate_new_rot_rgb_train_longer_keep_old_normalizer" 
-    # checkpoint_name = "epoch-240.ckpt"
+    log_dir = "/home/yufei/.cache/huggingface/lerobot/{}".format(cfg.repo_id)
 
-
-    ### towel low-level policy
-    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1204_finetune_ours_sriram_towel_train_longer_keep_old_normalizer"
-    # checkpoint_name = "epoch-300.ckpt"
-    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1230_finetune_ours_sriram_towel_rgb_dataset_train_longer_keep_old_normalizer"
-    checkpoint_name = "epoch-160.ckpt"
-
-
-    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/1020_grasp_lift_closed_goal_full"
-    # checkpoint_name = "epoch-92.ckpt"
     from lerobot.scripts.yufei_policy_utils import load_low_level_policy, load_multitask_high_level_model
-    low_level_policy = load_low_level_policy(exp_dir, checkpoint_name)
-    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-10fine_tune_our_on_sriram_new_rot_w_one_hot/model_27501.pth" ### best withtout color but with one-hot
-    cat_idx = 13
-
-    ### towel high-level policy
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-17fine_tune_our_on_sriram_towel_one_hot/model_130001.pth"
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_45001.pth"
-    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_35001.pth"
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_40001.pth"
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2025-12-28fine_tune_our_on_sriram_new_towel_one_hot_color/model_30001.pth"
+    model_path, exp_dir, checkpoint_name, cat_idx = get_model_path()
 
     high_level_policy, high_level_args = load_multitask_high_level_model(model_path)
+    low_level_policy = load_low_level_policy(exp_dir, checkpoint_name)
+
     import torch
-    siglip_text_features = torch.load(os.path.join(os.environ['PROJECT_DIR'], "siglip_text_features_w_pick_and_place.pt"))
+    siglip_text_features = torch.load(os.path.join(os.environ['PROJECT_DIR'], "siglip_text_features_w_pick_and_place_w_grasp_and_lift.pt"))
     siglip_text_features = siglip_text_features['values']
     from lerobot.common.policies.robot_adapters import AlohaAdapter
     robot_adapter = AlohaAdapter(action_space="right_eef")
     from collections import deque
 
-    cat_idx = 0
     policy = {
         "high_level": high_level_policy,
         "low_level": low_level_policy,
-        "cat_embedding": siglip_text_features[0].float().to("cuda"),
+        "cat_embedding": siglip_text_features[cat_idx].float().to("cuda"),
         "cat_idx": cat_idx,
         "robot_adapter": robot_adapter,
         "action_queue": deque(),
         "obs_queue": deque(maxlen=2),
         "debug_queue": deque(),
-        "high_level_args": high_level_args
+        "high_level_args": high_level_args,
+        # "mode": "zero-shot",
+        "mode": "fine-tuning",
     }
-    # import pdb; pdb.set_trace()
+
+    meta_info = {
+        "low_level_ckpt": exp_dir,
+        "low_level_ckpt_name": checkpoint_name,
+        "high_level_model_path": model_path,
+        "category_index": cat_idx,
+        "mode": policy["mode"],
+    }
+
+    with open(os.path.join(log_dir, "meta_info.json"), "w") as f:
+        json.dump(meta_info, f, indent=4)
 
     if not robot.is_connected:
         robot.connect()
 
     listener, events = init_keyboard_listener()
-    # import pdb; pdb.set_trace()
 
     # Execute a few seconds without recording to:
     # 1. teleoperate the robot to move it in starting position if no policy provided,
@@ -356,8 +400,9 @@ def record(
         robot.teleop_safety_stop()
 
     recorded_episodes = 0
-    # import pdb; pdb.set_trace()
     while True:
+        reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
+
         if recorded_episodes >= cfg.num_episodes:
             break
 
@@ -383,7 +428,7 @@ def record(
         ):
             log_say("Reset the environment", cfg.play_sounds)
             import pdb; pdb.set_trace()
-            reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
+            # reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
 
         if events["rerecord_episode"]:
             log_say("Re-record episode", cfg.play_sounds)
@@ -490,14 +535,10 @@ python lerobot/scripts/control_robot.py
 """
 @parser.wrap()
 def control_robot(cfg: ControlPipelineConfig):
-    # import pdb; pdb.set_trace()
     init_logging()
-    # import pdb; pdb.set_trace()
     logging.info(pformat(asdict(cfg)))
 
-    # import pdb; pdb.set_trace()
     robot = make_robot_from_config(cfg.robot)
-    # import pdb; pdb.set_trace()
 
     # TODO(Steven): Blueprint for fixed window size
 
@@ -507,9 +548,7 @@ def control_robot(cfg: ControlPipelineConfig):
         _init_rerun(control_config=cfg.control, session_name="lerobot_control_loop_teleop")
         teleoperate(robot, cfg.control)
     elif isinstance(cfg.control, RecordControlConfig):
-        # import pdb; pdb.set_trace()
         _init_rerun(control_config=cfg.control, session_name="lerobot_control_loop_record")
-        # import pdb; pdb.set_trace()
         record(robot, cfg.control)
     elif isinstance(cfg.control, ReplayControlConfig):
         replay(robot, cfg.control)

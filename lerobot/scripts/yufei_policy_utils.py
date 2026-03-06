@@ -14,6 +14,134 @@ from torchvision import transforms
 from PIL import Image
 import torch.nn.functional as F
 
+import numpy as np
+from scipy.spatial import cKDTree
+import time
+import cv2
+from pyk4a import calibration
+
+def transform_world_to_cam_frame(points_world: np.ndarray, T_world_from_cam: np.ndarray) -> np.ndarray:
+    """
+    Inverse of transform_to_world_frame: world -> camera.
+
+    Args:
+        points_world: (N, 3) points in world frame
+        T_world_from_cam: (4, 4) world-from-cam transform
+
+    Returns:
+        points_cam: (N, 3) points in camera frame
+    """
+    T_cam_from_world = np.linalg.inv(T_world_from_cam)
+    N = points_world.shape[0]
+    pts_h = np.concatenate([points_world, np.ones((N, 1), dtype=points_world.dtype)], axis=1)  # (N,4)
+    pts_cam_h = (T_cam_from_world @ pts_h.T).T
+    return pts_cam_h[:, :3]
+
+def project_world_pcd_to_mask(robot_pcd, extrinsics, camera, H, W):
+    robot_pcd = np.concatenate([robot_pcd, np.ones((robot_pcd.shape[0], 1), dtype=robot_pcd.dtype)], axis=1)  # N x 4
+    cam_aligned_robot_pcd = (np.linalg.inv(extrinsics) @ robot_pcd.T).T # to camera frame
+    cam_aligned_robot_pcd = cam_aligned_robot_pcd[:,:3] / cam_aligned_robot_pcd[:,[3]]
+    depth2cam_transform = camera.calibration.get_camera_matrix(calibration.CalibrationType.DEPTH)
+    pixels = depth2cam_transform @ cam_aligned_robot_pcd.T
+    pixels = pixels / pixels[2]
+    pixels = np.rint(pixels).astype(np.int32)
+    valid = (pixels[0] >= 0) & (pixels[0] < W) & (pixels[1] >= 0) & (pixels[1] < H)
+    pixels = pixels[:, valid]
+    x,y = pixels[0], pixels[1]
+    mask = np.zeros((H,W), dtype=bool) # TODO: make this work for different resolutions
+    mask[y,x] = True
+    # kernel = np.ones((11, 11), np.uint8)
+    kernel = np.ones((5, 5), np.uint8)
+    # kernel = np.ones((13, 13), np.uint8)
+    mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=5)
+    mask = mask > 0
+
+    return mask
+
+def project_world_pcd_to_depth(
+    points_world: np.ndarray,
+    T_world_from_cam: np.ndarray,
+    K: np.ndarray,
+    height: int,
+    width: int,
+    max_depth: float = None,
+    min_depth: float = 1e-6,
+    invalid_value: float = 0.0,
+    rounding: str = "round",   # "round" | "floor"
+) -> np.ndarray:
+    """
+    Project a world-frame point cloud into a depth image using a z-buffer.
+
+    Args:
+        points_world: (N, 3) points in world frame
+        T_world_from_cam: (4, 4) transform (world from cam)
+        K: (3, 3) intrinsics
+        height, width: output depth image size
+        max_depth: if not None, discard points with z > max_depth
+        min_depth: discard points with z <= min_depth (behind / too close)
+        invalid_value: value to fill where no depth lands (commonly 0)
+        rounding: how to convert projected float pixels to integer indices
+
+    Returns:
+        depth: (H, W) depth image in the *camera* z metric (same units as points)
+    """
+    # 1) world -> camera
+    pts_cam = transform_world_to_cam_frame(points_world, T_world_from_cam)  # (N,3)
+    x, y, z = pts_cam[:, 0], pts_cam[:, 1], pts_cam[:, 2]
+
+    # 2) filter valid depths
+    valid = z > min_depth
+    if max_depth is not None:
+        valid &= z < max_depth
+    if not np.any(valid):
+        return np.full((height, width), invalid_value, dtype=np.float32)
+
+    x, y, z = x[valid], y[valid], z[valid]
+
+    # 3) camera 3D -> pixel
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    u = fx * (x / z) + cx
+    v = fy * (y / z) + cy
+
+    if rounding == "floor":
+        ui = np.floor(u).astype(np.int32)
+        vi = np.floor(v).astype(np.int32)
+    else:
+        ui = np.rint(u).astype(np.int32)
+        vi = np.rint(v).astype(np.int32)
+
+    # 4) keep only pixels inside image
+    inside = (ui >= 0) & (ui < width) & (vi >= 0) & (vi < height)
+    if not np.any(inside):
+        return np.full((height, width), invalid_value, dtype=np.float32)
+
+    ui, vi, z = ui[inside], vi[inside], z[inside].astype(np.float32)
+
+    # 5) z-buffer: for each pixel keep nearest (min z)
+    depth = np.full((height, width), np.inf, dtype=np.float32)
+
+    # np.minimum.at does an in-place grouped min reduction
+    np.minimum.at(depth, (vi, ui), z)
+
+    # 6) fill invalid pixels
+    depth[~np.isfinite(depth)] = invalid_value
+    return depth
+
+def filter_pcd_a_by_b_radius(pcd_a, pcd_b, thresh=0.005):
+    import pdb; pdb.set_trace()
+    beg = time.time()
+    tree = cKDTree(pcd_b)
+    cprint("build kdtree time: {}".format(time.time() - beg), "yellow")
+    import pdb; pdb.set_trace()
+    # returns list of neighbor indices within radius for each point
+    beg = time.time()
+    neighbors = tree.query_ball_point(pcd_a, r=thresh, workers=-1)
+    cprint("query ball point time: {}".format(time.time() - beg), "yellow")
+    keep = np.fromiter((len(n) == 0 for n in neighbors), dtype=bool, count=len(neighbors))
+    return keep
+
 dinov2 = torch.hub.load(
     "facebookresearch/dinov2", "dinov2_vitl14_reg"
 ).to("cuda")
@@ -158,13 +286,17 @@ cameras = {
   "cam_azure_kinect_front": {
     "intrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000259921812.txt",
     # "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_v1_1020.txt"
-    "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_1208.txt"
+    # "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_1208.txt"
+    "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_20260121.txt"
   },
   "cam_azure_kinect_back": {
     "intrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000003493812.txt",
     "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_back_v1_1020.txt"
   }
 }
+
+
+
 for cam_name, cam_cfg in cameras.items():
     # Load intrinsics
     K = _load_camera_intrinsics(cam_cfg['intrinsics'])
@@ -180,6 +312,19 @@ for cam_name, cam_cfg in cameras.items():
     default_extrinsics.append(T)
     # print(f"Loaded extrinsics for cam_name: {cam_name}: {T}")
 
+# new_front_calibration = np.load("/data/yufei/lerobot/data/calibration/calibration_results/camcam_azure_kinect_front_calibration.npz")['T']
+# new_back_calibration = np.load("/data/yufei/lerobot/data/calibration/calibration_results/camcam_azure_kinect_back_calibration.npz")['T']
+# default_extrinsics[0] = new_front_calibration
+# default_extrinsics[1] = new_back_calibration
+all_cam_names = ["cam_azure_kinect_front", "cam_azure_kinect_back"]
+
+camera_alignments = {}
+alignment_path = "/data/yufei/lerobot/data/calibration/camera_alignments.npz"
+data = np.load(alignment_path)
+# The cam ids are stored as strings in the npz file, convert to int
+for cam_name, transform in data.items():
+    camera_alignments[cam_name] = transform
+
 
 def low_level_policy_infer(obj_pcd, agent_pos, goal_gripper_pcd, gripper_pcd, policy, cat_idx=13):
     input_dict = {
@@ -190,8 +335,10 @@ def low_level_policy_infer(obj_pcd, agent_pos, goal_gripper_pcd, gripper_pcd, po
     }
 
     batched_action = policy.predict_action(input_dict, torch.tensor([cat_idx]).to(policy.device))
+    # import pdb; pdb.set_trace()
 
-    return batched_action['action'] # B, T, 10
+    # return batched_action['action'] # B, T, 10
+    return batched_action['action_pred'] # B, T, 10
 
 def load_low_level_policy(exp_dir, checkpoint_name):
     with hydra.initialize(config_path='../../3d_diffusion_policy/3D-Diffusion-Policy/3D-Diffusion-Policy/diffusion_policy_3d/config'):  # same config_path as used by @hydra.main
@@ -522,8 +669,16 @@ def get_gripper_4_points_from_sriram_data(eef_pose_from_sriram):
     eef_gripper_width_franka = np.clip(eef_gripper_width_franka, 0, 0.04)
 
     return eef_pos, eef_rot_6d, eef_gripper_width, eef_pos_robot_base, eef_rot_matrix_robot_base, eef_rot_6d_robot_base, eef_gripper_width_franka
-    
-def compute_pcd(all_cam_depth_images, all_intrinsics=None, all_extrinsics=None, max_depth=1.5, num_points=4500, all_cam_rgb_images=None, use_dino=False):
+
+def apply_transform(points, transform):
+    points_homo = np.concatenate([points, np.ones((points.shape[0], 1))], axis=1)  # (N, 4)
+    transformed_points_homo = (transform @ points_homo.T).T
+    transformed_points = transformed_points_homo[:, :3]
+    return transformed_points
+
+
+def compute_pcd(all_cam_depth_images=None, all_pcds=None, all_intrinsics=None, all_extrinsics=None, max_depth=1.5, num_points=4500, all_cam_rgb_images=None, use_dino=False, 
+                robot_pc=None, robot=None, debug_depth=None):
     if all_intrinsics is None or all_extrinsics is None:
         all_intrinsics = default_intrinsics
         all_extrinsics = default_extrinsics
@@ -532,32 +687,92 @@ def compute_pcd(all_cam_depth_images, all_intrinsics=None, all_extrinsics=None, 
 
     all_pcd_in_world = []
     all_pcd_in_table_center = []
-    depth_masks = []
+
+    if all_cam_depth_images is not None:
+        depth_masks = []
+        for (depth, intrinsics, extrinsics) in zip(all_cam_depth_images, all_intrinsics, all_extrinsics):
+            depth = depth / 1000.0
 
 
-    for (depth, intrisincs, extrinsics) in zip(all_cam_depth_images, all_intrinsics, all_extrinsics):
-        depth = depth / 1000.0
-        pcd_in_camera, depth_mask = get_scene_pcd_cam_frame(
-            depth, intrisincs, None, max_depth
-        )
+            if robot_pc is not None:
+                right_robot_pc = robot_pc[robot_pc[:, 2] > 0.01]
+                right_robot_pc = right_robot_pc[right_robot_pc[:, 0] > -0.2]
 
-        depth_masks.append(depth_mask.flatten())
-        
+                robot_depth = project_world_pcd_to_depth(
+                    right_robot_pc, extrinsics, intrinsics, depth.shape[0], depth.shape[1], max_depth=max_depth, invalid_value=0.0
+                )
 
-        # import pdb; pdb.set_trace()
-        pcd_in_world = transform_to_world_frame(pcd_in_camera, extrinsics)
-        x = pcd_in_world
+                robot_mask = robot_depth > 0.0
+                ### dilate the mask a bit
+                kernel = np.ones((11, 11), np.uint8)
+                # kernel = np.ones((13, 13), np.uint8)
+                robot_mask = cv2.dilate(robot_mask.astype(np.uint8), kernel, iterations=5)
+
+                from matplotlib import pyplot as plt
+                fig, ax = plt.subplots(1, 3)
+                ori_depth = depth.copy()
+                ax[0].imshow(ori_depth)
+                ax[1].imshow(robot_mask)
+                depth[robot_mask > 0] = 0
+                ax[2].imshow(depth)
+                plt.show()
+
+            pcd_in_camera, depth_mask = get_scene_pcd_cam_frame(
+                depth, intrinsics, None, max_depth
+            )
+
+            depth_masks.append(depth_mask.flatten())
+            
+
+            # import pdb; pdb.set_trace()
+            pcd_in_world = transform_to_world_frame(pcd_in_camera, extrinsics)
+            x = pcd_in_world
+            
+            ### use open3d to visualize the point cloud
+            # x = pcd_in_world[pcd_in_world[:, 1] < 0.6]
+            # x = x[x[:, 1] > -0.4]
+            
+            all_pcd_in_table_center.append(x) ### aloha table center frame
+            x_in_robot_base = transform_from_table_center_to_robot_base(x) ### aloha right arm robot base frame
+            
         
-        ### use open3d to visualize the point cloud
-        # x = pcd_in_world[pcd_in_world[:, 1] < 0.6]
-        # x = x[x[:, 1] > -0.4]
-        
-        all_pcd_in_table_center.append(x)
-        x_in_robot_base = transform_from_table_center_to_robot_base(x)
-        
-    
-        # import pdb; pdb.set_trace()
-        all_pcd_in_world.append(x_in_robot_base)
+            # import pdb; pdb.set_trace()
+            all_pcd_in_world.append(x_in_robot_base)
+    elif all_pcds is not None:
+        depth_masks = []
+        for pcd, extrinsics, cam_name, d_depth in zip(all_pcds, all_extrinsics, all_cam_names, debug_depth):
+            pcd_in_world = transform_to_world_frame(pcd, extrinsics)
+            alignment = camera_alignments[cam_name]
+            pcd_in_world = apply_transform(pcd_in_world, alignment)
+            
+            if robot_pc is not None:
+                right_robot_pc = robot_pc[robot_pc[:, 2] > 0.01]
+                right_robot_pc = right_robot_pc[right_robot_pc[:, 0] > -0.2]
+
+                H, W = d_depth.shape
+                print("H, W: ", H, W)
+                robot_mask = project_world_pcd_to_mask(
+                    right_robot_pc, extrinsics, robot.cameras[cam_name].camera, H, W
+                )
+                ### dilate the mask a bit
+                kernel = np.ones((5, 5), np.uint8)
+                # kernel = np.ones((13, 13), np.uint8)
+                robot_mask = cv2.dilate(robot_mask.astype(np.uint8), kernel, iterations=5)
+                robot_mask = robot_mask.flatten()
+
+                # from matplotlib import pyplot as plt
+                # fig, ax = plt.subplots(1, 2)
+                # ori_depth = d_depth.copy()
+                # ax[0].imshow(ori_depth)
+                # ax[1].imshow(robot_mask.reshape(H, W))
+                # plt.show()
+
+                pcd_in_world = pcd_in_world[robot_mask == 0]
+                depth_masks.append(robot_mask == 0)
+
+            all_pcd_in_table_center.append(pcd_in_world) ### aloha table center frame
+            x_in_robot_base = transform_from_table_center_to_robot_base(pcd_in_world) ### aloha
+            all_pcd_in_world.append(x_in_robot_base)
 
     depth_masks = np.concatenate(depth_masks, axis=0)  # (num_cams * H * W,)
     # import pdb; pdb.set_trace()
@@ -577,9 +792,45 @@ def compute_pcd(all_cam_depth_images, all_intrinsics=None, all_extrinsics=None, 
     all_pcd_in_world = np.concatenate(all_pcd_in_world, axis=0)  # (num_cams * num_points, 3)
     all_pcd_in_table_center = np.concatenate(all_pcd_in_table_center, axis=0)
 
-    filter_idx_1 = all_pcd_in_world[:, 1] < 0.6
+    # if robot_pc is not None:
+        ### use open3d to visualize the robot point cloud and the camera point cloud
+        # import open3d as o3d
+        # o3d_pc_robot = o3d.geometry.PointCloud()
+        # o3d_pc_robot.points = o3d.utility.Vector3dVector(robot_pc)
+        # o3d_pc_robot.paint_uniform_color([1.0, 0.0, 0.0])
+
+        # o3d_pc_scene = o3d.geometry.PointCloud()
+        # o3d_pc_scene.points = o3d.utility.Vector3dVector(all_pcd_in_table_center)
+        # o3d_pc_scene.paint_uniform_color([0.0, 1.0, 0.0])
+        # o3d.visualization.draw_geometries([o3d_pc_robot, o3d_pc_scene], window_name="before filtering robot points")
+
+
+        # beg = time.time()
+        # non_robot_idx = filter_pcd_a_by_b_radius(all_pcd_in_table_center, robot_pc, thresh=0.02)
+        # end = time.time()
+        # cprint("filter robot time: {}".format(end - beg), "yellow")
+        # all_pcd_in_world = all_pcd_in_world[non_robot_idx]
+        # all_pcd_in_table_center = all_pcd_in_table_center[non_robot_idx]
+        # if all_cam_rgb_images is not None:
+        #     all_rgb_flattend = all_rgb_flattend[non_robot_idx]
+        # if use_dino and all_cam_rgb_images is not None:
+        #     all_dino_features = all_dino_features[non_robot_idx]
+
+
+    filter_idx_1 = all_pcd_in_world[:, 1] < 0.4
     filter_idx_2 = all_pcd_in_world[:, 1] > -0.4
+    filter_idx_3 = all_pcd_in_world[:, 2] > -0.02
+    
     filter_idx = np.logical_and(filter_idx_1, filter_idx_2)
+    filter_idx = np.logical_and(filter_idx, filter_idx_3)
+    if robot_pc is not None:
+        filter_idx_3 = all_pcd_in_table_center[:, 2] > 0
+        filter_idx_4 = all_pcd_in_table_center[:, 0] > -0.2
+        filter_idx_5 = all_pcd_in_table_center[:, 0] < 0.3
+        filter_idx = np.logical_and(filter_idx, filter_idx_3)
+        filter_idx = np.logical_and(filter_idx, filter_idx_4)
+        filter_idx = np.logical_and(filter_idx, filter_idx_5)
+
     all_pcd_in_world = all_pcd_in_world[filter_idx]
     all_pcd_in_table_center = all_pcd_in_table_center[filter_idx]
     if all_cam_rgb_images is not None:
@@ -590,7 +841,9 @@ def compute_pcd(all_cam_depth_images, all_intrinsics=None, all_extrinsics=None, 
     all_pcd_in_world, fps_idx = fpsample_pcd(all_pcd_in_world, num_points)
     all_pcd_in_table_center = all_pcd_in_table_center[fps_idx]
     if all_cam_rgb_images is not None:
+        ### TODO: check the rgb data dtype here
         all_rgb_flattend = all_rgb_flattend[fps_idx]
+        # import pdb; pdb.set_trace()
         all_rgb_flattend = all_rgb_flattend.astype(np.float32) / 255.0
         if use_dino:
             all_dino_features = all_dino_features[fps_idx]
@@ -608,9 +861,16 @@ def get_aloha_future_eef_poses_from_delta_actions(low_level_action,
     cur_eef_pos = copy.deepcopy(eef_pos_robot_base)
     cur_eef_matrix = copy.deepcopy(eef_rot_matrix_robot_base)
     cur_gripper_width = copy.deepcopy(eef_gripper_width_franka)
+    
     eef_pos = []
     eef_orient_matrix = []
     gripper_widths = []
+
+    # eef_pos = [cur_eef_pos + np.array([0.0, 0.0, 0.02])]
+    # eef_pos = [cur_eef_pos + np.array([0.0, 0.0, 0])]
+    # eef_orient_matrix = [cur_eef_matrix]
+    # gripper_widths = [cur_gripper_width]
+    
     for act in low_level_action:
         delta_pos = act[0:3]
         delta_rot_6d = act[3:9]

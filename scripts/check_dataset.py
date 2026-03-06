@@ -1,9 +1,11 @@
 import numpy as np
 import os
 
-traj_path = "/data/yufei/lerobot/data/plate_new_rot/traj_0018"
+traj_path = "/data/yufei/lerobot/data/hammer_bluePin_MV_20260119_ss_hg_short_rgb_dino_wrist_1_crop_table/traj_0018"
 all_np_files = [f for f in os.listdir(traj_path) if f.endswith(".npz")]
 traj_len = len(all_np_files)
+
+
 
 actions = []
 eef_poses = []

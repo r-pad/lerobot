@@ -171,10 +171,10 @@ class AzureKinectCameraConfig(CameraConfig):
     height: int | None = None
     color_mode: str = "rgb"
     channels: int | None = None
-    use_depth: bool = False
+    use_depth: bool = True
     use_ir: bool = False
     use_transformed_depth: bool = False
-    use_point_cloud: bool = False
+    use_point_cloud: bool = True
     use_transformed_color: bool = False
     rotation: int | None = None
     wired_sync_mode: str | None = None  # None, "master", or "subordinate"

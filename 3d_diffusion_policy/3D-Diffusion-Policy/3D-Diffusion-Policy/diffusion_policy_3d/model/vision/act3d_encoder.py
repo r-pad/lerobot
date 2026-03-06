@@ -74,6 +74,7 @@ class Act3dEncoder(nn.Module):
                  pos_ori_imp = False, #10D representation for HIgh Level Policy enabled
                  ptv3_config=None,  
                  concat_gripper_pcd_in_ptv3 = False, # whether to concat gripper pcd in ptv3 input
+                 distinct_gripper_pcd_embedding = True,
                  **kwargs
                  ):
         super(Act3dEncoder, self).__init__()
@@ -90,6 +91,7 @@ class Act3dEncoder(nn.Module):
         self.use_repr_10d = use_repr_10d #10D representation for Low Level Policy enabled
         self.pos_ori_imp = pos_ori_imp #10D representation for HIgh Level Policy enabled
         self.concat_gripper_pcd_in_ptv3 = concat_gripper_pcd_in_ptv3
+        self.distinct_gripper_pcd_embedding = distinct_gripper_pcd_embedding
         # [Chialiang]
         self.use_mlp = use_mlp
         self.use_lightweight_unet = use_lightweight_unet
@@ -189,12 +191,16 @@ class Act3dEncoder(nn.Module):
             )
             self.nets['object_pcd_position_embedding_mlp'] = object_pcd_position_embedding_mlp
             self.nets['gripper_pcd_position_embedding_mlp'] = position_embedding_mlp
-            self.nets['embed'] = nn.Embedding(1, encoder_output_dim // 3 * 2)
-            # self.nets['embed'] = nn.Embedding(num_gripper_points, encoder_output_dim // 3 * 2)
+            if not self.distinct_gripper_pcd_embedding:
+                self.nets['embed'] = nn.Embedding(1, encoder_output_dim // 3 * 2)
+            else:
+                self.nets['embed'] = nn.Embedding(num_gripper_points, encoder_output_dim // 3 * 2)
             # self.nets['nouse_embed'] = nn.Embedding(1, encoder_output_dim)
         else:
-            self.nets['embed'] = nn.Embedding(1, encoder_output_dim)
-            # self.nets['embed'] = nn.Embedding(num_gripper_points, encoder_output_dim)
+            if not self.distinct_gripper_pcd_embedding:
+                self.nets['embed'] = nn.Embedding(1, encoder_output_dim)
+            else:
+                self.nets['embed'] = nn.Embedding(num_gripper_points, encoder_output_dim)
 
         self.use_attn_for_point_features = use_attn_for_point_features
         if self.use_attn_for_point_features == "large_self_attention":
@@ -387,9 +393,11 @@ class Act3dEncoder(nn.Module):
             gripper_pcd = observation[self.gripper_pcd_key]
             gripper_pcd_rel_pos_embedding = nets['relative_pe_layer'](gripper_pcd) # shape B num_gripper_points encoder_output_dim
         
-        gripper_pcd_features = nets['embed'].weight.unsqueeze(0).repeat(num_gripper_points, B, 1) # shape (num_gripper_points, B, encoder_output_dim)
-        # gripper_pcd_features = nets['embed'].weight.unsqueeze(1).repeat(1, B, 1) # shape (num_gripper_points, B, encoder_output_dim)
-        
+        if not self.distinct_gripper_pcd_embedding:
+            gripper_pcd_features = nets['embed'].weight.unsqueeze(0).repeat(num_gripper_points, B, 1) # shape (num_gripper_points, B, encoder_output_dim)
+        else:
+            gripper_pcd_features = nets['embed'].weight.unsqueeze(1).repeat(1, B, 1) # shape (num_gripper_points, B, encoder_output_dim)
+                
         # gripper_pcd_features: the first part of learnable embedding for the 4 gripper points
         
         # point positiion + displacement_to_goal + displacement_to_closest_object: input for MLP to get the second part of gripper points embedding

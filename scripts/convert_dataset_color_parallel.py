@@ -19,6 +19,8 @@ from torchvision import transforms
 import torch.nn.functional as F
 from sklearn.decomposition import PCA
 from matplotlib import pyplot as plt
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from termcolor import cprint
 
 ### TODO: add torch transformations for resizing the rgb and depth images
 target_shape = 224
@@ -342,7 +344,9 @@ def get_gripper_4_points_from_sriram_data(eef_pose_from_sriram):
     return eef_pos, eef_rot_6d, eef_gripper_width, eef_pos_robot_base, eef_rot_matrix_robot_base, eef_rot_6d_robot_base, eef_gripper_width_franka
     
 
-def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_pcd, traj_rgb_values, traj_rgb_features, combine_action_steps=2):
+def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_pcd, traj_rgb_values, traj_rgb_features, 
+                    traj_wrist_images,
+                    combine_action_steps=2):
     traj_pos_ori = traj_pos_ori[::combine_action_steps]
     traj_pc = traj_pc[::combine_action_steps]
     traj_gripper_pcd = traj_gripper_pcd[::combine_action_steps]
@@ -350,6 +354,7 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
     if traj_rgb_features is not None:
         traj_rgb_features = traj_rgb_features[::combine_action_steps]
     traj_rgb_values = traj_rgb_values[::combine_action_steps]
+    traj_wrist_images = traj_wrist_images[::combine_action_steps]
     
     traj_actions = []
     
@@ -359,6 +364,7 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
     filtered_goal_gripper_pcds = []
     filtered_rgb_features = []
     filtered_rgb_values = []
+    filtered_wrist_images = []
     
     base_pos = traj_pos_ori[0][:3]
     base_ori_6d = traj_pos_ori[0][3:9]
@@ -370,7 +376,9 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
     if traj_rgb_features is not None:
         base_rgb_features = traj_rgb_features[0]
     base_rgb_values = traj_rgb_values[0]
+    base_wrist_image = traj_wrist_images[0]
     
+    beg = time.time()
     for i in range(len(traj_pos_ori) - 1):
         target_pos = traj_pos_ori[i+1][:3]
 
@@ -390,7 +398,7 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
         ### make sure we learn the delta finger open close with a pretty large value
         delta_finger_angle_threshold = 1 / 80 * 0.04
         if np.abs(delta_finger_angle) > delta_finger_angle_threshold:
-            print("setting large finger change at time step ", i)
+            # print("setting large finger change at time step ", i)
             delta_finger_angle = np.sign(delta_finger_angle) * 0.006
         
         filter_action = False
@@ -406,6 +414,7 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
             if traj_rgb_features is not None:
                 filtered_rgb_features.append(base_rgb_features)
             filtered_rgb_values.append(base_rgb_values)
+            filtered_wrist_images.append(base_wrist_image)
             
             base_pc = traj_pc[i+1]
             base_gripper_pcd = traj_gripper_pcd[i+1]
@@ -417,8 +426,191 @@ def extract_actions(traj_pos_ori, traj_pc, traj_gripper_pcd, traj_goal_gripper_p
             if traj_rgb_features is not None:
                 base_rgb_features = traj_rgb_features[i+1]
             base_rgb_values = traj_rgb_values[i+1]
+            base_wrist_image = traj_wrist_images[i+1]
+    cprint("extract actions using time: {}".format(time.time() - beg), "red")
 
-    return np.asarray(traj_actions), filtered_pcs, filtered_pos_oris, filtered_gripper_pcds, filtered_goal_gripper_pcds, filtered_rgb_values, filtered_rgb_features
+    return np.asarray(traj_actions), filtered_pcs, filtered_pos_oris, filtered_gripper_pcds, \
+        filtered_goal_gripper_pcds, filtered_rgb_values, filtered_rgb_features, filtered_wrist_images
+
+
+def process_one_frame(
+    dataset,
+    dataset_idx: int,
+    traj_idx: int,
+    from_idx: int,
+    all_intrinsics,
+    all_extrinsics,
+    max_depth: float,
+    num_points: int,
+    store_dino: bool,
+    target_shape: int,
+):
+    """
+    Returns everything you used to append inside the loop, but for one frame.
+    IMPORTANT: no shared writes here.
+    """
+    data_point = dataset[dataset_idx]
+
+    # sanity checks (optional, but helps catch mismatches early)
+    # episode_index = data_point["episode_index"].item()
+    # frame_index = data_point["frame_index"].item()
+    # assert episode_index == traj_idx
+    # assert frame_index == (dataset_idx - from_idx)
+    
+    if dataset_idx % 100 == 0:
+        print(f"Processing traj {traj_idx}, dataset idx {dataset_idx}")
+
+    # ----- EEF pose / gripper -----
+    right_eef_pose = data_point["observation.right_eef_pose"]
+    (
+        eef_pos,
+        eef_rot_6d,
+        eef_gripper_width,
+        eef_pos_robot_base,
+        eef_rot_matrix_robot_base,
+        eef_rot_6d_robot_base,
+        eef_gripper_width_franka,
+    ) = get_gripper_4_points_from_sriram_data(right_eef_pose)
+
+    eef_pose_vec = np.array([*eef_pos_robot_base, *eef_rot_6d_robot_base, *eef_gripper_width_franka])
+    eef_4_points = get_4_points_from_gripper_pos_orient(
+        eef_pos_robot_base, eef_rot_matrix_robot_base, eef_gripper_width_franka
+    )
+
+    # ----- Load + preprocess depth & RGB for all cams -----
+    all_cam_depth_images = []
+    for depth_key in depth_keys:
+        depth = Image.fromarray(data_point[depth_key].numpy()[0])
+        depth = np.asarray(depth_preprocess(depth))  # (224,224) after preprocess
+        all_cam_depth_images.append(depth)
+
+    all_cam_color_images = []
+    for color_key in color_keys:
+        rgb = (data_point[color_key].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+        rgb = Image.fromarray(rgb)
+        rgb = np.asarray(rgb_preprocess(rgb))  # (224,224,3)
+        all_cam_color_images.append(rgb)
+
+    # Flatten RGB values (before masking)
+    all_rgb_flat = np.concatenate([rgb.reshape(-1, 3) for rgb in all_cam_color_images], axis=0)
+
+    # DINO features (optional)
+    if store_dino:
+        # NOTE: DINO runs on GPU; threads share the single model.
+        all_rgb_feat_flat = np.concatenate(
+            [compute_dino_v2_features(rgb, target_shape=target_shape) for rgb in all_cam_color_images],
+            axis=0,
+        )
+    else:
+        all_rgb_feat_flat = None
+
+    # ----- Build scene point cloud from depth, transform to world->robot, then fuse cams -----
+    all_pcd_in_robot = []
+    depth_masks = []
+
+    for depth, intrinsics, extrinsics in zip(all_cam_depth_images, all_intrinsics, all_extrinsics):
+        pcd_cam, depth_mask = get_scene_pcd_cam_frame(depth, intrinsics, None, max_depth)
+        depth_masks.append(depth_mask.flatten())
+
+        pcd_world = transform_to_world_frame(pcd_cam, extrinsics)
+        pcd_robot = transform_from_table_center_to_robot_base(pcd_world)
+        all_pcd_in_robot.append(pcd_robot)
+
+    all_pcd_in_robot = np.concatenate(all_pcd_in_robot, axis=0)   # (num_cams*H*W, 3) effectively
+    depth_masks = np.concatenate(depth_masks, axis=0).astype(bool)  # (num_cams*H*W,)
+
+    # Apply depth mask to rgb values/features so they align with points
+    all_rgb_flat = all_rgb_flat[depth_masks]
+    if store_dino:
+        all_rgb_feat_flat = all_rgb_feat_flat[depth_masks]
+
+    # Your workspace crop in robot frame
+    filter_idx = np.logical_and(all_pcd_in_robot[:, 1] < 0.4, all_pcd_in_robot[:, 1] > -0.4)
+    # filter_idx = np.logical_and(filter_idx, all_pcd_in_robot[:, 2] > -0.02) ### for onesie
+    filter_idx = np.logical_and(filter_idx, all_pcd_in_robot[:, 2] > 0.01) ### for hammer
+    all_pcd_in_robot = all_pcd_in_robot[filter_idx]
+    all_rgb_flat = all_rgb_flat[filter_idx]
+    if store_dino:
+        all_rgb_feat_flat = all_rgb_feat_flat[filter_idx]
+
+    # FPS downsample
+    all_pcd_in_robot, fps_index = fpsample_pcd(all_pcd_in_robot, num_points)
+    rgb_value_fpsed = all_rgb_flat[fps_index]
+    if store_dino:
+        rgb_features_fpsed = all_rgb_feat_flat[fps_index]
+    else:
+        rgb_features_fpsed = None
+
+    # ----- Goal gripper pcd (depends on next_event_idx, but still independent per-frame) -----
+    goal_idx = (data_point["next_event_idx"] - data_point["frame_index"] + dataset_idx).item()
+    goal_idx_2 = data_point["next_event_idx"].item() + from_idx
+    assert goal_idx == goal_idx_2
+
+    goal_data_point = dataset[goal_idx]
+    goal_right_eef_pose = goal_data_point["observation.right_eef_pose"]
+    (
+        _,
+        _,
+        _,
+        goal_eef_pos_robot_base,
+        goal_eef_rot_matrix_robot_base,
+        _,
+        goal_eef_gripper_width_franka,
+    ) = get_gripper_4_points_from_sriram_data(goal_right_eef_pose)
+
+    goal_4_points = get_4_points_from_gripper_pos_orient(
+        goal_eef_pos_robot_base, goal_eef_rot_matrix_robot_base, goal_eef_gripper_width_franka
+    )
+
+    wrist_image = data_point["observation.images.cam_wrist"].permute(1, 2, 0).cpu().numpy()
+
+    return {
+        "dataset_idx": dataset_idx,
+        # "frame_index": frame_index,  # (dataset_idx - from_idx)
+        "eef_pose_vec": eef_pose_vec,
+        "eef_4_points": eef_4_points,
+        "scene_pcd": all_pcd_in_robot,
+        "rgb_values_fpsed": rgb_value_fpsed,
+        "rgb_features_fpsed": rgb_features_fpsed,
+        "goal_4_points": goal_4_points,
+        "wrist_image": wrist_image,
+    }
+    
+def _save_step_npz(
+    t_idx: int,
+    traj_dir: str,
+    traj_eef_pose,
+    traj_scene_pcd,
+    action_arrays,
+    traj_gripper_pcd,
+    traj_goal_gripper_pcd,
+    traj_fpsed_rgb_values,
+    store_dino: bool,
+    traj_fpsed_rgb_features=None,
+    traj_wrist_images=None,
+):
+    step_save_path = os.path.join(traj_dir, f"{t_idx}.npz")
+
+    data = {
+        "state": traj_eef_pose[t_idx][None, :],
+        "point_cloud": traj_scene_pcd[t_idx][None, :],
+        "action": action_arrays[t_idx][None, :],
+        "gripper_pcd": traj_gripper_pcd[t_idx][None, :],
+        "goal_gripper_pcd": traj_goal_gripper_pcd[t_idx][None, :],
+        "rgb_values": (traj_fpsed_rgb_values[t_idx][None, :].astype(np.float32) / 255.0),
+    }
+    if store_dino:
+        data["rgb_features"] = traj_fpsed_rgb_features[t_idx][None, :]
+    if traj_wrist_images is not None:
+        data["wrist_image"] = traj_wrist_images[t_idx][None, :]
+
+    # Atomic-ish write: write to temp then rename (optional but safer)
+    tmp_path = step_save_path # + ".tmp"
+    np.savez_compressed(tmp_path, **data)
+    # os.replace(tmp_path, step_save_path)
+
+    return t_idx
+
 
 # Let's take this one for this example
 # repo_id = "lerobot/aloha_mobile_cabinet"
@@ -426,6 +618,7 @@ repo_id = "sriramsk/plate_table_multiview_20251113_ss_hg"
 repo_id = "sriramsk/fold_towel_MV_20251210_ss_hg"
 repo_id = "sriramsk/fold_onesie_MV_20251210_ss_hg"
 repo_id = "sriramsk/fold_onesie_MV_20260119_ss_hg"
+repo_id = "sriramsk/hammer_bluePin_MV_20260119_ss_hg_short"
 # We can have a look and fetch its metadata to know more about it:
 ds_meta = LeRobotDatasetMetadata(repo_id)
 
@@ -472,8 +665,17 @@ num_points = 4500
 max_depth = 1.5
 store_dino = True
 
-# for traj_idx in range(dataset.num_episodes):
-for traj_idx in range(1):
+depth_keys = [
+    "observation.images.cam_azure_kinect_front.transformed_depth",
+    "observation.images.cam_azure_kinect_back.transformed_depth",
+]
+color_keys = [
+    "observation.images.cam_azure_kinect_front.color",
+    "observation.images.cam_azure_kinect_back.color",
+]
+
+for traj_idx in range(dataset.num_episodes):
+# for traj_idx in range(1):
     
     traj_eef_pose = []
     traj_gripper_pcd = []
@@ -487,294 +689,106 @@ for traj_idx in range(1):
     traj_len = to_idx - from_idx
     print(f"Trajectory {traj_idx} has length {traj_len} from {from_idx} to {to_idx}")
 
-    ### TODO: add DINO-V2 features for the RGB images and downsample them to the same fpsed pcd    
-    for t_idx in range(from_idx, to_idx):
-        
-        print(f"Processing traj {traj_idx}, frame_idx {t_idx - from_idx} / {traj_len}")
-        
-        dataset_idx = t_idx
-        data_point = dataset[dataset_idx]
-        
-        right_eef_pose = data_point['observation.right_eef_pose']#.cpu().numpy()  # (state_dim,)     
-        eef_pos, eef_rot_6d, eef_gripper_width, eef_pos_robot_base, eef_rot_matrix_robot_base, eef_rot_6d_robot_base, eef_gripper_width_franka = get_gripper_4_points_from_sriram_data(right_eef_pose)
-        
-        traj_eef_pose.append(np.array([*eef_pos_robot_base, *eef_rot_6d_robot_base, *eef_gripper_width_franka]))
-        
-        ### NOTE: perform the conversion from the gripper pose to the gripper 4 points
-        beg = time.time()
-        eef_4_points = get_4_points_from_gripper_pos_orient(eef_pos_robot_base, eef_rot_matrix_robot_base, eef_gripper_width_franka)
-        end = time.time()
-        # print("time for getting 4 points from gripper pose: ", end - beg)
-        traj_gripper_pcd.append(eef_4_points)
-    
-        ### NOTE: get the scene point cloud from the depth image
-        beg = time.time()
-        depth_keys = ["observation.images.cam_azure_kinect_front.transformed_depth", "observation.images.cam_azure_kinect_back.transformed_depth"]
-        all_cam_depth_images = []
-        for depth_key in depth_keys:
-            depth = Image.fromarray(data_point[depth_key].numpy()[0])
-            ### scale the depth image
-            depth = np.asarray(depth_preprocess(depth))
-            all_cam_depth_images.append(depth)
-        
-        color_keys = ["observation.images.cam_azure_kinect_front.color", "observation.images.cam_azure_kinect_back.color"]
-        all_cam_color_images = []
-        for color_key in color_keys:
-            rgb = (data_point[color_key].permute(1, 2, 0).numpy() * 255).astype(
-                np.uint8
-            )
-            rgb = Image.fromarray(rgb)
-            rgb = np.asarray(rgb_preprocess(rgb))
-            # plt.imshow(rgb)
-            # plt.show()
-            all_cam_color_images.append(rgb)
-            
-        ### NOTE: encode dino-v2 features for the rgb images here
-        all_rgb_flattend = [rgb.reshape(-1, 3) for rgb in all_cam_color_images]
-        all_rgb_flattend = np.concatenate(all_rgb_flattend, axis=0)  # (num_cams * H * W, 3)
-        if store_dino:
-            all_rgb_features_flattened = []
-            for rgb in all_cam_color_images:
-                rgb_features = compute_dino_v2_features(rgb, target_shape=target_shape)
-                all_rgb_features_flattened.append(rgb_features)    
-            all_rgb_features_flattened = np.concatenate(all_rgb_features_flattened, axis=0)  # (num_cams * H * W, feat_dim)
-            
-        # import pdb; pdb.set_trace()    
-        # %matplotlib inline
-        import matplotlib.pyplot as plt
-        # plt.imshow(all_cam_depth_images[0])
-        # plt.show()
+    NUM_WORKERS = 20 # try 2-8 depending on CPU/GPU + IO
 
-        # %matplotlib widget
-        from matplotlib import pyplot as plt
-        all_pcd_in_world = []
-        depth_masks = []
-        for (depth, intrisincs, extrinsics) in zip(all_cam_depth_images, all_intrinsics, all_extrinsics):
-            pcd_in_camera, depth_mask = get_scene_pcd_cam_frame(
-                depth, intrisincs, None, max_depth
-            )
+    # -------------------- usage inside your traj loop --------------------
+    traj_len = to_idx - from_idx
+    results = [None] * traj_len
 
-            depth_masks.append(depth_mask.flatten())
-            
-            pcd_in_world = transform_to_world_frame(pcd_in_camera, extrinsics)
-            x = pcd_in_world
+    beg = time.time()
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as ex:
+        futs = {
+            ex.submit(
+                process_one_frame,
+                dataset,
+                t_idx,
+                traj_idx,
+                from_idx,
+                all_intrinsics,
+                all_extrinsics,
+                max_depth,
+                num_points,
+                store_dino,
+                target_shape,
+            ): t_idx
+            for t_idx in range(from_idx, to_idx)
+        }
 
-            ### use open3d to visualize the point cloud
-            # x = pcd_in_world[pcd_in_world[:, 1] < 0.6]
-            # x = x[x[:, 1] > -0.4]
-            
-            x_in_robot_base = transform_from_table_center_to_robot_base(x)
-            
-            # fig, axes = plt.subplots(1, 2, subplot_kw={'projection': '3d'})
-            # ### Plot in table coordinate
-            # ax = axes[0]
-            # ax.scatter(x[:, 0], x[:, 1], x[:, 2], s=1, color='blue')
-            # ax.scatter([0], [0], [0], s=50, color='red')
-            # ax.scatter([eef_pos[0]], [eef_pos[1]], [eef_pos[2]], s=50, color='red')
-            # ax.set_xlabel("x")
-            # ax.set_ylabel("y")
-            # ax.set_zlabel("z")
-            
-            # ### plot in robot base coordinate
-            # ax = axes[1]
-            # ax.scatter(x_in_robot_base[:, 0], x_in_robot_base[:, 1], x_in_robot_base[:, 2], s=1, color='blue')
-            # ax.scatter([0], [0], [0], s=50, color='red')
-            # ax.scatter([eef_pos_robot_base[0]], [eef_pos_robot_base[1]], [eef_pos_robot_base[2]], s=50, color='red')
-            # ax.scatter(eef_4_points[:, 0], eef_4_points[:, 1], eef_4_points[:, 2], s=10, color='green')
-            # ax.set_xlabel("x")
-            # ax.set_ylabel("y")
-            # ax.set_zlabel("z")
-            
-            # plt.show()
-        
-            # import pdb; pdb.set_trace()
-            all_pcd_in_world.append(x_in_robot_base)
-        
-        all_pcd_in_world = np.concatenate(all_pcd_in_world, axis=0)  # (num_cams * num_points, 3)
-        depth_masks = np.concatenate(depth_masks, axis=0)  # (num_cams * H * W,)
-        if store_dino:
-            all_rgb_features_flattened = all_rgb_features_flattened[depth_masks]
-        all_rgb_flattend = all_rgb_flattend[depth_masks]
+        for fut in as_completed(futs):
+            t_idx = futs[fut]
+            out = fut.result()
+            results[t_idx - from_idx] = out
 
-
-        # pcd1 = o3d.geometry.PointCloud()
-        # pcd1.points = o3d.utility.Vector3dVector(all_pcd_in_world)
-        # pcd1.paint_uniform_color([1, 0, 0])   # Red
-
-        # geometries = [pcd1]
-
-        # # --- Create spheres for pcd2 ---
-        # sphere_radius = 0.01
-        # sphere_resolution = 10
-
-        # for p in eef_4_points:
-        #     sphere = o3d.geometry.TriangleMesh.create_sphere(
-        #         radius=sphere_radius, 
-        #         resolution=sphere_resolution
-        #     )
-        #     sphere.paint_uniform_color([0, 0, 1])  # red spheres
-        #     sphere.translate(p)                    # move sphere to point location
-        #     geometries.append(sphere)
-
-        # # Visualize
-        # o3d.visualization.draw_geometries(geometries)
-
-        
-        ### perform fps here
-        beg = time.time()
-
-        filter_idx_1 = all_pcd_in_world[:, 1] < 0.6
-        filter_idx_2 = all_pcd_in_world[:, 1] > -0.4
-        filter_idx = np.logical_and(filter_idx_1, filter_idx_2)
-        all_pcd_in_world = all_pcd_in_world[filter_idx]
-        if store_dino:
-            all_rgb_features_flattened = all_rgb_features_flattened[filter_idx]
-        all_rgb_flattend = all_rgb_flattend[filter_idx]
-
-
-        all_pcd_in_world, fps_index = fpsample_pcd(all_pcd_in_world, num_points)
-        if store_dino:
-            rgb_features_fpsed = all_rgb_features_flattened[fps_index]
-        rgb_value_fpsed = all_rgb_flattend[fps_index]  
-        end = time.time()
-        # print("time for fps of the scene pcd: ", end - beg)
-        
-        # print("all_pcd_in_world shape:", all_pcd_in_world.shape)
-        traj_scene_pcd.append(all_pcd_in_world)
-        if store_dino:
-            traj_fpsed_rgb_features.append(rgb_features_fpsed)
-        traj_fpsed_rgb_values.append(rgb_value_fpsed)
-        # import pdb; pdb.set_trace()
-        # ax = plt.subplot(projection='3d')
-        # ax.scatter(all_pcd_in_world[:, 0], all_pcd_in_world[:, 1], all_pcd_in_world[:, 2], s=1, color=rgb_value_fpsed.astype(np.float32)/255.0)
-        # plt.show()
-        
-
-        ### use open3d to visualize the colored pcd
-        # pcd = o3d.geometry.PointCloud()
-        # pcd.points = o3d.utility.Vector3dVector(all_pcd_in_world)
-        # pcd.colors = o3d.utility.Vector3dVector(rgb_value_fpsed.astype(np.float32)/255.0)
-        # o3d.visualization.draw_geometries([pcd])
-
-
-        ### NOTE: get the goal event idx, goal eef pose and convert that to the goal gripper pcd
-        episode_index = data_point["episode_index"].item()
-        assert episode_index == traj_idx
-        assert data_point["frame_index"].item() == t_idx - from_idx
-        # The next_event_idx is relative to the episode, so we calculate the absolute index
-        goal_idx = (
-            data_point["next_event_idx"] - data_point["frame_index"] + dataset_idx
-        ).item()
-        
-        goal_idx_2 = data_point['next_event_idx'].item() + from_idx
-        assert goal_idx == goal_idx_2
-
-        # print("relative first goal idx is: ", data_point["next_event_idx"] )
-        # print("first goal idx is: ", goal_idx)
-
-        # continue
-        
-        goal_data_point = dataset[goal_idx]
-        # rgb_image = Image.fromarray(goal_data_point['observation.images.cam_azure_kinect_front.color'].numpy()[0])
-        # rgb_image = np.asarray(rgb_image)
-        # %matplotlib inline
-        # import matplotlib.pyplot as plt
-        # plt.imshow(rgb_image)
-        # plt.show()
-        goal_right_eef_pose = goal_data_point['observation.right_eef_pose']  # (state_dim,)
-
-        # depth_key = "observation.images.cam_azure_kinect_front.transformed_depth"
-        # goal_depth = Image.fromarray(goal_data_point[depth_key].numpy()[0])
-        # goal_depth = np.asarray(goal_depth)
-        # goal_pcd_in_camera = get_scene_pcd_cam_frame(
-        #         goal_depth, all_intrinsics[0], num_points, max_depth
-        # )
-        # goal_pcd_in_world = transform_to_world_frame(goal_pcd_in_camera, all_extrinsics[0])
-        # ### use open3d to visualize the point cloud
-        # goal_x = goal_pcd_in_world[goal_pcd_in_world[:, 1] < 0.6]
-        # goal_x = goal_x[goal_x[:, 1] > -0.4]
-        # goal_x_in_robot_base = transform_from_table_center_to_robot_base(goal_x)
-        
-        beg = time.time()
-        goal_eef_pos, goal_eef_rot_6d, goal_eef_gripper_width, goal_eef_pos_robot_base, goal_eef_rot_matrix_robot_base, goal_eef_rot_6d_robot_base, goal_eef_gripper_width_franka =\
-            get_gripper_4_points_from_sriram_data(goal_right_eef_pose)
-        goal_4_points = get_4_points_from_gripper_pos_orient(goal_eef_pos_robot_base, goal_eef_rot_matrix_robot_base, goal_eef_gripper_width_franka)
-        traj_goal_gripper_pcd.append(goal_4_points)
-        end = time.time()
-        # print("time for getting goal gripper pcd: ", end - beg)
-        
-        # %matplotlib widget
-        # from matplotlib import pyplot as plt
-        # # plt.close("all")
-        # ax = plt.subplot(projection='3d')
-        # ax.scatter(all_pcd_in_world[:, 0], all_pcd_in_world[:, 1], all_pcd_in_world[:, 2], s=1, color='blue')
-        # ax.scatter(goal_x_in_robot_base[:, 0], goal_x_in_robot_base[:, 1], goal_x_in_robot_base[:, 2], s=1, color='blue')
-        # ax.scatter([eef_pos_robot_base[0]], [eef_pos_robot_base[1]], [eef_pos_robot_base[2]], s=50, color='red')
-        # ax.scatter(eef_4_points[:, 0], eef_4_points[:, 1], eef_4_points[:, 2], s=10, color='green')
-        # ax.scatter([goal_eef_pos_robot_base[0]], [goal_eef_pos_robot_base[1]], [goal_eef_pos_robot_base[2]], s=50, color='red')
-        # ax.scatter(goal_4_points[:, 0], goal_4_points[:, 1], goal_4_points[:, 2], s=50, color='black')
-        # ax.set_xlabel("x")
-        # ax.set_ylabel("y")
-        # ax.set_zlabel("z")
-        # plt.show()
-
-        # import pdb; pdb.set_trace()
-        
-    ### for action: check the magnitude of our dataset and make sure we have similar action magnitudes
-    ### maybe merge actions
-    # traj_eef_pose = np.stack(traj_eef_pose, axis=0)  # (traj_len, 10)
-    # all_delta_translations = traj_eef_pose[1:, :3] - traj_eef_pose[:-1, :3]  # (traj_len - 1, 3)
-    # all_delta_translations_magnitudes = np.linalg.norm(all_delta_translations, axis=1)  # (traj_len - 1,)
-    # print("mean translation delta:", np.mean(all_delta_translations_magnitudes))
-    # print("max translation delta:", np.max(all_delta_translations_magnitudes))
-    # print("min translation delta:", np.min(all_delta_translations_magnitudes))
-            
-    '''
-    for t_idx in range(traj_len):
-        step_save_dir = os.path.join(save_dir, str(t_idx) + ".pkl")
-            
-        pickle_data = {}
-        pickle_data['state'] = state_arrays[t_idx][None, :]
-        pickle_data['point_cloud'] = point_cloud_arrays[t_idx][None, :]
-        pickle_data['action'] = action_arrays[t_idx][None, :]
-        pickle_data['gripper_pcd'] = gripper_pcd_arrays[t_idx][None, :]
-        if goal_gripper_pcd is not None:
-            pickle_data['goal_gripper_pcd'] = goal_gripper_pcd[t_idx][None, :]
-        if displacement_gripper_to_object is not None:
-            pickle_data['displacement_gripper_to_object'] = displacement_gripper_to_object[t_idx][None, :]
-        if dp3_pc_list is not None:
-            pickle_data['dp3_point_cloud'] = dp3_pc_list[t_idx][None, :]
-        
-        with open(step_save_dir, 'wb') as f:
-            pickle.dump(pickle_data, f)
-    '''
+    # Rebuild your original lists in-order
+    traj_eef_pose = [r["eef_pose_vec"] for r in results]
+    traj_gripper_pcd = [r["eef_4_points"] for r in results]
+    traj_scene_pcd = [r["scene_pcd"] for r in results]
+    traj_goal_gripper_pcd = [r["goal_4_points"] for r in results]
+    traj_fpsed_rgb_values = [r["rgb_values_fpsed"] for r in results]
+    traj_fpsed_rgb_features = [r["rgb_features_fpsed"] for r in results] if store_dino else None
+    traj_wrist_images = [r["wrist_image"] for r in results]
+    cprint(f"Finished processing traj {traj_idx} in {time.time() - beg:.2f} seconds", "green")
 
     ### TODO: extract the actions
-    action_arrays, traj_scene_pcd, traj_eef_pose, traj_gripper_pcd, traj_goal_gripper_pcd, traj_fpsed_rgb_values, traj_fpsed_rgb_features = \
-        extract_actions(traj_eef_pose, traj_scene_pcd, traj_gripper_pcd, traj_goal_gripper_pcd, traj_fpsed_rgb_values, traj_fpsed_rgb_features if store_dino else None, combine_action_steps=2)
+    combine_action_steps = 1
+    action_arrays, traj_scene_pcd, traj_eef_pose, traj_gripper_pcd, traj_goal_gripper_pcd, traj_fpsed_rgb_values, traj_fpsed_rgb_features, traj_wrist_images = \
+        extract_actions(traj_eef_pose, traj_scene_pcd, traj_gripper_pcd, traj_goal_gripper_pcd, traj_fpsed_rgb_values, traj_fpsed_rgb_features if store_dino else None, 
+                        traj_wrist_images,
+                        combine_action_steps=combine_action_steps)
 
     # data_dir = "/data/yufei/lerobot/data/plate_new_rot_rgb"
     # data_dir = "/data/yufei/lerobot/data/towel_1210_rgb"
-    # data_dir = "/data/yufei/lerobot/data/onsie_1210_rgb_dino"
-    data_dir = "/data/yufei/lerobot/data/onsie_0121_rgb_dino"
+    # data_dir = "/data/yufei/lerobot/data/onesie_1210_rgb_dino"
+    # data_dir = "/data/yufei/lerobot/data/onesie_0121_rgb_dino_{}".format(combine_action_steps)
+    data_dir = "/data/yufei/lerobot/data/{}_rgb_dino_wrist_{}_crop_table".format(repo_id.split("/")[-1], combine_action_steps)
     traj_dir = os.path.join(data_dir, f"traj_{traj_idx:04d}")
     if not os.path.exists(traj_dir):
         os.makedirs(traj_dir)
 
-    for t_idx in range(len(traj_eef_pose)):
-        # step_save_dir = os.path.join(traj_dir, str(t_idx) + ".pkl")
-        step_save_dir = os.path.join(traj_dir, str(t_idx) + ".npz")
-        pickle_data = {}
-        pickle_data['state'] = traj_eef_pose[t_idx][None, :]
-        pickle_data['point_cloud'] = traj_scene_pcd[t_idx][None, :]
-        pickle_data['action'] = action_arrays[t_idx][None, :]
-        pickle_data['gripper_pcd'] = traj_gripper_pcd[t_idx][None, :]
-        pickle_data['goal_gripper_pcd'] = traj_goal_gripper_pcd[t_idx][None, :]
-        pickle_data['rgb_values'] = traj_fpsed_rgb_values[t_idx][None, :].astype(np.float32) / 255.0
-        if store_dino:
-            pickle_data['rgb_features'] = traj_fpsed_rgb_features[t_idx][None, :]
+    # for t_idx in range(len(traj_eef_pose)):
+    #     # step_save_dir = os.path.join(traj_dir, str(t_idx) + ".pkl")
+    #     step_save_dir = os.path.join(traj_dir, str(t_idx) + ".npz")
+    #     pickle_data = {}
+    #     pickle_data['state'] = traj_eef_pose[t_idx][None, :]
+    #     pickle_data['point_cloud'] = traj_scene_pcd[t_idx][None, :]
+    #     pickle_data['action'] = action_arrays[t_idx][None, :]
+    #     pickle_data['gripper_pcd'] = traj_gripper_pcd[t_idx][None, :]
+    #     pickle_data['goal_gripper_pcd'] = traj_goal_gripper_pcd[t_idx][None, :]
+    #     pickle_data['rgb_values'] = traj_fpsed_rgb_values[t_idx][None, :].astype(np.float32) / 255.0
+    #     if store_dino:
+    #         pickle_data['rgb_features'] = traj_fpsed_rgb_features[t_idx][None, :]
         
-        # with open(step_save_dir, 'wb') as f:
-        #     pickle.dump(pickle_data, f)
+    #     # with open(step_save_dir, 'wb') as f:
+    #     #     pickle.dump(pickle_data, f)
         
-        np.savez_compressed(step_save_dir, **pickle_data)
+    #     np.savez_compressed(step_save_dir, **pickle_data)
+    
+    # ---- parallel save ----
+    
+    num_steps = len(traj_eef_pose)
+    SAVE_WORKERS = 20  # adjust based on your IO speed and CPU
+    beg = time.time()
+    with ThreadPoolExecutor(max_workers=SAVE_WORKERS) as ex:
+        futs = [
+            ex.submit(
+                _save_step_npz,
+                t_idx,
+                traj_dir,
+                traj_eef_pose,
+                traj_scene_pcd,
+                action_arrays,
+                traj_gripper_pcd,
+                traj_goal_gripper_pcd,
+                traj_fpsed_rgb_values,
+                store_dino,
+                traj_fpsed_rgb_features if store_dino else None,
+                traj_wrist_images,
+            )
+            for t_idx in range(num_steps)
+        ]
+
+        for fut in as_completed(futs):
+            t_idx_done = fut.result()  # raises if any error
+            # (optional) print progress occasionally
+            # print("saved", t_idx_done)
+    cprint(f"Finished saving traj {traj_idx} in {time.time() - beg:.2f} seconds", "blue")
