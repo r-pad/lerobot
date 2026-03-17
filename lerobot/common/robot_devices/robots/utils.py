@@ -17,6 +17,7 @@ from typing import Protocol
 from lerobot.common.robot_devices.robots.configs import (
     AlohaRobotConfig,
     DroidRobotConfig,
+    DummyRobotConfig,
     KochBimanualRobotConfig,
     KochRobotConfig,
     LeKiwiRobotConfig,
@@ -50,7 +51,9 @@ class Robot(Protocol):
 
 
 def make_robot_config(robot_type: str, **kwargs) -> RobotConfig:
-    if robot_type == "aloha":
+    if robot_type == "dummy":
+        return DummyRobotConfig(**kwargs)
+    elif robot_type == "aloha":
         return AlohaRobotConfig(**kwargs)
     elif robot_type == "koch":
         return KochRobotConfig(**kwargs)
@@ -73,7 +76,11 @@ def make_robot_config(robot_type: str, **kwargs) -> RobotConfig:
 
 
 def make_robot_from_config(config: RobotConfig):
-    if isinstance(config, DroidRobotConfig):
+    if isinstance(config, DummyRobotConfig):
+        from lerobot.common.robot_devices.robots.dummy import DummyRobot
+
+        return DummyRobot(config)
+    elif isinstance(config, DroidRobotConfig):
         from lerobot.common.robot_devices.robots.droid import DroidRobot
 
         return DroidRobot(config)

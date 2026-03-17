@@ -572,9 +572,9 @@ class DroidRobotConfig(RobotConfig):
         0 * 3.141592653589793 / 2,
         2 * 3.141592653589793 / 2,
         4 * 3.141592653589793 / 2,
-        8 * 3.141592653589793 / 2,
         4 * 3.141592653589793 / 2,
         4 * 3.141592653589793 / 2,
+        0 * 3.141592653589793 / 2,
     )
     gello_joint_signs: tuple[int, ...] = (1, 1, 1, 1, 1, -1, 1)
     gello_gripper_joint_id: int = 8
@@ -612,6 +612,14 @@ class DroidRobotConfig(RobotConfig):
 
     # save end-effector pose info
     use_eef: bool = True
+    mock: bool = False
+
+
+@RobotConfig.register_subclass("dummy")
+@dataclass
+class DummyRobotConfig(RobotConfig):
+    cameras: dict[str, CameraConfig] = field(default_factory=lambda: {})
+    use_eef: bool = False
     mock: bool = False
 
 
