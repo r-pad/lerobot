@@ -644,6 +644,7 @@ class FrankaLeapRobotConfig(RobotConfig):
     max_safe_joint_delta: float = 0.3
 
     # LEAP hand + Manus glove config
+    geort_checkpoint_root: str = "/home/leap/Desktop/GeoRT/checkpoint"
     geort_ckpt_tag: str = "sriram_1"
 
     # save end-effector pose info
