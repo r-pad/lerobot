@@ -171,7 +171,15 @@ pip = ">=25.1.1,<26"
 gcc = "11.*"
 gxx = "11.*"
 cuda-toolkit = "12.4.*"
-ffmpeg = ">=6,<8"
+ffmpeg = ">=7,<8"
+pkg-config = "*"
+cython = ">=3"
+
+[tool.pixi.activation]
+env = { PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig" }
+
+[tool.pixi.pypi-options]
+no-build-isolation = ["av"]
 
 [tool.pixi.pypi-dependencies]
 lerobot = { path = ".", editable = true }

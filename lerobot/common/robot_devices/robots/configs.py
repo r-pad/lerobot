@@ -582,9 +582,9 @@ class DroidRobotConfig(RobotConfig):
     gello_gripper_close_degrees: int = 152
 
     # Deoxys / Franka config
-    deoxys_general_cfg_file: str = "lerobot/common/robot_devices/robots/droid_configs/charmander.yml"
+    deoxys_general_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/charmander_droid.yml"
     deoxys_controller_type: str = "JOINT_IMPEDANCE"
-    deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/droid_configs/joint-impedance-controller.yml"
+    deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/joint-impedance-controller.yml"
 
     # Teleop mapping: scale + sign for delta mapping from GELLO to Franka
     mapping_coefficients: tuple[float, ...] = (0.8, -0.8, 0.8, 0.8, 0.8, 0.8, 0.8)
@@ -612,6 +612,54 @@ class DroidRobotConfig(RobotConfig):
 
     # save end-effector pose info
     use_eef: bool = True
+    mock: bool = False
+
+
+@RobotConfig.register_subclass("franka_leap")
+@dataclass
+class FrankaLeapRobotConfig(RobotConfig):
+    # GELLO leader arm config
+    gello_port: str | None = None  # Auto-detected from /dev/serial/by-id/* if None
+    gello_joint_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
+    gello_joint_offsets: tuple[float, ...] = (
+        4 * 3.141592653589793 / 2,
+        0 * 3.141592653589793 / 2,
+        2 * 3.141592653589793 / 2,
+        4 * 3.141592653589793 / 2,
+        4 * 3.141592653589793 / 2,
+        4 * 3.141592653589793 / 2,
+        0 * 3.141592653589793 / 2,
+    )
+    gello_joint_signs: tuple[int, ...] = (1, 1, 1, 1, 1, -1, 1)
+    gello_gripper_joint_id: int = 8
+    gello_gripper_open_degrees: int = 195
+    gello_gripper_close_degrees: int = 152
+
+    # Deoxys / Franka config
+    deoxys_general_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/charmander_leap.yml"
+    deoxys_controller_type: str = "JOINT_IMPEDANCE"
+    deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/joint-impedance-controller.yml"
+
+    # Teleop mapping
+    max_safe_joint_delta: float = 0.3
+
+    # LEAP hand + Manus glove config
+    geort_ckpt_tag: str = "sriram_1"
+
+    # save end-effector pose info
+    use_eef: bool = True
+
+    cameras: dict[str, CameraConfig] = field(
+        default_factory=lambda: {
+            "cam_main": AzureKinectCameraConfig(
+                device_id=0,
+                fps=30,
+                width=1280,
+                height=720,
+            ),
+        }
+    )
+
     mock: bool = False
 
 
