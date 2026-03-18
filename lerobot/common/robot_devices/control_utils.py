@@ -49,6 +49,12 @@ def add_eef_pose(robot, real_joints):
         rot_6d = transforms.matrix_to_rotation_6d(torch.from_numpy(eef_rot[None])).squeeze()
         trans = torch.from_numpy(eef_pos.squeeze())
         eef_pose = torch.cat([rot_6d, trans, real_joints[-1:]], axis=0).float()
+    elif robot.robot_type == "franka_leap":
+        eef_rot, eef_pos = robot.robot_interface.last_eef_rot_and_pos
+        rot_6d = transforms.matrix_to_rotation_6d(torch.from_numpy(eef_rot[None])).squeeze()
+        trans = torch.from_numpy(eef_pos.squeeze())
+        # 6 rot + 3 trans + 16 hand joints
+        eef_pose = torch.cat([rot_6d, trans, real_joints[7:]], axis=0).float()
     elif robot.robot_type == "dummy":
         eef_pose = torch.zeros(10, dtype=torch.float32)
     else:
@@ -75,7 +81,7 @@ def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, f
     log_dt("dt", dt_s)
 
     # TODO(aliberts): move robot-specific logs logic in robot.print_logs()
-    if robot.robot_type not in ["stretch", "droid", "dummy"]:
+    if robot.robot_type not in ["stretch", "droid", "dummy", "franka_leap"]:
         for name in robot.leader_arms:
             key = f"read_leader_{name}_pos_dt_s"
             if key in robot.logs:
