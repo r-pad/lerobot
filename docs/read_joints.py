@@ -1,26 +1,33 @@
 """Read and print joint positions from both GELLO and Franka in a loop.
 
 Usage:
-    python docs/read_joints.py
+    python docs/read_joints.py --config lerobot/common/robot_devices/robots/franka_configs/charmander_droid.yml
 
 Use this to verify that GELLO joint offsets are correct. When the GELLO and
 Franka are physically in the same pose, their printed joint values should match.
 If they don't, adjust gello_joint_offsets and gello_joint_signs in DroidRobotConfig.
 """
 
+import argparse
 import glob
 import time
 
 import numpy as np
 
+DEFAULT_CONFIG = "lerobot/common/robot_devices/robots/franka_configs/charmander_droid.yml"
+
 
 def main():
+    parser = argparse.ArgumentParser(description="Read GELLO and Franka joint positions.")
+    parser.add_argument("--config", type=str, default=DEFAULT_CONFIG, help="Path to deoxys YAML config file")
+    args = parser.parse_args()
+
     from deoxys.franka_interface import FrankaInterface
     from gello.robots.dynamixel import DynamixelRobot
 
     # --- Franka setup ---
     interface = FrankaInterface(
-        "lerobot/common/robot_devices/robots/droid_configs/charmander.yml",
+        args.config,
         use_visualizer=False,
     )
     print("Waiting for Franka state buffer...")
