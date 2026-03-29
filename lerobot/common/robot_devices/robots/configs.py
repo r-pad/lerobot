@@ -567,6 +567,7 @@ class DroidRobotConfig(RobotConfig):
     # GELLO leader arm config
     gello_port: str | None = None  # Auto-detected from /dev/serial/by-id/* if None
     gello_joint_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
+    # HACK: HARDCODED FOR A SPECIFIC GELLO
     gello_joint_offsets: tuple[float, ...] = (
         4 * 3.141592653589793 / 2,
         0 * 3.141592653589793 / 2,
@@ -621,12 +622,13 @@ class FrankaLeapRobotConfig(RobotConfig):
     # GELLO leader arm config
     gello_port: str | None = None  # Auto-detected from /dev/serial/by-id/* if None
     gello_joint_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
+    # HACK: HARDCODED FOR A SPECIFIC GELLO
     gello_joint_offsets: tuple[float, ...] = (
         4 * 3.141592653589793 / 2,
         0 * 3.141592653589793 / 2,
         2 * 3.141592653589793 / 2,
-        4 * 3.141592653589793 / 2,
-        4 * 3.141592653589793 / 2,
+        0 * 3.141592653589793 / 2,
+        0 * 3.141592653589793 / 2,
         4 * 3.141592653589793 / 2,
         0 * 3.141592653589793 / 2,
     )
