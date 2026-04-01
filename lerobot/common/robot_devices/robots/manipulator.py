@@ -307,16 +307,18 @@ class ManipulatorRobot:
             else:
                 camera.connect()
 
-        # Phase 2: Start Azure Kinect cameras in parallel
+        # Phase 2: Start Azure Kinect cameras (subordinates must start before master for wired sync)
         if len(azure_kinect_cameras) > 0:
-            def start_camera(cam):
-                cam.start()
+            subordinates = [cam for cam in azure_kinect_cameras if cam.wired_sync_mode == "subordinate"]
+            masters = [cam for cam in azure_kinect_cameras if cam.wired_sync_mode == "master"]
+            standalone = [cam for cam in azure_kinect_cameras if cam.wired_sync_mode is None]
 
-            threads = [Thread(target=start_camera, args=(cam,)) for cam in azure_kinect_cameras]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
+            for cam in subordinates:
+                cam.start()
+            for cam in masters:
+                cam.start()
+            for cam in standalone:
+                cam.start()
 
         self.is_connected = True
 

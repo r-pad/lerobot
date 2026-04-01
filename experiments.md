@@ -22,6 +22,11 @@ Multiview (DROID):
 python lerobot/scripts/control_robot.py --robot.type=droid --robot.cameras='{"cam_azure_kinect_left": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "zed", "serial_number": "10296178", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --control.type=teleoperate --control.display_data=true
 ```
 
+Multiview (Franka LEAP):
+```py
+python lerobot/scripts/control_robot.py --robot.type=franka_leap --robot.cameras='{"cam_azure_kinect_front": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_side": {"type": "azurekinect", "device_id": 2, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}}' --control.type=teleoperate --control.display_data=true
+```
+
 Need to be careful when setting up multiview, various things to keep in mind:
 - Check which camera is master/subordinate in the real world and set `wired_sync_mode` accordingly
 - Usb 10gb usb 3.0 ports and make sure the cameras are spread across different usb controllers (different ports on the outside might correspond to the same internal controller, check `lsusb -t`)
@@ -668,7 +673,11 @@ HF_HOME="/scratch/sskrishn/lerobot" nohup python lerobot/scripts/train.py --data
 python lerobot/scripts/control_robot.py --robot.type=droid --control.type=record --control.fps=15 --control.single_task="Move the red mug." --control.repo_id=sriramsk/eval_move_red_bug_20260220 --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect_left": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "zed", "serial_number": "10296178", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' --robot.use_eef=true --control.push_to_hub=false --control.policy.path=outputs/train/diffPo_droid_debug/checkpoints/last/pretrained_model/ --control.display_data=true --control.episode_time_s=120
 ```
 
+### Franka-LEAP
 
+```py
+python lerobot/scripts/control_robot.py --robot.type=franka_leap --control.type=record --control.fps=30 --control.single_task="Grasp the mug." --control.repo_id=YingYuan0414/debug_dataset --control.num_episodes=10 --control.reset_time_s=5 --control.warmup_time_s=3 --robot.cameras='{"cam_azure_kinect_front": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_side": {"type": "azurekinect", "device_id": 2, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}}' --robot.use_eef=true --control.push_to_hub=false --control.display_data=true --control.reset_time_s=5 --control.warmup_time_s=3 --control.num_image_writer_processes=4
+```
 
 ## Rebuttal
 ### Non-GC
