@@ -453,15 +453,21 @@ def process_one_frame(
         print(f"Processing traj {traj_idx}, dataset idx {dataset_idx}")
 
     wrist_image = data_point["observation.images.cam_wrist"].permute(1, 2, 0).cpu().numpy()
+    rgb_image_front = data_point["observation.images.cam_azure_kinect_front.color"].permute(1, 2, 0).cpu().numpy()
+    rgb_image_back = data_point["observation.images.cam_azure_kinect_back.color"].permute(1, 2, 0).cpu().numpy()
 
     return {
         "wrist_image": wrist_image,
+        "rgb_image_front": rgb_image_front,
+        "rgb_image_back": rgb_image_back,
     }
     
 def _save_step_npz(
     t_idx: int,
     traj_dir: str,
     traj_wrist_images,
+    traj_rgb_images_front,
+    traj_rgb_images_back,
 ):
     step_save_path = os.path.join(traj_dir, f"{t_idx}.npz")
     ### first read all the data from step_save_path
@@ -489,6 +495,8 @@ def _save_step_npz(
         data["rgb_features"] = traj_fpsed_rgb_features
         
     data['wrist_image'] = traj_wrist_images[t_idx][None, :, :, :]
+    data['rgb_image_front'] = traj_rgb_images_front[t_idx][None, :, :, :]
+    data['rgb_image_back'] = traj_rgb_images_back[t_idx][None, :, :, :]
 
     # Atomic-ish write: write to temp then rename (optional but safer)
     tmp_path = step_save_path # + ".tmp"
@@ -569,6 +577,8 @@ for traj_idx in range(dataset.num_episodes):
     traj_fpsed_rgb_features = []
     traj_fpsed_rgb_values = []
     traj_wrist_images = []
+    traj_rgb_images_front = []
+    traj_rgb_images_back = []
     
     from_idx = dataset.episode_data_index["from"][traj_idx].item()
     to_idx = dataset.episode_data_index["to"][traj_idx].item()
@@ -607,8 +617,9 @@ for traj_idx in range(dataset.num_episodes):
 
     # Rebuild your original lists in-order
     traj_wrist_images = [r["wrist_image"] for r in results]
+    traj_rgb_images_front = [r["rgb_image_front"] for r in results]
+    traj_rgb_images_back = [r["rgb_image_back"] for r in results]
     cprint(f"Finished processing traj {traj_idx} in {time.time() - beg:.2f} seconds", "green")
-
 
     # data_dir = "/data/yufei/lerobot/data/plate_new_rot_rgb"
     # data_dir = "/data/yufei/lerobot/data/towel_1210_rgb"
@@ -628,6 +639,8 @@ for traj_idx in range(dataset.num_episodes):
     
     SAVE_WORKERS = 20  # adjust based on your IO speed and CPU
     beg = time.time()
+    
+    
     with ThreadPoolExecutor(max_workers=SAVE_WORKERS) as ex:
         futs = [
             ex.submit(
@@ -635,6 +648,8 @@ for traj_idx in range(dataset.num_episodes):
                 t_idx,
                 traj_dir,
                 traj_wrist_images,
+                traj_rgb_images_front,
+                traj_rgb_images_back,
             )
             for t_idx in range(num_steps)
         ]

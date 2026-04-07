@@ -88,6 +88,18 @@ class RecordControlConfig(ControlConfig):
     # Resume recording on an existing dataset.
     resume: bool = False
 
+    # pi05 / OpenPI: remote policy server (e.g. `uv run scripts/serve_policy.py`) over WebSocket.
+    # When True, `record()` uses lerobot.common.robot_devices.openpi_websocket instead of local HL/LL policies.
+    openpi_websocket: bool = False
+    openpi_host: str = "127.0.0.1"
+    openpi_port: int = 8000
+    openpi_replan_steps: int = 7
+    openpi_resize_size: int = 224
+    openpi_base_image_key: str = "observation.images.cam_azure_kinect_front.color"
+    openpi_wrist_image_key: str = "observation.images.cam_wrist"
+    openpi_gripper_delta_scale: float = 1.0
+    openpi_api_key: str | None = None
+
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
         policy_path = parser.get_path_arg("control.policy")

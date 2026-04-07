@@ -189,7 +189,7 @@ def get_dinov2_image_embedding(image, dinov2=None, device="cuda"):
 
     return resized_features.squeeze().permute(1, 2, 0).cpu().numpy()
 
-def compute_dino_v2_features(rgb, target_shape=224):
+def compute_dino_v2_features(rgb, target_shape=224, device="cuda"):
     # pca_n_components = 256
     rgb_embed = get_dinov2_image_embedding(
         Image.fromarray(rgb), dinov2=dinov2, device="cuda"
@@ -205,6 +205,139 @@ def compute_dino_v2_features(rgb, target_shape=224):
     
     return rgb_embed.reshape(-1, rgb_embed.shape[2])  # (H*W, feat_dim)
 
+
+def _is_numpy_image(x):
+    return isinstance(x, np.ndarray) and x.ndim == 3 and x.shape[2] == 3
+
+
+def _to_pil_image(img):
+    if isinstance(img, Image.Image):
+        return img
+    elif _is_numpy_image(img):
+        if img.dtype != np.uint8:
+            # convert safely to uint8 if needed
+            img = np.clip(img, 0, 255).astype(np.uint8)
+        return Image.fromarray(img)
+    else:
+        raise TypeError(
+            f"Expected PIL.Image.Image or RGB numpy array [H, W, 3], got {type(img)}"
+        )
+
+
+def _normalize_input(images):
+    """
+    Normalize input to a list of PIL images and remember whether the input was single.
+    """
+    if isinstance(images, (Image.Image, np.ndarray)):
+        return [_to_pil_image(images)], True
+
+    if isinstance(images, (list, tuple)):
+        if len(images) == 0:
+            raise ValueError("Input list is empty.")
+        pil_images = [_to_pil_image(img) for img in images]
+        return pil_images, False
+
+    raise TypeError(
+        "Input must be a PIL image, numpy RGB image, or a list/tuple of them."
+    )
+
+
+def extract_dinov2_features(
+    images,
+    device="cuda",
+    target_shape=224,
+    flatten=False,
+    return_numpy=True,
+):
+    """
+    Unified API for extracting DINOv2 dense image features.
+
+    Args:
+        images:
+            - single PIL.Image.Image
+            - single numpy RGB image [H, W, 3]
+            - list of PIL images
+            - list of numpy RGB images
+        dinov2:
+            Preloaded DINOv2 model. If None, loads one.
+        device:
+            e.g. "cuda" or "cpu"
+        target_shape:
+            Resize + center crop target resolution.
+        flatten:
+            If False:
+                returns dense feature maps
+                single input  -> [H, W, C]
+                batch input   -> [B, H, W, C]
+            If True:
+                returns flattened spatial features
+                single input  -> [H*W, C]
+                batch input   -> [B, H*W, C]
+        return_numpy:
+            If True, returns numpy arrays.
+            If False, returns torch tensors.
+
+    Returns:
+        Features in either single-image or batched format depending on input.
+    """
+    pil_images, is_single = _normalize_input(images)
+
+    preprocess = transforms.Compose(
+        [
+            transforms.Resize(
+                target_shape, interpolation=transforms.InterpolationMode.BICUBIC
+            ),
+            transforms.CenterCrop(target_shape),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225),
+            ),
+        ]
+    )
+
+    # [B, 3, H, W]
+    inputs = torch.stack([preprocess(img) for img in pil_images], dim=0).to(device)
+
+    with torch.no_grad():
+        outputs = dinov2.forward_features(inputs)
+
+    # [B, num_patches, C]
+    patch_features = outputs["x_norm_patchtokens"]
+    B, num_patches, feat_dim = patch_features.shape
+
+    h = w = int(num_patches ** 0.5)
+    if h * w != num_patches:
+        raise ValueError(f"num_patches={num_patches} is not a perfect square.")
+
+    # [B, h, w, C]
+    patch_features = patch_features.reshape(B, h, w, feat_dim)
+
+    # [B, C, h, w]
+    patch_features = patch_features.permute(0, 3, 1, 2)
+
+    # [B, C, target_shape, target_shape]
+    resized_features = F.interpolate(
+        patch_features,
+        size=(target_shape, target_shape),
+        mode="bilinear",
+        align_corners=False,
+    )
+
+    # [B, H, W, C]
+    resized_features = resized_features.permute(0, 2, 3, 1)
+
+    if flatten:
+        # [B, H*W, C]
+        resized_features = resized_features.reshape(B, target_shape * target_shape, feat_dim)
+
+    if return_numpy:
+        resized_features = resized_features.cpu().numpy()
+
+    if is_single:
+        return resized_features[0]
+
+    return resized_features
 
 
 target_shape = 224
@@ -785,9 +918,27 @@ def compute_pcd(all_cam_depth_images=None, all_pcds=None, all_intrinsics=None, a
     all_dino_features = None
     # import pdb; pdb.set_trace()
     if use_dino and all_cam_rgb_images is not None:
-        all_dino_features = [compute_dino_v2_features(rgb) for rgb in all_cam_rgb_images]
-        all_dino_features = np.concatenate(all_dino_features, axis=0)  # (num_cams * H * W, feat_dim)
+        beg = time.time()
+        # all_dino_features = [compute_dino_v2_features(rgb, device="cuda") for rgb in all_cam_rgb_images]
+        # all_dino_features = np.concatenate(all_dino_features, axis=0)  # (num_cams * H * W, feat_dim)
+        # end = time.time()
+        # cprint(f"compute dino features non-batched time: {end - beg} seconds", "blue")
+
+        beg = time.time()
+        all_dino_features_2 = extract_dinov2_features(all_cam_rgb_images, device="cuda", flatten=True, return_numpy=True)
+        feature_dim = all_dino_features_2.shape[-1]
+        all_dino_features_2 = all_dino_features_2.reshape(-1, feature_dim)
+        all_dino_features = all_dino_features_2
+        end = time.time()
+        # diff = np.abs(all_dino_features - all_dino_features_2).mean()
+        # cprint(f"dino features diff: {diff}", "blue")
+        cprint(f"compute dino features batched time: {end - beg} seconds", "blue")
+
+        # import pdb; pdb.set_trace()
+        # assert np.allclose(all_dino_features, all_dino_features_2)
+
         all_dino_features = all_dino_features[depth_masks]
+    end = time.time()
     
     all_pcd_in_world = np.concatenate(all_pcd_in_world, axis=0)  # (num_cams * num_points, 3)
     all_pcd_in_table_center = np.concatenate(all_pcd_in_table_center, axis=0)
@@ -838,7 +989,11 @@ def compute_pcd(all_cam_depth_images=None, all_pcds=None, all_intrinsics=None, a
     if use_dino and all_cam_rgb_images is not None:
         all_dino_features = all_dino_features[filter_idx]
     
+    beg = time.time()
     all_pcd_in_world, fps_idx = fpsample_pcd(all_pcd_in_world, num_points)
+    end = time.time()
+    cprint(f"fpsample pcd time: {end - beg} seconds", "blue")
+    
     all_pcd_in_table_center = all_pcd_in_table_center[fps_idx]
     if all_cam_rgb_images is not None:
         ### TODO: check the rgb data dtype here
@@ -901,4 +1056,91 @@ def get_aloha_future_eef_poses_from_delta_actions(low_level_action,
 
     
     return aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths, eef_pos
-                    
+
+
+def get_aloha_future_eef_poses_from_pi05_delta_actions(
+    action_chunk,
+    eef_pos_robot_base,
+    eef_rot_matrix_robot_base,
+    eef_gripper_width_franka,
+    gripper_delta_scale: float = 1.0,
+):
+    """Integrate pi05 7D delta actions into absolute EE poses (same frames as low-level 10D path).
+
+    Each row is ``[dx, dy, dz, d_rx, d_ry, d_rz, d_gripper]``: delta position in robot base,
+    delta rotation as axis-angle (rotation vector for ``R.from_rotvec``), delta gripper width.
+
+    Rotation matches ``get_aloha_future_eef_poses_from_delta_actions``: right-multiply the current
+    orientation by the delta rotation, ``R_new = R_cur @ R_delta`` (see aloha conversion that
+    stores 6D delta as a matrix and converts to rotvec for pi05).
+
+    Args:
+        action_chunk: (T, 7) or (7,) array/tensor; extra columns are ignored with a warning.
+        eef_pos_robot_base: (3,) current EE position in robot base.
+        eef_rot_matrix_robot_base: (3, 3) current EE rotation in robot base.
+        eef_gripper_width_franka: scalar Franka gripper width (m), same units as 10D path.
+        gripper_delta_scale: multiplies delta gripper before integration.
+
+    Returns:
+        Same tuple as ``get_aloha_future_eef_poses_from_delta_actions``:
+        aloha_world positions, 6D orientations (Aloha convention), Aloha gripper widths, and
+        robot-base positions along the chunk (for debugging).
+    """
+    actions = np.asarray(action_chunk, dtype=np.float64)
+    # if actions.ndim == 1:
+    #     actions = actions.reshape(1, -1)
+    # if actions.shape[-1] < 7:
+    #     raise ValueError(
+    #         f"pi05 actions need at least 7 dims per step, got shape {actions.shape}"
+    #     )
+    # if actions.shape[-1] > 7:
+    #     cprint(
+    #         f"get_aloha_future_eef_poses_from_pi05_delta_actions: truncating action width "
+    #         f"{actions.shape[-1]} -> 7",
+    #         "yellow",
+    #     )
+    #     actions = actions[:, :7]
+
+    cur_eef_pos = np.asarray(eef_pos_robot_base, dtype=np.float64).reshape(3).copy()
+    cur_eef_matrix = np.asarray(eef_rot_matrix_robot_base, dtype=np.float64).reshape(3, 3).copy()
+    cur_gripper_width = float(np.asarray(eef_gripper_width_franka).reshape(()))
+
+    eef_pos = []
+    eef_orient_matrix = []
+    gripper_widths = []
+
+    for act in actions:
+        delta_pos = act[0:3].astype(np.float64)
+        # delta_rotvec = act[3:6].astype(np.float64)
+        delta_rot_6d = act[3:9].astype(np.float64)
+        # delta_gripper = float(act[6]) * float(gripper_delta_scale)
+        delta_gripper = float(act[9]) * float(gripper_delta_scale)
+
+        new_eef_pos = cur_eef_pos + delta_pos
+        # r_delta = R.from_rotvec(delta_rotvec).as_matrix()
+        r_delta = rotation_transfer_6D_to_matrix(delta_rot_6d)
+        new_eef_rot_matrix = cur_eef_matrix @ r_delta
+        new_gripper_width = cur_gripper_width + delta_gripper
+        new_gripper_width = float(np.clip(new_gripper_width, 0.0, 0.04))
+
+        cur_eef_pos = new_eef_pos
+        cur_eef_matrix = new_eef_rot_matrix
+        cur_gripper_width = new_gripper_width
+        eef_pos.append(new_eef_pos)
+        eef_orient_matrix.append(new_eef_rot_matrix)
+        gripper_widths.append(new_gripper_width)
+
+    eef_pos = np.array(eef_pos).reshape(-1, 3)
+    gripper_widths = np.array(gripper_widths)
+
+    aloha_world_eef_pos = transform_from_robot_base_to_table_center(eef_pos)
+    aloha_world_eef_orient_matrix = [
+        eef_matrix_robot_base_to_aloha_eef_matrix(mat) for mat in eef_orient_matrix
+    ]
+    aloha_world_eef_orient_6d = [
+        rotation_transfer_matrix_to_6D(mat) for mat in aloha_world_eef_orient_matrix
+    ]
+    aloha_gripper_widths = [x / 0.04 * 80 for x in gripper_widths]
+    cprint("gripper width (pi05): {}".format(aloha_gripper_widths), "yellow")
+
+    return aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths, eef_pos

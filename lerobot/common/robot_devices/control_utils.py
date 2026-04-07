@@ -42,8 +42,10 @@ from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
 from lerobot.scripts.yufei_policy_utils import compute_pcd, get_gripper_4_points_from_sriram_data, \
     get_4_points_from_gripper_pos_orient, infer_multitask_high_level_model, low_level_policy_infer, \
-    get_aloha_future_eef_poses_from_delta_actions, rotation_transfer_6D_to_matrix, \
+    get_aloha_future_eef_poses_from_delta_actions, get_aloha_future_eef_poses_from_pi05_delta_actions, \
+    rotation_transfer_6D_to_matrix, \
     depth_preprocess, rgb_preprocess
+from lerobot.common.robot_devices.openpi_websocket import lerobot_observation_to_openpi_dict
 
 from matplotlib import pyplot as plt
 
@@ -278,8 +280,13 @@ def control_loop(
             if robot.use_eef:
                 observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
                 action["action.right_eef_pose"] = add_eef_pose(action['action'])
+            ### print joint state
+            print("joint state is: ", observation['observation.state'])
         else:
-            
+            ### This is just for debugging
+            debug_action = torch.tensor([91.8457, 192.6562, 192.7441, 175.5176, 175.6934,   5.6250,  17.7539,
+                -2.4609,  11.5245, 110.6543,  72.5098,  72.7734,  91.6699,  92.0215,
+                4.1309,  56.3379,  -9.7559,  79.8652]).float()
 
             ### reset to a predefined rest pose
             if policy is None:
@@ -291,14 +298,29 @@ def control_loop(
                 # action = torch.tensor([90.0000, 192.8320, 193.1836, 176.3965, 176.5723,   6.1523,  19.3359,
                 #     -3.5156,  -4.2650,  90.9668, 153.8965, 154.5117, 109.5996, 109.9512,
                 #     -4.6582,  94.9219,  -3.4277,  70]).float()
+
+                #### our policy uses this
                 action = torch.tensor([90.0000, 192.8320, 193.1836, 176.3965, 176.5723,   6.1523,  19.3359,
                     -3.5156,  -4.2650,  90.9668, 153.8965, 154.5117, 109.5996, 109.9512,
-                    -4.6582,  94.9219,  -3.4277,  80]).float()
-                
-                # for i in range(5):
+                    -4.6582,  94.9219,  -3.4277,  80]).float()                
+
+                ### default reset pose
+        #         action = torch.tensor([ 92.1094, 192.6562, 192.7441, 150.5566, 150.7324,   1.0547,  37.6172,
+        #   4.8340,  75.5898,  92.3730, 198.5449, 199.0723, 157.5879, 157.9395,
+        #  -2.1094,  37.7051,   4.5703,  98.9891])
+
+                ### teleop reset pose
+        #         action = torch.tensor([ 92.1094, 192.6562, 192.7441, 150.5566, 150.7324,   1.0547,  37.5293,
+        #   4.8340,  75.5898,  92.0215, 198.5449, 198.9844, 174.0234, 174.2871,
+        #  -7.0312,  22.2363,   5.9766,  99.0733])
+
+        
+        #         # for i in range(5):
+
                     # time.sleep(0.5)
                 robot.send_action(action.squeeze(0))
-                    # pass
+                # robot.send_action(debug_action.squeeze(0))
+                # pass
                 
 
             if policy is not None and type(policy) != dict:
@@ -397,320 +419,359 @@ def control_loop(
                 if robot.use_eef:
                     action["action.right_eef_pose"] = pred_action_eef
 
+            ### NOTE: OpenPI / pi05 policy over WebSocket (separate uv env server)
+            if type(policy) == dict and policy.get("type") == "openpi_websocket":
+                action_queue = policy["action_queue"]
+                robot_adapter = policy["robot_adapter"]
+                client = policy["client"]
+
+                observation = robot.capture_observation()
+                if robot.use_eef:
+                    observation["observation.right_eef_pose"] = add_eef_pose(observation["observation.state"])
+
+                if len(action_queue) == 0:
+                    start_infer = time.time()
+                    openpi_obs = lerobot_observation_to_openpi_dict(
+                        observation,
+                        prompt=policy["prompt"],
+                        resize_size=int(policy.get("resize_size", 224)),
+                        base_image_key=policy.get(
+                            "base_image_key", "observation.images.cam_azure_kinect_front.color"
+                        ),
+                        wrist_image_key=policy.get("wrist_image_key", "observation.images.cam_wrist"),
+                    )
+                    response = client.infer(openpi_obs)
+                    # import pdb; pdb.set_trace()
+                    action_chunk = np.asarray(response["actions"])
+
+                    if action_chunk.ndim == 1:
+                        action_chunk = action_chunk.reshape(1, -1)
+                    if action_chunk.size == 0:
+                        raise RuntimeError("OpenPI server returned empty actions.")
+                    # if action_chunk.shape[-1] != 7:
+                    #     logging.warning(
+                    #         "Expected 7D pi05 actions, got shape %s; proceeding with last dim as gripper.",
+                    #         action_chunk.shape,
+                    #     )
+                    replan_steps = int(policy.get("replan_steps", 7))
+                    chunk = action_chunk[:replan_steps]
+
+                    right_eef_pose = observation["observation.right_eef_pose"]
+                    _p, _r6, _gw, eef_pos_robot_base, eef_rot_matrix_robot_base, _r6b, eef_gripper_width_franka = (
+                        get_gripper_4_points_from_sriram_data(right_eef_pose)
+                    )
+                    aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths, _rb_traj = (
+                        get_aloha_future_eef_poses_from_pi05_delta_actions(
+                            chunk,
+                            eef_pos_robot_base,
+                            eef_rot_matrix_robot_base,
+                            eef_gripper_width_franka,
+                            gripper_delta_scale=float(policy.get("gripper_delta_scale", 1.0)),
+                        )
+                    )
+                    aloha_joint_actions = []
+                    all_aloha_eef_poses = []
+                    for pos, orient_6d, gripper_width in zip(
+                        aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths
+                    ):
+                        eef_pose = [*orient_6d, *pos, gripper_width]
+                        all_aloha_eef_poses.append(torch.tensor(eef_pose).float())
+
+                    state = observation["observation.state"]
+                    initialization_state = state
+                    for pose in all_aloha_eef_poses:
+                        solved_joint = robot_adapter.transform_action(pose, initialization_state)
+                        aloha_joint_actions.append(solved_joint)
+                        initialization_state = solved_joint
+
+                    for aja in aloha_joint_actions:
+                        action_queue.append(aja)
+
+                    cprint(f"openpi infer+ik time: {time.time() - start_infer:.3f}s", "blue")
+
+                action_to_send = action_queue.popleft()
+                cprint("sending action to robot: {}".format(action_to_send), "green")
+
+                control_t = 0
+                beg = time.time()
+                while control_t < 1:
+                    action_joint = robot.send_action(action_to_send)
+                    control_t += 1
+                cprint(f"sending action time: {time.time() - beg} seconds", "blue")
+                action = {"action": action_joint}
+                if robot.use_eef:
+                    action["action.right_eef_pose"] = np.zeros(10, dtype=np.float32)
+
             ### NOTE: write my own inference of the high and low-level policy
-            if type(policy) == dict:
+            elif type(policy) == dict:
+                # start_loop_t = time.time()
+                start_t = time.time()
+                action_queue = policy['action_queue']
+                robot_adapter = policy.get('robot_adapter', None)
+
+
                 obs_queue = policy['obs_queue']
                 debug_queue = policy['debug_queue']
                 high_level_policy, low_level_policy = policy['high_level'], policy['low_level']
-                action_queue = policy['action_queue']
 
                 ### NOTE: get the scene pcd from the depth camera
-                all_cam_color_images = None
-                robot_adapter = policy.get('robot_adapter', None)
-                time.sleep(0.05)  # to make sure the robot has finished the action and the observation is updated
+                # time.sleep(0.05)  # to make sure the robot has finished the action and the observation is updated
+
+
                 observation = robot.capture_observation()
                 if robot.use_eef:
                     observation["observation.right_eef_pose"] = add_eef_pose(observation['observation.state'])
-                action = None
-                if policy.get("mode", "fine-tuning") == 'fine-tuning':
-                    depth_keys = ["observation.images.cam_azure_kinect_front.depth", "observation.images.cam_azure_kinect_back.depth"]
-                    # import pdb; pdb.set_trace()
-                    all_cam_depth_images = []
-                    for depth_key in depth_keys:
-                        depth = Image.fromarray(observation[depth_key].numpy()[:, :, 0])
+
+                get_pcd = len(action_queue) <= 2
+                if get_pcd:
+                    start_t = time.time()
+                    all_cam_color_images = None
+                    action = None
+                    if policy.get("mode", "fine-tuning") == 'fine-tuning':
+                        depth_keys = ["observation.images.cam_azure_kinect_front.depth", "observation.images.cam_azure_kinect_back.depth"]
+                        # import pdb; pdb.set_trace()
+                        all_cam_depth_images = []
+                        for depth_key in depth_keys:
+                            depth = Image.fromarray(observation[depth_key].numpy()[:, :, 0])
+                            if policy['high_level_args']['general'].get("use_rgb", False) or policy['high_level_args']['general'].get("use_dino", False):         
+                                depth = np.asarray(depth_preprocess(depth))
+                            else:
+                                depth = np.asarray(depth)
+                            all_cam_depth_images.append(depth)
+
                         if policy['high_level_args']['general'].get("use_rgb", False) or policy['high_level_args']['general'].get("use_dino", False):         
-                            depth = np.asarray(depth_preprocess(depth))
-                        else:
+                            color_keys = ["observation.images.cam_azure_kinect_front.color", "observation.images.cam_azure_kinect_back.color"]
+                            all_cam_color_images = []
+                            for color_key in color_keys:
+                                # import pdb; pdb.set_trace()
+                                rgb = (observation[color_key]).numpy()
+                                ### convert from rgb to bgr using openscv
+                                import cv2
+                                # rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                                # plt.imshow(rgb)
+                                # plt.show()
+                                rgb = Image.fromarray(rgb)
+                                rgb = np.asarray(rgb_preprocess(rgb))
+                                # plt.imshow(rgb)
+                                # plt.show()
+                                all_cam_color_images.append(rgb)       
+
+                        scene_pcd_dino = None
+                        scene_pcd, scene_pcd_in_table_center, scene_pcd_color, scene_pcd_dino = compute_pcd(all_cam_depth_images=all_cam_depth_images, num_points=4500, all_cam_rgb_images=all_cam_color_images, 
+                                                                                use_dino=policy['high_level_args']['general'].get("use_dino", False)
+                                                                            )
+
+                    
+                    elif policy.get("mode", "fine-tuning") == 'zero-shot':
+                        depth_keys = ["observation.images.cam_azure_kinect_front.depth", "observation.images.cam_azure_kinect_back.depth"]
+                        # import pdb; pdb.set_trace()
+                        all_cam_depth_images = []
+                        for depth_key in depth_keys:
+                            depth = Image.fromarray(observation[depth_key].numpy()[:, :, 0])
                             depth = np.asarray(depth)
-                        all_cam_depth_images.append(depth)
+                            all_cam_depth_images.append(depth)
 
-                    if policy['high_level_args']['general'].get("use_rgb", False) or policy['high_level_args']['general'].get("use_dino", False):         
-                        color_keys = ["observation.images.cam_azure_kinect_front.color", "observation.images.cam_azure_kinect_back.color"]
-                        all_cam_color_images = []
-                        for color_key in color_keys:
-                            # import pdb; pdb.set_trace()
-                            rgb = (observation[color_key]).numpy()
-                            ### convert from rgb to bgr using openscv
-                            import cv2
-                            # rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                            # plt.imshow(rgb)
-                            # plt.show()
-                            rgb = Image.fromarray(rgb)
-                            rgb = np.asarray(rgb_preprocess(rgb))
-                            # plt.imshow(rgb)
-                            # plt.show()
-                            all_cam_color_images.append(rgb)       
+                        
+                        cur_aloha_real_joint_angle = observation['observation.state']
+                        robot_pc = robot_adapter.get_aloha_pcd(cur_aloha_real_joint_angle) 
 
-                    scene_pcd_dino = None
-                    scene_pcd, scene_pcd_in_table_center, scene_pcd_color, scene_pcd_dino = compute_pcd(all_cam_depth_images=all_cam_depth_images, num_points=4500, all_cam_rgb_images=all_cam_color_images, 
-                                                                            use_dino=policy['high_level_args']['general'].get("use_dino", False)
-                                                                        )
-
-                
-                elif policy.get("mode", "fine-tuning") == 'zero-shot':
-                    depth_keys = ["observation.images.cam_azure_kinect_front.depth", "observation.images.cam_azure_kinect_back.depth"]
-                    # import pdb; pdb.set_trace()
-                    all_cam_depth_images = []
-                    for depth_key in depth_keys:
-                        depth = Image.fromarray(observation[depth_key].numpy()[:, :, 0])
-                        depth = np.asarray(depth)
-                        all_cam_depth_images.append(depth)
+                        pcd_keys = ["observation.images.cam_azure_kinect_front.point_cloud", "observation.images.cam_azure_kinect_back.point_cloud"]
+                        all_pcds = []
+                        for pcd_key in pcd_keys:
+                            pcd = observation[pcd_key].numpy() / 1000.
+                            pcd = pcd.astype(np.float32).reshape(-1, 3)
+                            all_pcds.append(pcd)
+                    
+                        scene_pcd_dino = None
+                        scene_pcd, scene_pcd_in_table_center, scene_pcd_color, scene_pcd_dino = compute_pcd(all_pcds=all_pcds, num_points=4500, all_cam_rgb_images=all_cam_color_images, 
+                                                                                use_dino=policy['high_level_args']['general'].get("use_dino", False),
+                                                                                robot_pc=robot_pc, robot=robot, debug_depth=all_cam_depth_images)
 
                     
-                    cur_aloha_real_joint_angle = observation['observation.state']
-                    robot_pc = robot_adapter.get_aloha_pcd(cur_aloha_real_joint_angle) 
+                    # import pdb; pdb.set_trace()
+                    ### NOTE: get the gripper 4 points
+                    right_eef_pose = observation['observation.right_eef_pose']
+                    
+                    cprint(f"current eef position: { right_eef_pose[6:9]}", "red")
+                    eef_pos, eef_rot_6d, eef_gripper_width, eef_pos_robot_base, eef_rot_matrix_robot_base, eef_rot_6d_robot_base, eef_gripper_width_franka = get_gripper_4_points_from_sriram_data(right_eef_pose)
+                    agent_pos = np.array([*eef_pos_robot_base, *eef_rot_6d_robot_base, *eef_gripper_width_franka])
+                    cprint(f"eef gripper width (franka): {eef_gripper_width_franka}", "yellow")
+                    eef_4_points = get_4_points_from_gripper_pos_orient(eef_pos_robot_base, eef_rot_matrix_robot_base, eef_gripper_width_franka)
+                    # x_dir = eef_rot_matrix_robot_base[:, 0]
+                    # y_dir = eef_rot_matrix_robot_base[:, 1]
+                    # z_dir = eef_rot_matrix_robot_base[:, 2]
+                    # eef_x_end = eef_pos_robot_base + 0.1 * eef_rot_matrix_robot_base[:, 0]
+                    # eef_y_end = eef_pos_robot_base + 0.1 * eef_rot_matrix_robot_base[:, 1]
+                    # eef_z_end = eef_pos_robot_base + 0.1 * eef_rot_matrix_robot_base[:, 2]
 
-                    pcd_keys = ["observation.images.cam_azure_kinect_front.point_cloud", "observation.images.cam_azure_kinect_back.point_cloud"]
-                    all_pcds = []
-                    for pcd_key in pcd_keys:
-                        pcd = observation[pcd_key].numpy() / 1000.
-                        pcd = pcd.astype(np.float32).reshape(-1, 3)
-                        all_pcds.append(pcd)
-                
-                    scene_pcd_dino = None
-                    scene_pcd, scene_pcd_in_table_center, scene_pcd_color, scene_pcd_dino = compute_pcd(all_pcds=all_pcds, num_points=4500, all_cam_rgb_images=all_cam_color_images, 
-                                                                            use_dino=policy['high_level_args']['general'].get("use_dino", False),
-                                                                            robot_pc=robot_pc, robot=robot, debug_depth=all_cam_depth_images)
+                    obs_queue.append({
+                        'scene_pcd': scene_pcd,
+                        'eef_4_points': eef_4_points,
+                        'agent_pos': agent_pos,
+                        'scene_pcd_color': scene_pcd_color,
+                        "scene_pcd_dino": scene_pcd_dino,
+                    })
+                    cprint(f"computing obs time: {time.time() - start_t}", "blue")
 
-                
-                # import pdb; pdb.set_trace()
-                ### NOTE: get the gripper 4 points
-                right_eef_pose = observation['observation.right_eef_pose']
-                cprint(f"current eef position: { right_eef_pose[6:9]}", "red")
-                eef_pos, eef_rot_6d, eef_gripper_width, eef_pos_robot_base, eef_rot_matrix_robot_base, eef_rot_6d_robot_base, eef_gripper_width_franka = get_gripper_4_points_from_sriram_data(right_eef_pose)
-                agent_pos = np.array([*eef_pos_robot_base, *eef_rot_6d_robot_base, *eef_gripper_width_franka])
-                cprint(f"eef gripper width (franka): {eef_gripper_width_franka}", "yellow")
-                eef_4_points = get_4_points_from_gripper_pos_orient(eef_pos_robot_base, eef_rot_matrix_robot_base, eef_gripper_width_franka)
-                x_dir = eef_rot_matrix_robot_base[:, 0]
-                y_dir = eef_rot_matrix_robot_base[:, 1]
-                z_dir = eef_rot_matrix_robot_base[:, 2]
-                eef_x_end = eef_pos_robot_base + 0.1 * eef_rot_matrix_robot_base[:, 0]
-                eef_y_end = eef_pos_robot_base + 0.1 * eef_rot_matrix_robot_base[:, 1]
-                eef_z_end = eef_pos_robot_base + 0.1 * eef_rot_matrix_robot_base[:, 2]
 
-                obs_queue.append({
-                    'scene_pcd': scene_pcd,
-                    'eef_4_points': eef_4_points,
-                    'agent_pos': agent_pos,
-                    'scene_pcd_color': scene_pcd_color,
-                    "scene_pcd_dino": scene_pcd_dino,
-                })
-                debug_queue.append({
-                    "eef_pos": eef_pos,
-                    "scene_pcd": scene_pcd,
-                })
-
+                # time.sleep(1)
                 if len(action_queue) == 0:
-                    # import open3d as o3d
-                    # pcd = o3d.geometry.PointCloud()
-                    # import pdb; pdb.set_trace()
-                    # pcd.points = o3d.utility.Vector3dVector(scene_pcd)
-                    # pcd.colors = o3d.utility.Vector3dVector(scene_pcd_color)
-                    # o3d.visualization.draw_geometries([pcd])
+                    run_policy = True
+                    if run_policy:
+                        start_t = time.time()
+                        
+                        high_level_input_np = np.concatenate([scene_pcd, eef_4_points], axis=0)  # (N, 3)
+                        high_level_input = torch.from_numpy(high_level_input_np).float().unsqueeze(0).cuda()
+                        if policy['high_level_args']['general'].get("use_rgb", False):
+                            scene_pcd_color_tensor = torch.from_numpy(scene_pcd_color).float().unsqueeze(0).cuda()
+                            gripper_pcd_color_tensor = torch.zeros((4, 3)).float().unsqueeze(0).cuda()
+                            extra = {
+                                'rgb': scene_pcd_color_tensor,
+                                'rgb_gripper': gripper_pcd_color_tensor,
+                            } 
+                        else:
+                            extra = None
 
+                        if policy['high_level_args']['general'].get("use_dino", False):
+                            # import pdb; pdb.set_trace()
+                            scene_pcd_dino_tensor = torch.from_numpy(scene_pcd_dino).float().unsqueeze(0).cuda()
+                            gripper_pcd_dino_tensor = torch.zeros((4, 1024)).float().unsqueeze(0).cuda()
+                            if extra is None:
+                                extra = {}
+                            extra['dino_features'] = scene_pcd_dino_tensor
+                            extra['dino_features_gripper'] = gripper_pcd_dino_tensor
 
-                    high_level_input_np = np.concatenate([scene_pcd, eef_4_points], axis=0)  # (N, 3)
-                    high_level_input = torch.from_numpy(high_level_input_np).float().unsqueeze(0).cuda()
-                    if policy['high_level_args']['general'].get("use_rgb", False):
-                        scene_pcd_color_tensor = torch.from_numpy(scene_pcd_color).float().unsqueeze(0).cuda()
-                        gripper_pcd_color_tensor = torch.zeros((4, 3)).float().unsqueeze(0).cuda()
-                        extra = {
-                            'rgb': scene_pcd_color_tensor,
-                            'rgb_gripper': gripper_pcd_color_tensor,
-                        } 
-                    else:
-                        extra = None
-
-                    if policy['high_level_args']['general'].get("use_dino", False):
                         # import pdb; pdb.set_trace()
-                        scene_pcd_dino_tensor = torch.from_numpy(scene_pcd_dino).float().unsqueeze(0).cuda()
-                        gripper_pcd_dino_tensor = torch.zeros((4, 1024)).float().unsqueeze(0).cuda()
-                        if extra is None:
-                            extra = {}
-                        extra['dino_features'] = scene_pcd_dino_tensor
-                        extra['dino_features_gripper'] = gripper_pcd_dino_tensor
+                        with torch.no_grad():
+                            high_level_predict = infer_multitask_high_level_model(
+                                high_level_input, high_level_policy, policy['cat_embedding'], policy['high_level_args'].articubot,
+                                extra=extra,
+                            )  # 1, 4, 3 ## torch tensor
 
-                    # import pdb; pdb.set_trace()
-                    with torch.no_grad():
-                        high_level_predict = infer_multitask_high_level_model(
-                            high_level_input, high_level_policy, policy['cat_embedding'], policy['high_level_args'].articubot,
-                            extra=extra,
-                        )  # 1, 4, 3 ## torch tensor
-
-                   
-                    ### TODO: figure out how to use the history here
-                    # import pdb; pdb.set_trace()
-                    if len(obs_queue) == 1:
-                        scene_pcd_history = torch.from_numpy(obs_queue[0]['scene_pcd']).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1,1)
-                        agent_pos_history = torch.from_numpy(obs_queue[0]['agent_pos']).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1)
-                        eef_4_points_history = torch.from_numpy(obs_queue[0]['eef_4_points']).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1,1)
-                    else:
-                        scene_pcd_history = torch.from_numpy(np.stack([obs_queue[i]['scene_pcd'] for i in range(-2,0)], axis=0)).float().to('cuda').unsqueeze(0)
-                        agent_pos_history = torch.from_numpy(np.stack([obs_queue[i]['agent_pos'] for i in range(-2,0)], axis=0)).float().to('cuda').unsqueeze(0)
-                        eef_4_points_history = torch.from_numpy(np.stack([obs_queue[i]['eef_4_points'] for i in range(-2,0)], axis=0)).float().to('cuda').unsqueeze(0)
+                    
+                        ### TODO: figure out how to use the history here
                         # import pdb; pdb.set_trace()
+                        if len(obs_queue) == 1:
+                            scene_pcd_history = torch.from_numpy(obs_queue[0]['scene_pcd']).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1,1)
+                            agent_pos_history = torch.from_numpy(obs_queue[0]['agent_pos']).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1)
+                            eef_4_points_history = torch.from_numpy(obs_queue[0]['eef_4_points']).float().to('cuda').unsqueeze(0).unsqueeze(1).repeat(1,2,1,1)
+                        else:
+                            scene_pcd_history = torch.from_numpy(np.stack([obs_queue[i]['scene_pcd'] for i in range(-2,0)], axis=0)).float().to('cuda').unsqueeze(0)
+                            agent_pos_history = torch.from_numpy(np.stack([obs_queue[i]['agent_pos'] for i in range(-2,0)], axis=0)).float().to('cuda').unsqueeze(0)
+                            eef_4_points_history = torch.from_numpy(np.stack([obs_queue[i]['eef_4_points'] for i in range(-2,0)], axis=0)).float().to('cuda').unsqueeze(0)
+                            # import pdb; pdb.set_trace()
 
-                    with torch.no_grad():
-                        low_level_action = low_level_policy_infer(
-                            scene_pcd_history,
-                            agent_pos_history, 
-                            high_level_predict.float().to('cuda').unsqueeze(1).repeat(1, 2, 1, 1),
-                            eef_4_points_history,
-                            low_level_policy,
-                            cat_idx=policy['cat_idx']
+                        with torch.no_grad():
+                            low_level_action = low_level_policy_infer(
+                                scene_pcd_history,
+                                agent_pos_history, 
+                                high_level_predict.float().to('cuda').unsqueeze(1).repeat(1, 2, 1, 1),
+                                eef_4_points_history,
+                                low_level_policy,
+                                cat_idx=policy['cat_idx']
+                            )
+
+                            low_level_action_np = low_level_action.cpu().numpy().reshape(-1, 10)
+                            # delta_pos_mag = np.linalg.norm(low_level_action_np[:, :3], axis=1)
+                            # print("delta pos magnitude is: ", delta_pos_mag)
+
+                        
+                        ### convert this low-level action back to the aloha eef pose
+                        ### TODO: note this max_relative_target thing
+                        # import pdb; pdb.set_trace()
+                        aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths, robot_base_eef_pos = get_aloha_future_eef_poses_from_delta_actions(
+                            low_level_action, 
+                            eef_pos_robot_base, 
+                            eef_rot_matrix_robot_base, 
+                            eef_gripper_width_franka
                         )
 
-                        low_level_action_np = low_level_action.cpu().numpy().reshape(-1, 10)
-                        # delta_pos_mag = np.linalg.norm(low_level_action_np[:, :3], axis=1)
-                        # print("delta pos magnitude is: ", delta_pos_mag)
+                        
 
+                        ### 3d plot the scene pcd
+                        if False:
+                            fig = plt.figure(figsize=(10, 10))
+
+                            ax = fig.add_subplot(1, 1, 1, projection='3d')
+                            ax.scatter(scene_pcd[:,0], scene_pcd[:,1], scene_pcd[:,2], s=1, color=scene_pcd_color)
+                            # ax.scatter(eef_4_points[:,0], eef_4_points[:,1], eef_4_points[:,2], s=50, color='green')
+                            ax.scatter(eef_4_points[[0],0], eef_4_points[[0],1], eef_4_points[[0],2], s=50, color='red')
+                            ax.scatter(eef_4_points[[1],0], eef_4_points[[1],1], eef_4_points[[1],2], s=50, color='green')
+                            ax.scatter(eef_4_points[[2],0], eef_4_points[[2],1], eef_4_points[[2],2], s=50, color='blue')
+                            ax.scatter(eef_4_points[[3],0], eef_4_points[[3],1], eef_4_points[[3],2], s=50, color='black')
+                            ### plot the coordinate frame of the current eef
+                            # ax.plot([eef_pos_robot_base[0], eef_x_end[0]], [eef_pos_robot_base[1], eef_x_end[1]], [eef_pos_robot_base[2], eef_x_end[2]], color='red', linewidth=2)
+                            # ax.plot([eef_pos_robot_base[0], eef_y_end[0]], [eef_pos_robot_base[1], eef_y_end[1]], [eef_pos_robot_base[2], eef_y_end[2]], color='green', linewidth=2)
+                            # ax.plot([eef_pos_robot_base[0], eef_z_end[0]], [eef_pos_robot_base[1], eef_z_end[1]], [eef_pos_robot_base[2], eef_z_end[2]], color='blue', linewidth=2)
+
+                            high_level_predict_np = high_level_predict.cpu().numpy()[0]
+                            ax.scatter(high_level_predict_np[[0],0], high_level_predict_np[[0],1], high_level_predict_np[[0],2], s=75, color='red')
+                            ax.scatter(high_level_predict_np[[1],0], high_level_predict_np[[1],1], high_level_predict_np[[1],2], s=75, color='green')
+                            ax.scatter(high_level_predict_np[[2],0], high_level_predict_np[[2],1], high_level_predict_np[[2],2], s=75, color='blue')
+                            ax.scatter(high_level_predict_np[[3],0], high_level_predict_np[[3],1], high_level_predict_np[[3],2], s=75, color='black')
+                            ax.plot(robot_base_eef_pos[:,0], robot_base_eef_pos[:,1], robot_base_eef_pos[:,2], color='blue', linewidth=4)
+                            ax.set_xlabel("X")
+                            ax.set_ylabel("Y")
+                            ax.set_zlabel("Z")
+                            ax.scatter([0], [0], [0], color='red', s=100)
+                            ax.set_xlim([0, 1])
+                            ax.set_ylim([-0.5, 0.5])
+                            ax.set_zlim([-0.3, 0.7])
+
+                            # ax2 = fig.add_subplot(1, 2, 2, projection='3d')
+                            # ax2.scatter(scene_pcd_in_table_center[:,0], scene_pcd_in_table_center[:,1], scene_pcd_in_table_center[:,2], s=1, color='grey')
+                            # ax2.plot(aloha_world_eef_pos[:,0], aloha_world_eef_pos[:,1], aloha_world_eef_pos[:,2], color='blue', linewidth=4)
+                            ### plot the coordinate frame of the current eef
+
+                            debug_queue[-1].update({
+                                "commanded_aloha_world_eef_pos": aloha_world_eef_pos,
+                                }
+                            )
+
+                            # for idx in range(4):
+                            #     aloha_eef_pos_current = aloha_world_eef_pos[idx]
+                            #     aloha_world_eef_orient_matrix = rotation_transfer_6D_to_matrix(aloha_world_eef_orient_6d[idx])
+                            #     aloha_x_end = aloha_eef_pos_current + 0.1 * aloha_world_eef_orient_matrix[:, 0]
+                            #     aloha_y_end = aloha_eef_pos_current + 0.1 * aloha_world_eef_orient_matrix[:, 1]
+                            #     aloha_z_end = aloha_eef_pos_current + 0.1 * aloha_world_eef_orient_matrix[:, 2]
+
+                            #     ax2.plot([aloha_eef_pos_current[0], aloha_x_end[0]], [aloha_eef_pos_current[1], aloha_x_end[1]], [aloha_eef_pos_current[2], aloha_x_end[2]], color='red', linewidth=2)
+                            #     ax2.plot([aloha_eef_pos_current[0], aloha_y_end[0]], [aloha_eef_pos_current[1], aloha_y_end[1]], [aloha_eef_pos_current[2], aloha_y_end[2]], color='green', linewidth=2)
+                            #     ax2.plot([aloha_eef_pos_current[0], aloha_z_end[0]], [aloha_eef_pos_current[1], aloha_z_end[1]], [aloha_eef_pos_current[2], aloha_z_end[2]], color='blue', linewidth=2)
+
+                            # ax2.set_xlabel("X")
+                            # ax2.set_ylabel("Y")
+                            # ax2.set_zlabel("Z")
+                            # ax2.scatter([0], [0], [0], color='red', s=100)
+                            # ax2.set_ylim([-0.5, 0.5])
+                            # ax2.set_xlim([-0.5, 0.5])
+                            # ax2.set_zlim([-0.3, 0.7])
+                            plt.show()
+                            plt.close("all")                
+                            
+                        
+                        ### TODO: figure out what command is sent to the robot
+                        # import pdb; pdb.set_trace()
+                        all_aloha_eef_poses = []
+                        for  pos, orient_6d, gripper_width in zip(aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths):
+                            eef_pose = [*orient_6d, *pos, gripper_width]
+                            eef_pose = torch.tensor(eef_pose).float()
+                            all_aloha_eef_poses.append(eef_pose)
                     
-                    ### convert this low-level action back to the aloha eef pose
-                    ### TODO: note this max_relative_target thing
-                    # import pdb; pdb.set_trace()
-                    aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths, robot_base_eef_pos = get_aloha_future_eef_poses_from_delta_actions(
-                        low_level_action, 
-                        eef_pos_robot_base, 
-                        eef_rot_matrix_robot_base, 
-                        eef_gripper_width_franka
-                    )
-
+                        # import pdb; pdb.set_trace()
+                        cprint(f"running policy time: {time.time() - start_t}", "blue")
                     
-
-                    ### 3d plot the scene pcd
-                    if True:
-                        fig = plt.figure(figsize=(10, 10))
-
-                        ax = fig.add_subplot(1, 1, 1, projection='3d')
-                        ax.scatter(scene_pcd[:,0], scene_pcd[:,1], scene_pcd[:,2], s=1, color=scene_pcd_color)
-                        # ax.scatter(eef_4_points[:,0], eef_4_points[:,1], eef_4_points[:,2], s=50, color='green')
-                        ax.scatter(eef_4_points[[0],0], eef_4_points[[0],1], eef_4_points[[0],2], s=50, color='red')
-                        ax.scatter(eef_4_points[[1],0], eef_4_points[[1],1], eef_4_points[[1],2], s=50, color='green')
-                        ax.scatter(eef_4_points[[2],0], eef_4_points[[2],1], eef_4_points[[2],2], s=50, color='blue')
-                        ax.scatter(eef_4_points[[3],0], eef_4_points[[3],1], eef_4_points[[3],2], s=50, color='black')
-                        ### plot the coordinate frame of the current eef
-                        # ax.plot([eef_pos_robot_base[0], eef_x_end[0]], [eef_pos_robot_base[1], eef_x_end[1]], [eef_pos_robot_base[2], eef_x_end[2]], color='red', linewidth=2)
-                        # ax.plot([eef_pos_robot_base[0], eef_y_end[0]], [eef_pos_robot_base[1], eef_y_end[1]], [eef_pos_robot_base[2], eef_y_end[2]], color='green', linewidth=2)
-                        # ax.plot([eef_pos_robot_base[0], eef_z_end[0]], [eef_pos_robot_base[1], eef_z_end[1]], [eef_pos_robot_base[2], eef_z_end[2]], color='blue', linewidth=2)
-
-                        high_level_predict_np = high_level_predict.cpu().numpy()[0]
-                        ax.scatter(high_level_predict_np[[0],0], high_level_predict_np[[0],1], high_level_predict_np[[0],2], s=75, color='red')
-                        ax.scatter(high_level_predict_np[[1],0], high_level_predict_np[[1],1], high_level_predict_np[[1],2], s=75, color='green')
-                        ax.scatter(high_level_predict_np[[2],0], high_level_predict_np[[2],1], high_level_predict_np[[2],2], s=75, color='blue')
-                        ax.scatter(high_level_predict_np[[3],0], high_level_predict_np[[3],1], high_level_predict_np[[3],2], s=75, color='black')
-                        ax.plot(robot_base_eef_pos[:,0], robot_base_eef_pos[:,1], robot_base_eef_pos[:,2], color='blue', linewidth=4)
-                        ax.set_xlabel("X")
-                        ax.set_ylabel("Y")
-                        ax.set_zlabel("Z")
-                        ax.scatter([0], [0], [0], color='red', s=100)
-                        ax.set_xlim([0, 1])
-                        ax.set_ylim([-0.5, 0.5])
-                        ax.set_zlim([-0.3, 0.7])
-
-                        # ax2 = fig.add_subplot(1, 2, 2, projection='3d')
-                        # ax2.scatter(scene_pcd_in_table_center[:,0], scene_pcd_in_table_center[:,1], scene_pcd_in_table_center[:,2], s=1, color='grey')
-                        # ax2.plot(aloha_world_eef_pos[:,0], aloha_world_eef_pos[:,1], aloha_world_eef_pos[:,2], color='blue', linewidth=4)
-                        ### plot the coordinate frame of the current eef
-
-                        debug_queue[-1].update({
-                            "commanded_aloha_world_eef_pos": aloha_world_eef_pos,
-                            }
-                        )
-
-                        # for idx in range(4):
-                        #     aloha_eef_pos_current = aloha_world_eef_pos[idx]
-                        #     aloha_world_eef_orient_matrix = rotation_transfer_6D_to_matrix(aloha_world_eef_orient_6d[idx])
-                        #     aloha_x_end = aloha_eef_pos_current + 0.1 * aloha_world_eef_orient_matrix[:, 0]
-                        #     aloha_y_end = aloha_eef_pos_current + 0.1 * aloha_world_eef_orient_matrix[:, 1]
-                        #     aloha_z_end = aloha_eef_pos_current + 0.1 * aloha_world_eef_orient_matrix[:, 2]
-
-                        #     ax2.plot([aloha_eef_pos_current[0], aloha_x_end[0]], [aloha_eef_pos_current[1], aloha_x_end[1]], [aloha_eef_pos_current[2], aloha_x_end[2]], color='red', linewidth=2)
-                        #     ax2.plot([aloha_eef_pos_current[0], aloha_y_end[0]], [aloha_eef_pos_current[1], aloha_y_end[1]], [aloha_eef_pos_current[2], aloha_y_end[2]], color='green', linewidth=2)
-                        #     ax2.plot([aloha_eef_pos_current[0], aloha_z_end[0]], [aloha_eef_pos_current[1], aloha_z_end[1]], [aloha_eef_pos_current[2], aloha_z_end[2]], color='blue', linewidth=2)
-
-                        # ax2.set_xlabel("X")
-                        # ax2.set_ylabel("Y")
-                        # ax2.set_zlabel("Z")
-                        # ax2.scatter([0], [0], [0], color='red', s=100)
-                        # ax2.set_ylim([-0.5, 0.5])
-                        # ax2.set_xlim([-0.5, 0.5])
-                        # ax2.set_zlim([-0.3, 0.7])
-                        plt.show()
-                        plt.close("all")
-
-                    # if len(debug_queue) >=4:
-                    #     plt.close("all")
-                    #     commanded_aloha_pos = debug_queue[-5]['commanded_aloha_world_eef_pos']
-                    #     commanded_scene_pcd = debug_queue[-5]['scene_pcd']
-                    #     commanded_eef_points = debug_queue[-5]['eef_4_points']
-                    #     acutal_eef_pos = [debug_queue[i]['eef_pos'] for i in range(-4, 0)]
-                    #     fig = plt.figure(figsize=(5, 5))
-                    #     ax3 = fig.add_subplot(1, 1, 1, projection='3d')
-                    #     ax3.scatter(commanded_scene_pcd[:,0], commanded_scene_pcd[:,1], commanded_scene_pcd[:,2], s=1, color='grey')
-                    #     ax3.plot(commanded_aloha_pos[:,0], commanded_aloha_pos[:,1], commanded_aloha_pos[:,2], color='blue', linewidth=3)
-                    #     ax3.plot([acutal_eef_pos[i][0] for i in range(4)], [acutal_eef_pos[i][1] for i in range(4)], [acutal_eef_pos[i][2] for i in range(4)], color='red', linewidth=3)
-                    #     ax3.scatter(commanded_eef_points[:, 0], commanded_eef_points[:, 1], commanded_eef_points[:, 2], s=40, color='black')
-                    #     ax3.set_xlabel("X")
-                    #     ax3.set_ylabel("Y")
-                    #     ax3.set_zlabel("Z")
-                    #     ax3.scatter([0], [0], [0], color='red', s=100)
-                    #     ax3.set_ylim([-0.5, 0.5])
-                    #     ax3.set_xlim([-0.5, 0.5])
-                    #     ax3.set_zlim([-0.3, 0.7])
-                    
-                    
-                    
-                    
-                    ### TODO: figure out what command is sent to the robot
-                    # import pdb; pdb.set_trace()
-                    all_aloha_eef_poses = []
-                    for  pos, orient_6d, gripper_width in zip(aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths):
-                        eef_pose = [*orient_6d, *pos, gripper_width]
-                        eef_pose = torch.tensor(eef_pose).float()
-                        all_aloha_eef_poses.append(eef_pose)
-
-                    # import pdb; pdb.set_trace()
-                    tmp_all_aloha_eef_poses = [right_eef_pose] + all_aloha_eef_poses
-                    diff_positions = []
-                    diff_orientations = []
-                    for idx in range(1, len(tmp_all_aloha_eef_poses)):
-                        diff_pos = tmp_all_aloha_eef_poses[idx][6:9] - tmp_all_aloha_eef_poses[idx-1][6:9]
-                        orient_6d_now = tmp_all_aloha_eef_poses[idx][0:6]
-                        orient_6d_prev = tmp_all_aloha_eef_poses[idx-1][0:6]
-
-                        rot_matrix_now = rotation_transfer_6D_to_matrix(orient_6d_now.numpy())
-                        rot_matrix_prev = rotation_transfer_6D_to_matrix(orient_6d_prev.numpy())
-
-                        from scipy.spatial.transform import Rotation as R
-                        quat_now = R.from_matrix(rot_matrix_now).as_quat()
-                        quat_prev = R.from_matrix(rot_matrix_prev).as_quat()
-
-                        dot = np.abs(np.dot(quat_now, quat_prev))
-                        dot = np.clip(dot, -1.0, 1.0)
-                        diff_orient = 2 * np.arccos(dot)
-
-                        diff_orientations.append(diff_orient)
-                        diff_positions.append(np.linalg.norm(diff_pos))
-
-                    cprint(f"diff positions between steps: {diff_positions}", "yellow")
-                    cprint(f"diff orientations between steps: {np.rad2deg(diff_orientations)}", "yellow")
-                    cprint(f"commanded future eef position: { aloha_world_eef_pos}", "green")
-
-
-                
-                    # import pdb; pdb.set_trace()
-                    state = observation['observation.state']
-                    cprint("the readed joint angels are: {}".format(state), "blue")
-                    # import pdb; pdb.set_trace()
+                  
                     aloha_joint_actions = []
+                    state = observation['observation.state']
+                    right_eef_pose = observation['observation.right_eef_pose']
                     initialization_state = state
 
-                    # cprint("current aloha position: {}".format(right_eef_pose[6:9]), "blue")
-                    # all_aloha_eef_poses = []
-                    # for i in range(4):
-                    #     future_eef_pos = right_eef_pose[6:9] + (i+1) * 0.02 * np.array([0, 0, 1])
-                    #     all_aloha_eef_poses.append(torch.tensor([*right_eef_pose[:6].numpy(), *future_eef_pos, right_eef_pose[9]]).float())
-                    # cprint("future aloha position: {}".format(all_aloha_eef_poses), "blue")
+                    if not run_policy:
+                        all_aloha_eef_poses = []
+                        for i in range(4):
+                            future_eef_pos = right_eef_pose[6:9] + (i+1) * 0.02 * np.array([0, 0, 1])
+                            all_aloha_eef_poses.append(torch.tensor([*right_eef_pose[:6].numpy(), *future_eef_pos, right_eef_pose[9]]).float())
 
                     for idx, pose in enumerate(all_aloha_eef_poses):
                         solved_joint = robot_adapter.transform_action(pose, initialization_state)
@@ -722,62 +783,13 @@ def control_loop(
                     # action_queue.append(cur_joint_state)  ### first send the current joint state to make sure the robot is following the right trajectory, then send the future joint states
                     # action_queue.append(cur_joint_state)  ### first send the current joint state to make sure the robot is following the right trajectory, then send the future joint states
                     # action_queue.append(cur_joint_state)  ### first send the current joint state to make sure the robot is following the right trajectory, then send the future joint states
-                    for aja in aloha_joint_actions:
+                    # for aja in aloha_joint_actions[1:]:
+                    for aja in aloha_joint_actions[0:]:
                         action_queue.append(aja)
+                        ### for debugging
+                        # action_queue.append(debug_action)
 
-                    ### render the robot in simulation for visualization
-                    # intrinsics_txts = ["/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000259921812.txt", "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000003493812.txt"]
-                    # extrinsics_txts = ["/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_1208.txt", "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_back_v1_1020.txt"]
-                    # virtual_camera_names = ["teleoperator_pov", "collaborator_pov"]
-
-                    # first_cam = "cam_azure_kinect_front"
-                    # rgb_key = f"observation.images.{first_cam}.color"
-                    # height, width, _ = observation[rgb_key].numpy().shape
-
-                    # Setup renderer with all cameras at once
-                    # renderer = setup_renderer(
-                    #     ALOHA_MODEL,
-                    #     intrinsics_txts,
-                    #     extrinsics_txts,
-                    #     0.25,
-                    #     width,
-                    #     height,
-                    #     virtual_camera_names
-                    # )
-
-                    # # Gather camera observations and apply phantomize if needed
-                    # to_render_joint_angles = [state] + aloha_joint_actions
-                    # all_images = []
-                    # for idx, aja in enumerate(to_render_joint_angles):
-                    #     print("rendering for future step: ", idx)
-                    #     renders = []
-                    #     for cam_name in ["cam_azure_kinect_front"]:
-                    #         rgb_key = f"observation.images.{cam_name}.color"
-                    #         depth_key = f"observation.images.{cam_name}.depth"
-                            
-                    #         # Overlay RGB with rendered robot
-                    #         render = render_and_overlay(
-                    #             renderer,
-                    #             ALOHA_MODEL,
-                    #             aja,
-                    #             observation[rgb_key].numpy(),
-                    #             0.25,
-                    #             VIRTUAL_CAMERA_MAPPING[cam_name],
-                    #         )
-                    #         renders.append(render)
-                            
-                    #     image = renders[0]
-                    #     all_images.append(image)
-
-                    # image = np.concatenate(all_images, axis=1)
-                    # plt.imshow(image)
-                    # plt.show()
-
-                # if len(action_queue) > 8:
-                #     print("length of action queue before pop: ", len(action_queue))
-                #     print("right eef pos in table: ", right_eef_pose[6:9])
-                #     print("predicted future eef pos in table: ", aloha_world_eef_pos)
-                    # import pdb; pdb.set_trace()
+                    
                 action_to_send = action_queue.popleft()
                 cprint("sending action to robot: {}".format(action_to_send), "green")
 
@@ -787,17 +799,20 @@ def control_loop(
                 # diff = np.abs(action_to_send[9:] - joint_state).mean()
                 control_t = 0
                 # while diff > 0.02 and control_t < 1:
+                beg = time.time()
                 while control_t < 1:
                     action_joint = robot.send_action(action_to_send)
-                    # time.sleep(0.2)
-                    observation_new = robot.capture_observation()
-                    cprint("the new joint state after sending the action: {}".format(observation_new['observation.state']), "blue")
+                    # time.sleep(1)
+                    # observation_new = robot.capture_observation()
+                    # cprint("the new joint state after sending the action: {}".format(observation_new['observation.state']), "blue")
                     # import pdb; pdb.set_trace()
                     # joint_state = observation_new['observation.state'][9:]
                     # diff = np.abs(action_to_send[9:] - joint_state).mean()
                     control_t += 1
                     # print("waiting for the robot to reach the target joint state, current diff is: ", diff)
                     
+
+                cprint(f"sending action time: {time.time() - beg} seconds", "blue")
                 action = {"action": action_joint}
                 if robot.use_eef:
                     action["action.right_eef_pose"] = np.zeros(10, dtype=np.float32) ### TODO: record the true eef pose
@@ -806,10 +821,13 @@ def control_loop(
                
         if dataset is not None:
             frame = {**observation, **action, "task": single_task}
-            frame.pop("observation.images.cam_azure_kinect_front.point_cloud")
-            frame.pop("observation.images.cam_azure_kinect_front.depth")
-            frame.pop("observation.images.cam_azure_kinect_back.depth")
-            frame.pop("observation.images.cam_azure_kinect_back.point_cloud")
+            for _k in (
+                "observation.images.cam_azure_kinect_front.point_cloud",
+                "observation.images.cam_azure_kinect_front.depth",
+                "observation.images.cam_azure_kinect_back.depth",
+                "observation.images.cam_azure_kinect_back.point_cloud",
+            ):
+                frame.pop(_k, None)
             dataset.add_frame(frame)
 
         # TODO(Steven): This should be more general (for RemoteRobot instead of checking the name, but anyways it will change soon)

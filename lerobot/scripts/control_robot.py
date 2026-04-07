@@ -284,11 +284,11 @@ def get_model_path():
     checkpoint_name = "epoch-200.ckpt"
 
     ###### hammer policies ####
-    model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-12finetune_our_on_sriram_hammer_dino/model_40001.pth"
-    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-12finetune_our_on_sriram_hammer_dino/model_42001.pth"
-    cat_idx = 0
-    exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/0211_finetune_ours_sriram_hammer_rgb_dataset_train_longer_keep_old_normalizer_full/"
-    checkpoint_name = "epoch-200.ckpt"
+    # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-12finetune_our_on_sriram_hammer_dino/model_40001.pth"
+    # # model_path = "/data/yufei/lerobot/data/high-level-ckpt/2026-02-12finetune_our_on_sriram_hammer_dino/model_42001.pth"
+    # cat_idx = 0
+    # exp_dir = "/data/yufei/lerobot/data/low-level-ckpt/0211_finetune_ours_sriram_hammer_rgb_dataset_train_longer_keep_old_normalizer_full/"
+    # checkpoint_name = "epoch-200.ckpt"
 
 
     ############### zero-shot experiments ############
@@ -345,40 +345,74 @@ def record(
 
     log_dir = "/home/yufei/.cache/huggingface/lerobot/{}".format(cfg.repo_id)
 
-    from lerobot.scripts.yufei_policy_utils import load_low_level_policy, load_multitask_high_level_model
-    model_path, exp_dir, checkpoint_name, cat_idx = get_model_path()
+    if cfg.openpi_websocket:
+        from lerobot.common.policies.robot_adapters import AlohaAdapter
+        from lerobot.common.robot_devices.openpi_websocket import make_openpi_websocket_policy_dict
 
-    high_level_policy, high_level_args = load_multitask_high_level_model(model_path)
-    low_level_policy = load_low_level_policy(exp_dir, checkpoint_name)
+        robot_adapter = AlohaAdapter(action_space="right_eef")
+        cfg.single_task = "fold the onesie"
+        policy = make_openpi_websocket_policy_dict(
+            robot_adapter=robot_adapter,
+            host=cfg.openpi_host,
+            port=cfg.openpi_port,
+            prompt=cfg.single_task,
+            replan_steps=cfg.openpi_replan_steps,
+            resize_size=cfg.openpi_resize_size,
+            base_image_key=cfg.openpi_base_image_key,
+            wrist_image_key=cfg.openpi_wrist_image_key,
+            gripper_delta_scale=cfg.openpi_gripper_delta_scale,
+            api_key=cfg.openpi_api_key,
+        )
+        meta_info = {
+            "policy": "openpi_websocket",
+            "openpi_host": cfg.openpi_host,
+            "openpi_port": cfg.openpi_port,
+            "openpi_replan_steps": cfg.openpi_replan_steps,
+            "openpi_resize_size": cfg.openpi_resize_size,
+            "openpi_base_image_key": cfg.openpi_base_image_key,
+            "openpi_wrist_image_key": cfg.openpi_wrist_image_key,
+            "openpi_gripper_delta_scale": cfg.openpi_gripper_delta_scale,
+            "language_prompt": cfg.single_task,
+        }
+        try:
+            meta_info["openpi_server_metadata"] = policy["client"].get_server_metadata()
+        except Exception as e:
+            logging.warning("Could not read OpenPI server metadata: %s", e)
+    else:
+        from lerobot.scripts.yufei_policy_utils import load_low_level_policy, load_multitask_high_level_model
+        model_path, exp_dir, checkpoint_name, cat_idx = get_model_path()
 
-    import torch
-    siglip_text_features = torch.load(os.path.join(os.environ['PROJECT_DIR'], "siglip_text_features_w_pick_and_place_w_grasp_and_lift.pt"))
-    siglip_text_features = siglip_text_features['values']
-    from lerobot.common.policies.robot_adapters import AlohaAdapter
-    robot_adapter = AlohaAdapter(action_space="right_eef")
-    from collections import deque
+        high_level_policy, high_level_args = load_multitask_high_level_model(model_path)
+        low_level_policy = load_low_level_policy(exp_dir, checkpoint_name)
 
-    policy = {
-        "high_level": high_level_policy,
-        "low_level": low_level_policy,
-        "cat_embedding": siglip_text_features[cat_idx].float().to("cuda"),
-        "cat_idx": cat_idx,
-        "robot_adapter": robot_adapter,
-        "action_queue": deque(),
-        "obs_queue": deque(maxlen=2),
-        "debug_queue": deque(),
-        "high_level_args": high_level_args,
-        # "mode": "zero-shot",
-        "mode": "fine-tuning",
-    }
+        import torch
+        siglip_text_features = torch.load(os.path.join(os.environ['PROJECT_DIR'], "siglip_text_features_w_pick_and_place_w_grasp_and_lift.pt"))
+        siglip_text_features = siglip_text_features['values']
+        from lerobot.common.policies.robot_adapters import AlohaAdapter
+        robot_adapter = AlohaAdapter(action_space="right_eef")
+        from collections import deque
 
-    meta_info = {
-        "low_level_ckpt": exp_dir,
-        "low_level_ckpt_name": checkpoint_name,
-        "high_level_model_path": model_path,
-        "category_index": cat_idx,
-        "mode": policy["mode"],
-    }
+        policy = {
+            "high_level": high_level_policy,
+            "low_level": low_level_policy,
+            "cat_embedding": siglip_text_features[cat_idx].float().to("cuda"),
+            "cat_idx": cat_idx,
+            "robot_adapter": robot_adapter,
+            "action_queue": deque(),
+            "obs_queue": deque(maxlen=2),
+            "debug_queue": deque(),
+            "high_level_args": high_level_args,
+            # "mode": "zero-shot",
+            "mode": "fine-tuning",
+        }
+
+        meta_info = {
+            "low_level_ckpt": exp_dir,
+            "low_level_ckpt_name": checkpoint_name,
+            "high_level_model_path": model_path,
+            "category_index": cat_idx,
+            "mode": policy["mode"],
+        }
 
     with open(os.path.join(log_dir, "meta_info.json"), "w") as f:
         json.dump(meta_info, f, indent=4)
@@ -407,7 +441,7 @@ def record(
             break
 
         log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-        # warmup_record(robot, events, enable_teleoperation, cfg.warmup_time_s, cfg.display_data, cfg.fps)
+        warmup_record(robot, events, enable_teleoperation, cfg.warmup_time_s, cfg.display_data, cfg.fps)
         record_episode(
             robot=robot,
             dataset=dataset,
@@ -532,6 +566,23 @@ python lerobot/scripts/control_robot.py
     --control.policy.path=outputs/train/diffPo_aloha_eef_rgb_0709_heatmapGoal/checkpoints/last/pretrained_model/ 
     --control.display_data=true 
     --control.episode_time_s=120
+```
+
+- Run pi05 via a remote OpenPI policy server (start the server separately, e.g. openpi `serve_policy.py`), ALOHA with `use_eef=true`:
+```bash
+python lerobot/scripts/control_robot.py \
+    --robot.type=aloha \
+    --control.type=record \
+    --control.openpi_websocket=true \
+    --control.openpi_host=127.0.0.1 \
+    --control.openpi_port=8000 \
+    --control.fps=30 \
+    --control.single_task="Place the object on the table." \
+    --control.repo_id=$USER/eval_aloha_pi05 \
+    --control.num_episodes=1 \
+    --robot.use_eef=true
+```
+(`control.single_task` is sent to the server as the language prompt; tune image keys if your camera names differ.)
 """
 @parser.wrap()
 def control_robot(cfg: ControlPipelineConfig):
