@@ -1,0 +1,10 @@
+{
+  "cam_azure_kinect_front": {
+    "intrinsics": "franka_leap_calibration/cam0_intrinsics.txt",
+    "extrinsics": "franka_leap_calibration/cam0_extrinsics.txt"
+  },
+  "cam_azure_kinect_side": {
+    "intrinsics": "franka_leap_calibration/cam2_intrinsics.txt",
+    "extrinsics": "franka_leap_calibration/cam2_extrinsics.txt"
+  }
+}
