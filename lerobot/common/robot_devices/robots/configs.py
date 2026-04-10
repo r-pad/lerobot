@@ -569,18 +569,18 @@ class DroidRobotConfig(RobotConfig):
     gello_joint_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
     # HACK: HARDCODED FOR A SPECIFIC GELLO
     gello_joint_offsets: tuple[float, ...] = (
-        4 * 3.141592653589793 / 2,
+        3 * 3.141592653589793 / 2,
         0 * 3.141592653589793 / 2,
+        4 * 3.141592653589793 / 2,
         2 * 3.141592653589793 / 2,
-        4 * 3.141592653589793 / 2,
-        4 * 3.141592653589793 / 2,
-        4 * 3.141592653589793 / 2,
+        2 * 3.141592653589793 / 2,
+        2 * 3.141592653589793 / 2,
         0 * 3.141592653589793 / 2,
     )
     gello_joint_signs: tuple[int, ...] = (1, 1, 1, 1, 1, -1, 1)
     gello_gripper_joint_id: int = 8
-    gello_gripper_open_degrees: int = 195
-    gello_gripper_close_degrees: int = 152
+    gello_gripper_open_degrees: int = 272
+    gello_gripper_close_degrees: int = 234
 
     # Deoxys / Franka config
     deoxys_general_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/charmander_droid.yml"
