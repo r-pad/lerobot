@@ -165,13 +165,20 @@ class DroidRobot:
 
         port = self.config.gello_port
         if port is None:
-            usb_ports = glob.glob("/dev/serial/by-id/*")
-            if len(usb_ports) == 0:
+            # GELLO uses a generic FTDI adapter whose by-id name contains
+            # "Serial_Converter"; the Robotiq RS-485 adapter does not. Match
+            # on that to disambiguate.
+            matches = [
+                p for p in glob.glob("/dev/serial/by-id/*")
+                if "Serial_Converter" in p
+            ]
+            if len(matches) != 1:
                 raise ValueError(
-                    "No GELLO port found. Please specify gello_port or plug in GELLO."
+                    f"Expected exactly one GELLO serial device, found {matches}. "
+                    "Pass --robot.gello_port=... to override."
                 )
-            port = usb_ports[0]
-            print(f"using port {port}. HACK: One hardcoded port is selected. Needs to be handled properly.")
+            port = matches[0]
+            print(f"Auto-detected GELLO on {port}")
 
         self._gello_port = port
 

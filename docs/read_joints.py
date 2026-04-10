@@ -35,12 +35,12 @@ def main():
     # --- GELLO setup (uses defaults from DroidRobotConfig), modify as necessary ---
     gello_joint_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7)
     gello_joint_offsets: tuple[float, ...] = (
-        4 * 3.141592653589793 / 2,
+        3 * 3.141592653589793 / 2,
         0 * 3.141592653589793 / 2,
+        4 * 3.141592653589793 / 2,
         2 * 3.141592653589793 / 2,
-        4 * 3.141592653589793 / 2,
-        4 * 3.141592653589793 / 2,
-        4 * 3.141592653589793 / 2,
+        2 * 3.141592653589793 / 2,
+        2 * 3.141592653589793 / 2,
         0 * 3.141592653589793 / 2,
     )
     gello_joint_signs: tuple[int, ...] = (1, 1, 1, 1, 1, -1, 1)
@@ -48,7 +48,10 @@ def main():
     gello_gripper_open_degrees: int = 195
     gello_gripper_close_degrees: int = 152
 
-    port = glob.glob("/dev/serial/by-id/*")[0]
+    matches = [p for p in glob.glob("/dev/serial/by-id/*") if "Serial_Converter" in p]
+    if len(matches) != 1:
+        raise ValueError(f"Expected exactly one GELLO serial device, found {matches}.")
+    port = matches[0]
     gello = DynamixelRobot(
         joint_ids=list(gello_joint_ids),
         joint_offsets=list(gello_joint_offsets),
