@@ -29,7 +29,7 @@ from lerobot.common.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, get_siglip_text_embedding
+# from lerobot.common.policies.high_level.high_level_wrapper import HighLevelWrapper, HighLevelConfig, get_siglip_text_embedding
 from transformers import AutoModel, AutoProcessor
 
 
@@ -77,12 +77,15 @@ class DP3Policy(PreTrainedPolicy):
         # instantiate DP3 model
         # TODO: obs_dict, action_dim
         obs_dict = {
-            'point_cloud': (4500, 3),
-            'imagin_robot': (4, 3),
-            'goal_gripper_pcd': (4, 3),
+            'point_cloud': (4500, 6),
+            'imagin_robot': (16, 3),
+            'goal_gripper_pcd': (16, 3),
             'agent_pos': dataset_stats[self.obs_key]['mean'].shape
         }
-        action_dim = dataset_stats[self.act_key]['mean'].shape[0]
+        if self.act_key == "action.right_eef_pose_relative":
+            action_dim = dataset_stats["observation.right_eef_pose"]['mean'].shape[0]
+        else:
+            action_dim = dataset_stats[self.act_key]['mean'].shape[0]
         pointcloud_encoder_cfg = dict(in_channels=config.in_channels,
                                     out_channels=config.out_channels,
                                     use_layernorm=config.use_layernorm,
@@ -115,6 +118,7 @@ class DP3Policy(PreTrainedPolicy):
             "aloha": torch.tensor([6, 197, 174]),
             "human": torch.tensor([343, 763, 60]),
             "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
+            "franka_leap": torch.arange(16),  # use all 16 hand points for leap
         }
         model = ConditionalUnet1D(
             input_dim=input_dim,
@@ -149,7 +153,7 @@ class DP3Policy(PreTrainedPolicy):
             calibration_data = json.load(f)
         self.calibration_data = calibration_data
 
-        if self.config.enable_goal_conditioning:
+        if False: # self.config.enable_goal_conditioning:
             hl_config = HighLevelConfig(
                 model_type=self.config.hl_model_type,
                 run_id=self.config.hl_run_id,
@@ -331,18 +335,13 @@ class DP3Policy(PreTrainedPolicy):
             )
         batch = self.normalize_targets(batch)
 
-        assert [b == 'aloha' for b in batch['embodiment']]
-        gripper_idxs = torch.from_numpy(self.GRIPPER_IDX['aloha'])
+        assert [b == 'franka_leap' for b in batch['embodiment']]
+        gripper_idxs = self.GRIPPER_IDX['franka_leap']
 
         # compute loss
         # pre-process gripper pcds by selecting via indices
         gripper_pcds = batch['observation.points.gripper_pcds'][..., gripper_idxs, :]
-        fourth_point = (gripper_pcds[..., 0, :] + gripper_pcds[..., 1, :]) / 2.
-        gripper_pcds = torch.concat([gripper_pcds, fourth_point.unsqueeze(2)], dim=-2)
-
         goal_gripper_pcds = batch['observation.points.goal_gripper_pcds'][..., gripper_idxs, :]
-        fourth_goal_point = (goal_gripper_pcds[..., 0, :] + goal_gripper_pcds[..., 1, :]) / 2.
-        goal_gripper_pcds = torch.concat([goal_gripper_pcds, fourth_goal_point.unsqueeze(2)], dim=-2)
 
         nobs = {
             'agent_pos': batch[self.obs_key],

@@ -174,6 +174,24 @@ def visualize_dataset(
             if "next.success" in batch:
                 rr.log("next.success", rr.Scalar(batch["next.success"][i].item()))
 
+            if "observation.points.point_cloud" in batch:
+                rr.log(
+                    "point_cloud",
+                    rr.Points3D(batch["observation.points.point_cloud"][i], colors=np.array([150, 150, 255], dtype=np.uint8))
+                )
+
+            if 'observation.points.gripper_pcds' in batch:
+                rr.log(
+                    "gripper_pcds",
+                    rr.Points3D(batch['observation.points.gripper_pcds'][i], colors=np.array([100, 255, 100], dtype=np.uint8))
+                )
+
+            if 'observation.points.goal_gripper_pcds' in batch:
+                rr.log(
+                    "goal_gripper_pcds",
+                    rr.Points3D(batch['observation.points.goal_gripper_pcds'][i], colors=np.array([255, 100, 100], dtype=np.uint8))
+                )
+
     if mode == "local" and save:
         # save .rrd locally
         output_dir = Path(output_dir)

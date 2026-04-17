@@ -188,5 +188,8 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
             obs_key = "observation.state"
             act_key = "action"
             return LiberoFrankaAdapter(obs_key, act_key)
+        elif self.robot_type == "franka_leap":
+            from lerobot.common.policies.robot_adapters import FrankaLeapAdapter
+            return FrankaLeapAdapter(self.action_space)
         else:
             raise ValueError(f"Unknown robot_type: {self.robot_type}")

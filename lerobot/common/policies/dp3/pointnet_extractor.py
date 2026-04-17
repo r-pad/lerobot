@@ -187,6 +187,8 @@ class Act3dEncoder(nn.Module):
         # scene point cloud
         if self.eef_points == 4:
             chosen_four_point_idx = torch.tensor([0, 1, 2, 3])
+        elif self.eef_points == 16:
+            chosen_four_point_idx = torch.arange(16)
         else:
             raise ValueError("Chosen eef_points have not been implemented.")
         

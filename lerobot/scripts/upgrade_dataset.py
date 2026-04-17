@@ -6,6 +6,7 @@ and creates a new dataset.
 Slow, but flexible.
 """
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.common.constants import HF_LEROBOT_HOME
 import torch
 from tqdm import tqdm
 import numpy as np
@@ -26,6 +27,7 @@ from torchvision import transforms
 from pytorch3d.ops import sample_farthest_points
 import PIL
 import open3d as o3d
+import pickle
 
 
 TARGET_SHAPE = 224
@@ -294,14 +296,18 @@ def compute_pcd(depth, K, num_points, max_depth, cam_to_world):
     points = points * z_flat
     points = points.T  # Shape: (N, 3)
 
-    scene_pcd_pt3d = torch.from_numpy(points)
+    pcd_xyz_hom = np.concatenate([points, np.ones((points.shape[0], 1))], axis=1)  # (N, 4)
+    pcd_xyz_world = (cam_to_world @ pcd_xyz_hom.T).T[:, :3]  # (N, 3)
+    # clip to bounding box
+    pcd_xyz_world = pcd_xyz_world[pcd_xyz_world[:, 2] >= 0.]
+    pcd_xyz_world = pcd_xyz_world[np.logical_and(pcd_xyz_world[:, 0] >= 0.22, pcd_xyz_world[:, 0] <= 1.)]
+    pcd_xyz_world = pcd_xyz_world[np.logical_and(pcd_xyz_world[:, 1] >= -0.9, pcd_xyz_world[:, 1] <= 0.1)]
+
+    scene_pcd_pt3d = torch.from_numpy(pcd_xyz_world)
     scene_pcd_downsample, scene_points_idx = sample_farthest_points(
         scene_pcd_pt3d[None], K=num_points, random_start_point=False
     )
-    scene_pcd = scene_pcd_downsample.squeeze().numpy()
-
-    pcd_xyz_hom = np.concatenate([scene_pcd, np.ones((scene_pcd.shape[0], 1))], axis=1)  # (N, 4)
-    pcd_xyz_world = (cam_to_world @ pcd_xyz_hom.T).T[:, :3]  # (N, 3)
+    pcd_xyz_world = scene_pcd_downsample.squeeze().numpy()
 
     # Get corresponding colors at the indices
     return pcd_xyz_world
@@ -580,7 +586,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         else:
             # Keep in world frame
             # frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=np.eye(4), joint_state=joint_state).astype(np.float32)
-            frame_data["observation.points.gripper_pcds"] = hand_model.get_point_cloud(joint_state).astype(np.float32)
+            frame_data["observation.points.gripper_pcds"] = hand_model.get_hand_skeleton(joint_state).astype(np.float32)
 
     # Add calibration data if feature is enabled
     for cam_name in camera_names:
@@ -598,17 +604,18 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
             scaled_K = calibrations[cam_name]["scaled_K"]
             cam_to_world = calibrations[cam_name]["T_world_cam"]
             depth = frame_data["observation.images.{}.transformed_depth".format(cam_name)].squeeze()
-            pcd = compute_pcd(depth, scaled_K, 4500, 1.5, cam_to_world)
+            pcd = compute_pcd(depth, scaled_K, 4000, 1.5, cam_to_world)
             all_pcd.append(pcd)
 
         all_pcd = np.concatenate(all_pcd, axis=0)
         scene_pcd_pt3d = torch.from_numpy(all_pcd)
         # print(all_pcd.shape)
         scene_pcd_downsample, scene_points_idx = sample_farthest_points(
-            scene_pcd_pt3d[None], K=4500, random_start_point=False
+            scene_pcd_pt3d[None], K=4000, random_start_point=False
         )
-        scene_pcd = scene_pcd_downsample.squeeze()
-        frame_data["observation.points.point_cloud"] = scene_pcd.numpy().astype(np.float32)
+        scene_pcd = scene_pcd_downsample.squeeze().numpy().astype(np.float32)
+        hand_pcd = hand_model.get_point_cloud(joint_state).astype(np.float32)
+        frame_data["observation.points.point_cloud"] = np.concatenate([scene_pcd, hand_pcd], axis=0)
 
     # Dummy values, replaced at the end of the episode
     goal_key = f"observation.points.goal_gripper_pcds"
@@ -631,7 +638,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
 
 def _process_episode_goals(target_dataset, episode_length, new_features, humanize,
-                          episode_extras, phantomize, calibrations, width, height):
+                          episode_extras, phantomize, calibrations, width, height, goal_indices):
     """Process goal projections, event indices, and subgoals for an episode."""
     joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
 
@@ -639,17 +646,17 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
         episode_gripper_pcds = episode_extras['episode_gripper_pcds']
 
     # Determine goal indices
-    if 'episode_events' in episode_extras:
-        # Use events from external file (human data, phantom, or robot with manual annotation)
-        goal_indices = episode_extras['episode_events']['event_idxs']
-        # Ensure last frame is included as a goal
-        if goal_indices[-1] != episode_length - 1:
-            goal_indices = goal_indices + [episode_length - 1]
-    else:
-        # Fall back to gripper-based detection for robot data
-        close_thresh, open_thresh = 25, 30
-        goal_indices = extract_events_with_gripper_pos(
-            joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
+    # if 'episode_events' in episode_extras:
+    #     # Use events from external file (human data, phantom, or robot with manual annotation)
+    #     goal_indices = episode_extras['episode_events']['event_idxs']
+    #     # Ensure last frame is included as a goal
+    #     if goal_indices[-1] != episode_length - 1:
+    #         goal_indices = goal_indices + [episode_length - 1]
+    # else:
+    #     # Fall back to gripper-based detection for robot data
+    #     close_thresh, open_thresh = 25, 30
+    #     goal_indices = extract_events_with_gripper_pos(
+    #         joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
 
     camera_names = list(calibrations.keys())
 
@@ -705,9 +712,10 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
             target_dataset.episode_buffer["subgoal"][i] = TASK_SPEC[task][current_goal_idx]
 
     if "observation.points.goal_gripper_pcds" in new_features:
+        print(target_dataset.episode_buffer["next_event_idx"])
         for i in range(episode_length):
             current_goal_idx = target_dataset.episode_buffer["next_event_idx"][i]
-            target_dataset.episode_buffer["observation.points.goal_gripper_pcds"][i] = target_dataset.episode_buffer["observation.points.gripper_pcds"][current_goal_idx[0]]
+            target_dataset.episode_buffer["observation.points.goal_gripper_pcds"][i] = target_dataset.episode_buffer["observation.points.gripper_pcds"][current_goal_idx]
 
 def upgrade_dataset(
     source_repo_id: str,
@@ -778,8 +786,20 @@ def upgrade_dataset(
     # 4. Upgrade data episode by episode
     print(f"Upgrading {source_meta.info['total_episodes']} episodes...")
 
+    # import rerun as rr
+    # rr.init("dataset_upgrade_debug", spawn=True)
+    goal_indices_dict = {}
+    goal_path = HF_LEROBOT_HOME / source_repo_id / 'goal_indices.txt'
+    with open(goal_path, 'r') as f:
+        for line in f:
+            parts = list(map(int, line.split()))
+            goal_indices_dict[parts[0]] = parts[1:]
+
+
     for episode_idx in range(source_meta.info["total_episodes"]):
         print(f"Processing episode {episode_idx + 1}/{source_meta.info['total_episodes']}")
+        goal_indices = goal_indices_dict[episode_idx]
+        print(f"Goal indices for episode {episode_idx}: {goal_indices}")
         if episode_idx in discard_episodes:
             continue
 
@@ -796,9 +816,7 @@ def upgrade_dataset(
         episode_length = episode_end - episode_start
 
         # Process each frame in the episode
-        # import rerun as rr
-        # rr.init("dataset_upgrade_debug", spawn=True)
-        for frame_idx in tqdm(range(episode_length-10, episode_length)):
+        for frame_idx in tqdm(range(episode_length)):
             original_frame = source_dataset[episode_start + frame_idx]
 
             frame_data = _process_frame_data(
@@ -822,12 +840,12 @@ def upgrade_dataset(
             # exit()
             # rr.set_time("seq_a_frame", sequence=frame_idx)
             # rr.log(
-            #     f"seq_a/point_cloud",
+            #     f"{episode_idx}/point_cloud",
             #     rr.Points3D(frame_data["observation.points.point_cloud"], colors=[0.5, 0.5, 0.5])
             # )
             # rr.set_time("seq_b_frame", sequence=frame_idx)
             # rr.log(
-            #     f"seq_b/gripper_pcds",
+            #     f"{episode_idx}/gripper_pcds",
             #     rr.Points3D(frame_data["observation.points.gripper_pcds"], colors=[1.0, 0.0, 0.0])
             # )
 
@@ -836,7 +854,7 @@ def upgrade_dataset(
         # Process episode-level goals and events
         _process_episode_goals(
             target_dataset, episode_length, new_features, humanize,
-            episode_extras, phantomize, calibrations, width, height
+            episode_extras, phantomize, calibrations, width, height, goal_indices
         )
 
         # Save episode
@@ -868,7 +886,7 @@ if __name__ == "__main__":
                         help="Source dataset repository ID")
     parser.add_argument("--target_repo_id", type=str, default="YingYuan0414/syringe_0404_pcd",
                         help="Target dataset repository ID")
-    parser.add_argument("--calibration_config", type=str, default="leap_calibration/calibration_multiview.json",
+    parser.add_argument("--calibration_config", type=str, default="franka_leap_calibration/calibration_franka_leap.json",
                         help="Path to calibration JSON config file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")
@@ -971,7 +989,7 @@ if __name__ == "__main__":
     assert not (args.phantomize and args.humanize), "Cannot use both phantomize and humanize modes simultaneously"
     path_to_extradata = f"{args.path_to_extradata}/{args.source_repo_id}"
 
-    hand_model = URDFHandPointCloud(total_points=1024)
+    hand_model = URDFHandPointCloud(total_points=500)
 
     # Upgrade the dataset
     upgraded_dataset = upgrade_dataset(

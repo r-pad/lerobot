@@ -86,8 +86,8 @@ class URDFHandPointCloud:
         raw_mesh_entries = []
 
         for link in self.robot.links:
-            # if not self._is_hand_link(link.name):
-            #     continue
+            if not self._is_hand_link(link.name):
+                continue
 
             elems = link.collisions if self.use_collision else link.visuals
 
@@ -163,6 +163,19 @@ class URDFHandPointCloud:
         t = T[:3, 3]
         return points @ R.T + t
 
+    def get_hand_skeleton(self, qpos):
+        cfg = self.qpos_to_cfg(qpos)
+        link_fk = self.robot.link_fk(cfg=cfg)
+
+        skeleton = []
+        for e in self.entries:
+            if e['link_name'] == "thumb_pip":
+                continue
+            T_world_link = link_fk[e["link"]]
+            skeleton.append(T_world_link[:3, 3])
+        skeleton = np.stack(skeleton, axis=0)
+        return skeleton
+    
     def get_point_cloud(self, qpos, base_transform=None):
         """
         Returns concatenated hand point cloud in world frame.
