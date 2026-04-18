@@ -124,8 +124,8 @@ class DP3Config(PreTrainedConfig):
         }
     )
 
-    robot_type: str = "aloha"
-    action_space: str = "right_eef"
+    robot_type: str = "franka_leap"
+    action_space: str = "right_eef_relative"
 
     # The original implementation doesn't sample frames for the last 7 steps,
     # which avoids excessive padding and leads to improved training results.
@@ -140,7 +140,7 @@ class DP3Config(PreTrainedConfig):
     use_up_condition: bool = True
     embedding_type: str = "shared"
     obs_as_global_cond:bool = True
-    use_pc_color: bool = True
+    use_pc_color: bool = False
     pointnet_type: str = "act3d"
     in_channels: int = 6
     out_channels: int = 64
@@ -166,11 +166,11 @@ class DP3Config(PreTrainedConfig):
     clip_sample_range: float = 1.0
 
     use_text_embedding: bool = False
-    calibration_json: str = "lerobot/scripts/aloha_calibration/calibration_multiview.json"
+    calibration_json: str = "lerobot/scripts/franka_leap_calibration/calibration_franka_leap.json"
 
     # Use high-level for goal-conditioning
     enable_goal_conditioning: bool = False
-    eef_points: int = 4
+    eef_points: int = 16
     hl_model_type: str = "dino_3dgp"  # "articubot", "dino_heatmap", or "dino_3dgp"
     hl_run_id: str | None = "5s0w1tg7"
     hl_entity: str = "r-pad"

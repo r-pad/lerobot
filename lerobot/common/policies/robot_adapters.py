@@ -1,7 +1,13 @@
 from abc import ABC, abstractmethod
 from typing import Dict
+from pathlib import Path
+
+import numpy as np
 import torch
 import pytorch3d.transforms as transforms
+from scipy.optimize import least_squares
+from scipy.spatial.transform import Rotation as scipy_rotation
+from urdfpy import URDF
 
 class RobotAdapter(ABC):
     """Abstract interface for robot-specific logic"""
@@ -154,6 +160,174 @@ class AlohaAdapter(RobotAdapter):
 
         # For joint space, return dummy eef
         return torch.zeros(10, device=action.device, dtype=action.dtype)
+    
+class FrankaLeapAdapter(RobotAdapter):
+    """Franka LEAP adapter with 25D EEF representation [rot6d, xyz, 16 hand joints]."""
+
+    def __init__(self, action_space: str):
+        assert action_space in ["right_eef", "joint", "right_eef_relative"]
+        self.action_space = action_space
+
+        self._arm_joint_names = [f"panda_joint{i}" for i in range(1, 8)]
+        self._hand_joint_names = [f"leap_{i}" for i in range(16)]
+        self._joint_names = self._arm_joint_names + self._hand_joint_names
+        self._eef_link_name = "palm_lower"
+
+        urdf_path = Path(__file__).resolve().parents[3] / "robot_descriptions/panda/panda_leap.urdf"
+        self._robot = URDF.load(str(urdf_path))
+        self._eef_link = self._robot.link_map[self._eef_link_name]
+        self._arm_lower_bounds, self._arm_upper_bounds = self._get_arm_joint_bounds()
+
+    def _get_arm_joint_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        lower_bounds = []
+        upper_bounds = []
+        for joint_name in self._arm_joint_names:
+            joint = self._robot.joint_map[joint_name]
+            if joint.limit is None:
+                lower_bounds.append(-np.pi)
+                upper_bounds.append(np.pi)
+            else:
+                lower_bounds.append(joint.limit.lower if joint.limit.lower is not None else -np.pi)
+                upper_bounds.append(joint.limit.upper if joint.limit.upper is not None else np.pi)
+        return np.asarray(lower_bounds, dtype=np.float64), np.asarray(upper_bounds, dtype=np.float64)
+
+    def _state_to_cfg(self, state: torch.Tensor) -> dict[str, float]:
+        state_np = state.detach().cpu().to(dtype=torch.float64).numpy().reshape(-1)
+        if state_np.shape[0] < len(self._joint_names):
+            raise ValueError(f"Expected at least {len(self._joint_names)} joints, got {state_np.shape[0]}")
+        return {
+            joint_name: float(joint_value)
+            for joint_name, joint_value in zip(self._joint_names, state_np[: len(self._joint_names)])
+        }
+
+    def forward_kinematics(self, state: torch.Tensor) -> torch.Tensor:
+        """Compute 25D EEF pose from a 23D joint state."""
+        if state.ndim > 1:
+            state = state.squeeze(0)
+
+        cfg = self._state_to_cfg(state)
+        eef_transform = self._robot.link_fk(cfg=cfg)[self._eef_link]
+
+        rotation_6d = transforms.matrix_to_rotation_6d(torch.from_numpy(eef_transform[:3, :3])[None]).squeeze(0)
+        translation = torch.from_numpy(eef_transform[:3, 3])
+        eef_pose = torch.cat([rotation_6d, translation, state[7:]])
+        return eef_pose.to(device=state.device, dtype=state.dtype)
+
+    def inverse_kinematics(self, eef_action: torch.Tensor, state: torch.Tensor | None = None) -> torch.Tensor:
+        """Solve arm IK for a 25D EEF target and keep the 16 hand joints from target."""
+        if eef_action.ndim > 1:
+            eef_action = eef_action.squeeze(0)
+        if state is not None and state.ndim > 1:
+            state = state.squeeze(0)
+
+        target_rotation = transforms.rotation_6d_to_matrix(eef_action[:6][None]).squeeze(0).detach().cpu().numpy()
+        target_translation = eef_action[6:9].detach().cpu().numpy()
+        target_hand = eef_action[9:25]
+
+        if state is not None:
+            initial_guess = state[:7].detach().cpu().to(dtype=torch.float64).numpy()
+            hand_reference_np = state[7:23].detach().cpu().to(dtype=torch.float64).numpy()
+        else:
+            initial_guess = np.zeros(7, dtype=np.float64)
+            hand_reference_np = np.zeros(16, dtype=np.float64)
+
+        def residual(arm_joints: np.ndarray) -> np.ndarray:
+            cfg = {j: float(v) for j, v in zip(self._arm_joint_names, arm_joints)}
+            cfg.update({j: float(v) for j, v in zip(self._hand_joint_names, hand_reference_np)})
+            eef_transform = self._robot.link_fk(cfg=cfg)[self._eef_link]
+
+            pos_err = eef_transform[:3, 3] - target_translation
+            rot_err = scipy_rotation.from_matrix(target_rotation @ eef_transform[:3, :3].T).as_rotvec()
+            return np.concatenate([pos_err, rot_err])
+
+        ik_result = least_squares(
+            residual,
+            x0=initial_guess,
+            bounds=(self._arm_lower_bounds, self._arm_upper_bounds),
+            method="trf",
+            max_nfev=100,
+        )
+
+        arm_joints = torch.from_numpy(ik_result.x).to(device=eef_action.device, dtype=eef_action.dtype)
+        return torch.cat([arm_joints, target_hand.to(device=eef_action.device, dtype=eef_action.dtype)])
+
+    def get_obs_key(self) -> str:
+        if self.action_space in ["right_eef", "right_eef_relative"]:
+            return "observation.right_eef_pose"
+        return "observation.state"
+
+    def get_act_key(self) -> str:
+        if self.action_space == "right_eef":
+            return "action.right_eef_pose"
+        elif self.action_space == "right_eef_relative":
+            return "action.right_eef_pose_relative"
+        return "action"
+    
+    def _relative_to_absolute_eef(self, relative_action: torch.Tensor, current_eef: torch.Tensor) -> torch.Tensor:
+        """Convert relative 25D EEF action to absolute."""
+        if relative_action.ndim == 1:
+            relative_action = relative_action.unsqueeze(0)
+
+        rel_rot6d, rel_pos, rel_hand = relative_action[0, :6], relative_action[0, 6:9], relative_action[0, 9:25]
+        obs_rot6d, obs_pos, obs_hand = current_eef[:6], current_eef[6:9], current_eef[9:25]
+
+        R_obs = transforms.rotation_6d_to_matrix(obs_rot6d[None]).squeeze()
+        R_rel = transforms.rotation_6d_to_matrix(rel_rot6d[None]).squeeze()
+        R_abs = torch.matmul(R_obs, R_rel)
+
+        abs_rot6d = transforms.matrix_to_rotation_6d(R_abs[None]).squeeze()
+        abs_pos = obs_pos + rel_pos
+        abs_hand = obs_hand + rel_hand
+        return torch.cat([abs_rot6d, abs_pos, abs_hand])[None]
+
+    def compute_relative_actions(self, batch: dict) -> dict:
+        obs_key = self.get_obs_key()
+        source_act_key = "action.right_eef_pose"
+        target_act_key = self.get_act_key()
+
+        current_obs = batch[obs_key][:, -1, :]  # (B, 25)
+        actions = batch[source_act_key]  # (B, horizon, 25)
+
+        B, horizon, _ = actions.shape
+
+        obs_rot6d, obs_pos, obs_hand = current_obs[:, :6], current_obs[:, 6:9], current_obs[:, 9:25]
+        act_rot6d, act_pos, act_hand = actions[:, :, :6], actions[:, :, 6:9], actions[:, :, 9:25]
+
+        R_obs = transforms.rotation_6d_to_matrix(obs_rot6d)
+        R_act = transforms.rotation_6d_to_matrix(act_rot6d.reshape(B * horizon, 6)).reshape(B, horizon, 3, 3)
+
+        R_relative = torch.matmul(R_obs.transpose(-2, -1).unsqueeze(1), R_act)
+        relative_rot6d = transforms.matrix_to_rotation_6d(R_relative.reshape(B * horizon, 3, 3)).reshape(B, horizon, 6)
+
+        relative_pos = act_pos - obs_pos.unsqueeze(1)
+        relative_hand = act_hand - obs_hand.unsqueeze(1)
+
+        batch[target_act_key] = torch.cat([relative_rot6d, relative_pos, relative_hand], dim=-1)
+        return batch
+
+    def transform_action(
+        self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if self.action_space in ["right_eef", "right_eef_relative"]:
+            if self.action_space == "right_eef_relative":
+                action = self._relative_to_absolute_eef(action, reference_eef)
+            action = action.squeeze(0) if action.ndim > 1 else action
+            state = state.squeeze(0) if state.ndim > 1 else state
+            return self.inverse_kinematics(action, state)[None].float()
+        return action
+
+    def get_eef_action(
+        self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        if self.action_space == "right_eef":
+            return action
+        elif self.action_space == "right_eef_relative":
+            # For relative actions, convert to absolute using reference EEF
+            return self._relative_to_absolute_eef(action, reference_eef)
+
+        # For joint space, return dummy eef
+        return torch.zeros(25, device=action.device, dtype=action.dtype)
+    
 
 class DroidAdapter(RobotAdapter):
     """Droid (Franka via deoxys) adapter. Same EEF representation as Aloha
