@@ -76,16 +76,18 @@ class DP3Policy(PreTrainedPolicy):
 
         # instantiate DP3 model
         # TODO: obs_dict, action_dim
+        # Warning: there's no entry in dataset_stats during inference
         obs_dict = {
             'point_cloud': (4500, 6),
             'imagin_robot': (16, 3),
             'goal_gripper_pcd': (16, 3),
-            'agent_pos': dataset_stats[self.obs_key]['mean'].shape
+            'agent_pos': (25,)  # dataset_stats[self.obs_key]['mean'].shape
         }
         if self.act_key == "action.right_eef_pose_relative":
-            action_dim = dataset_stats["observation.right_eef_pose"]['mean'].shape[0]
+            action_dim = 25  # dataset_stats["observation.right_eef_pose"]['mean'].shape[0]
         else:
             action_dim = dataset_stats[self.act_key]['mean'].shape[0]
+        self.action_dim = action_dim
         pointcloud_encoder_cfg = dict(in_channels=config.in_channels,
                                     out_channels=config.out_channels,
                                     use_layernorm=config.use_layernorm,
@@ -103,6 +105,7 @@ class DP3Policy(PreTrainedPolicy):
                                 )
         # create diffusion model
         obs_feature_dim = obs_encoder.output_shape()
+        self.obs_feature_dim = obs_feature_dim
         input_dim = action_dim + obs_feature_dim
         global_cond_dim = None
         if config.obs_as_global_cond:
@@ -153,6 +156,9 @@ class DP3Policy(PreTrainedPolicy):
             calibration_data = json.load(f)
         self.calibration_data = calibration_data
 
+        self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
+
+
         if False: # self.config.enable_goal_conditioning:
             hl_config = HighLevelConfig(
                 model_type=self.config.hl_model_type,
@@ -195,6 +201,9 @@ class DP3Policy(PreTrainedPolicy):
         """Clear observation and action queues. Should be called on `env.reset()`"""
         self._queues = {
             self.obs_key: deque(maxlen=self.config.n_obs_steps),
+            "observation.points.point_cloud": deque(maxlen=self.config.n_obs_steps),
+            "observation.points.gripper_pcds": deque(maxlen=self.config.n_obs_steps),
+            "observation.points.goal_gripper_pcds": deque(maxlen=self.config.n_obs_steps),
             self.act_key: deque(maxlen=self.config.n_action_steps),
         }
         if self.config.image_features:
@@ -232,11 +241,11 @@ class DP3Policy(PreTrainedPolicy):
         if self.config.use_text_embedding:
             text = batch['task']
 
-        if self.config.image_features:
-            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch["observation.images"] = torch.stack(
-                [batch[key] for key in self.config.image_features], dim=-4
-            )
+        # if self.config.image_features:
+        #     batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+        #     batch["observation.images"] = torch.stack(
+        #         [batch[key] for key in self.config.image_features], dim=-4
+        #     )
         # Note: It's important that this happens after stacking the images into a single key.
         self._queues = populate_queues(self._queues, batch)
 
@@ -250,9 +259,31 @@ class DP3Policy(PreTrainedPolicy):
             self._relative_action_reference_eef = current_obs.squeeze(0)  # (10,)
 
             # pass observation to encoder
-            nobs_features = self.obs_encoder(batch)
+            for k in batch.keys():
+                print(k, batch[k].shape)
+            
+            nobs = {
+                'agent_pos': batch[self.obs_key],
+                'imagin_robot': batch['observation.points.gripper_pcds'],
+                'goal_gripper_pcd': batch['observation.points.goal_gripper_pcds'],
+                'point_cloud': batch['observation.points.point_cloud'],
+            }
+            
+            for k in nobs.keys():
+                print(k, nobs[k].shape)
+
+            value = next(iter(nobs.values()))
+            B, To = value.shape[:2]
+            T = self.config.horizon
+            Da = self.action_dim
+            Do = self.obs_feature_dim
+            To = self.config.n_obs_steps
+
             # TODO: B, T, Da
             if self.config.obs_as_global_cond:
+                this_nobs = dict_apply(nobs, lambda x: x.reshape(-1,*x.shape[2:]))
+                nobs_features = self.obs_encoder(this_nobs)
+                print(nobs_features.shape)
                 if "cross_attention" in self.config.condition_type:
                     # treat as a sequence
                     global_cond = nobs_features.reshape(B, self.config.n_obs_steps, -1)
@@ -260,7 +291,7 @@ class DP3Policy(PreTrainedPolicy):
                     # reshape back to B, Do
                     global_cond = nobs_features.reshape(B, -1)
                 # empty data for action
-                cond_data = torch.zeros(size=(B, T, Da))
+                cond_data = torch.zeros(size=(B, T, Da), device=global_cond.device, dtype=global_cond.dtype)
                 cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
             else:
                 raise NotImplementedError
@@ -270,8 +301,9 @@ class DP3Policy(PreTrainedPolicy):
                                 cond_mask,
                                 global_cond=global_cond)
 
+            naction_pred = nsample[...,:Da]
             # TODO(rcadene): make above methods return output dictionary?
-            actions = self.unnormalize_outputs({self.act_key: actions})[self.act_key]
+            actions = self.unnormalize_outputs({self.act_key: naction_pred})[self.act_key]
 
             self._queues[self.act_key].extend(actions.transpose(0, 1))
 

@@ -13,11 +13,15 @@ if not hasattr(np, "complex"):
 from urdfpy import URDF
 import trimesh
 
+# get absolute path for this file
+import os
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 class URDFHandPointCloud:
     def __init__(
         self,
-        urdf_path="../../robot_descriptions/panda/panda_leap.urdf",
+        urdf_path="../../../robot_descriptions/panda/panda_leap.urdf",
         hand_link_names=None,
         hand_link_keywords=("fingertip", "pip", "dip", "mcp", "palm"),
         use_collision=False,
@@ -36,7 +40,8 @@ class URDFHandPointCloud:
             total_points: total sampled points across all hand meshes
             sample_even: use sample_surface_even if True
         """
-        self.robot = URDF.load(urdf_path)
+        abs_path = os.path.join(ROOT_DIR, urdf_path)
+        self.robot = URDF.load(abs_path)
         joint_names = [
             "panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4",
             "panda_joint5", "panda_joint6", "panda_joint7",

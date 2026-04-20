@@ -245,6 +245,7 @@ def get_camera_names_from_observation(observation):
 
 def compute_goal_prediction(policy, policy_cfg, single_task, observation):
     if not (hasattr(policy_cfg, "enable_goal_conditioning") and policy_cfg.enable_goal_conditioning):
+        observation["observation.points.goal_gripper_pcds"] = observation["observation.points.gripper_pcds"].clone()
         return observation
 
     # Generate new goal prediction when queue is empty
@@ -383,6 +384,7 @@ def control_loop(
                 # the goal_gripper_proj key.
                 camera_names = get_camera_names_from_observation(observation)
                 observation = get_phantomized_observation(policy, policy.config, camera_names, observation)
+                observation = robot.get_pointcloud_obs(observation)
                 observation = compute_goal_prediction(policy, policy.config, single_task, observation)
 
                 observation["task"] = single_task
@@ -397,6 +399,9 @@ def control_loop(
                     action["action.right_eef_pose"] = pred_action_eef
 
         if dataset is not None:
+            observation.pop('observation.points.point_cloud', None)
+            observation.pop('observation.points.gripper_pcds', None)
+            observation.pop('observation.points.goal_gripper_pcds', None)
             frame = {**observation, **action, "task": single_task}
             dataset.add_frame(frame)
 
