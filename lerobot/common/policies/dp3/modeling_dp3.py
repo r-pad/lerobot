@@ -73,6 +73,8 @@ class DP3Policy(PreTrainedPolicy):
         self.latest_gripper_proj = {}
         # For relative actions: save reference EEF pose for the current action chunk
         self._relative_action_reference_eef = None
+        # Rollout diagnostics: most recent raw policy action before robot adapter transform.
+        self.last_action_raw = None
 
         # instantiate DP3 model
         # TODO: obs_dict, action_dim
@@ -156,7 +158,8 @@ class DP3Policy(PreTrainedPolicy):
             calibration_data = json.load(f)
         self.calibration_data = calibration_data
 
-        self.num_inference_steps = self.noise_scheduler.config.num_train_timesteps
+        # Use a smaller reverse-diffusion step count at inference when configured.
+        self.num_inference_steps = 10
 
 
         if False: # self.config.enable_goal_conditioning:
@@ -210,6 +213,7 @@ class DP3Policy(PreTrainedPolicy):
             self._queues["observation.images"] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues["observation.environment_state"] = deque(maxlen=self.config.n_obs_steps)
+        self.last_action_raw = None
 
     @torch.no_grad
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
@@ -258,19 +262,12 @@ class DP3Policy(PreTrainedPolicy):
             # Save the reference observation for this action chunk (used for relative actions)
             self._relative_action_reference_eef = current_obs.squeeze(0)  # (10,)
 
-            # pass observation to encoder
-            for k in batch.keys():
-                print(k, batch[k].shape)
-            
             nobs = {
                 'agent_pos': batch[self.obs_key],
                 'imagin_robot': batch['observation.points.gripper_pcds'],
                 'goal_gripper_pcd': batch['observation.points.goal_gripper_pcds'],
                 'point_cloud': batch['observation.points.point_cloud'],
             }
-            
-            for k in nobs.keys():
-                print(k, nobs[k].shape)
 
             value = next(iter(nobs.values()))
             B, To = value.shape[:2]
@@ -283,7 +280,6 @@ class DP3Policy(PreTrainedPolicy):
             if self.config.obs_as_global_cond:
                 this_nobs = dict_apply(nobs, lambda x: x.reshape(-1,*x.shape[2:]))
                 nobs_features = self.obs_encoder(this_nobs)
-                print(nobs_features.shape)
                 if "cross_attention" in self.config.condition_type:
                     # treat as a sequence
                     global_cond = nobs_features.reshape(B, self.config.n_obs_steps, -1)
@@ -308,6 +304,7 @@ class DP3Policy(PreTrainedPolicy):
             self._queues[self.act_key].extend(actions.transpose(0, 1))
 
         action_raw = self._queues[self.act_key].popleft()
+        self.last_action_raw = action_raw.detach().clone()
         action = self.robot_adapter.transform_action(action_raw, state, self._relative_action_reference_eef)
         action_eef = self.robot_adapter.get_eef_action(action_raw, state, self._relative_action_reference_eef)
         return action, action_eef

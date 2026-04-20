@@ -88,7 +88,39 @@ def get_scaled_intrinsics(K, orig_shape, target_shape):
     K_[1, 2] -= crop_offset_y  # Adjust cy for crop
     return K_
 
-def compute_pcd(depth, K, num_points, max_depth, cam_to_world):
+def _sample_points_fast(points: np.ndarray, num_points: int, rng: np.random.Generator) -> np.ndarray:
+    """Fast sampler that returns exactly `num_points` points.
+
+    Uses random sampling instead of farthest-point sampling for real-time rollout speed.
+    """
+    if points.shape[0] == 0:
+        return np.zeros((num_points, 3), dtype=np.float32)
+
+    if points.shape[0] >= num_points:
+        indices = rng.choice(points.shape[0], size=num_points, replace=False)
+        return points[indices]
+
+    # If there are too few points, pad by sampling with replacement.
+    pad_indices = rng.choice(points.shape[0], size=num_points - points.shape[0], replace=True)
+    return np.concatenate([points, points[pad_indices]], axis=0)
+
+
+def _sample_points_fps(points: np.ndarray, num_points: int, rng: np.random.Generator) -> np.ndarray:
+    """Farthest-point sampler that returns exactly `num_points` points."""
+    if points.shape[0] == 0:
+        return np.zeros((num_points, 3), dtype=np.float32)
+
+    if points.shape[0] < num_points:
+        # Pad first so FPS always receives enough candidates.
+        pad_indices = rng.choice(points.shape[0], size=num_points - points.shape[0], replace=True)
+        points = np.concatenate([points, points[pad_indices]], axis=0)
+
+    points_t = torch.from_numpy(points.astype(np.float32))
+    sampled_t, _ = sample_farthest_points(points_t[None], K=num_points, random_start_point=False)
+    return sampled_t.squeeze(0).cpu().numpy().astype(np.float32)
+
+
+def compute_pcd(depth, K, max_depth, cam_to_world):
     """
     Compute a downsampled point cloud from RGB and depth images.
 
@@ -100,13 +132,17 @@ def compute_pcd(depth, K, num_points, max_depth, cam_to_world):
         depth_preprocess (transforms.Compose): Preprocessing for depth.
         device (torch.device): Device for computations.
         rng (np.random.Generator): Random number generator.
-        num_points (int): Number of points to sample.
         max_depth (float): Maximum depth threshold.
 
     Returns:
-        np.ndarray: Downsampled point cloud (N, 6) with XYZ and RGB.
+        np.ndarray: Point cloud (N, 3) in world frame after filtering.
     """
-    depth_ = (depth.numpy() / 1000.0).squeeze().astype(np.float32)
+    if isinstance(depth, torch.Tensor):
+        depth_np = depth.cpu().numpy()
+    else:
+        depth_np = np.asarray(depth)
+
+    depth_ = (depth_np / 1000.0).squeeze().astype(np.float32)
     depth_ = PIL.Image.fromarray(depth_)
     depth_ = np.asarray(depth_preprocess(depth_))
 
@@ -143,14 +179,7 @@ def compute_pcd(depth, K, num_points, max_depth, cam_to_world):
     pcd_xyz_world = pcd_xyz_world[np.logical_and(pcd_xyz_world[:, 0] >= 0.22, pcd_xyz_world[:, 0] <= 1.)]
     pcd_xyz_world = pcd_xyz_world[np.logical_and(pcd_xyz_world[:, 1] >= -0.9, pcd_xyz_world[:, 1] <= 0.1)]
 
-    scene_pcd_pt3d = torch.from_numpy(pcd_xyz_world)
-    scene_pcd_downsample, scene_points_idx = sample_farthest_points(
-        scene_pcd_pt3d[None], K=num_points, random_start_point=False
-    )
-    pcd_xyz_world = scene_pcd_downsample.squeeze().numpy()
-
-    # Get corresponding colors at the indices
-    return pcd_xyz_world
+    return pcd_xyz_world.astype(np.float32)
 
 
 class FrankaLeapRobot:
@@ -204,6 +233,13 @@ class FrankaLeapRobot:
 
         self.calibrations = calibrations
         self.hand_model = URDFHandPointCloud(total_points=500)
+        self._pcd_rng = np.random.default_rng(0)
+        self._pcd_sampling_mode = self.config.pcd_sampling_mode.lower()
+        if self._pcd_sampling_mode not in {"random", "fps"}:
+            raise ValueError(
+                f"Unsupported pcd_sampling_mode='{self.config.pcd_sampling_mode}'. "
+                "Use one of ['random', 'fps']."
+            )
 
     @property
     def camera_features(self) -> dict:
@@ -506,11 +542,6 @@ class FrankaLeapRobot:
         for name in self.cameras:
             before_camread_t = time.perf_counter()
             images[name] = self.cameras[name].async_read()
-            if type(images[name]) == dict:
-                for img_name in images[name].keys():
-                    images[name][img_name] = torch.from_numpy(images[name][img_name])
-            else:
-                images[name] = torch.from_numpy(images[name])
             self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
             self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
 
@@ -546,11 +577,6 @@ class FrankaLeapRobot:
         for name in self.cameras:
             before_camread_t = time.perf_counter()
             images[name] = self.cameras[name].async_read()
-            if type(images[name]) == dict:
-                for img_name in images[name].keys():
-                    images[name][img_name] = torch.from_numpy(images[name][img_name])
-            else:
-                images[name] = torch.from_numpy(images[name])
             self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
             self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
 
@@ -573,17 +599,15 @@ class FrankaLeapRobot:
             scaled_K = calibrations[cam_name]["scaled_K"]
             cam_to_world = calibrations[cam_name]["T_world_cam"]
             depth = obs_dict["observation.images.{}.transformed_depth".format(cam_name)].squeeze()
-            pcd = compute_pcd(depth, scaled_K, 4000, 1.5, cam_to_world)
+            pcd = compute_pcd(depth, scaled_K, 1.5, cam_to_world)
             all_pcd.append(pcd)
 
         all_pcd = np.concatenate(all_pcd, axis=0)
-        scene_pcd_pt3d = torch.from_numpy(all_pcd)
-        # print(all_pcd.shape)
-        scene_pcd_downsample, scene_points_idx = sample_farthest_points(
-            scene_pcd_pt3d[None], K=4000, random_start_point=False
-        )
         joint_state = obs_dict['observation.state']
-        scene_pcd = scene_pcd_downsample.squeeze().numpy().astype(np.float32)
+        if self._pcd_sampling_mode == "fps":
+            scene_pcd = _sample_points_fps(all_pcd, num_points=4000, rng=self._pcd_rng)
+        else:
+            scene_pcd = _sample_points_fast(all_pcd, num_points=4000, rng=self._pcd_rng).astype(np.float32)
         hand_pcd = self.hand_model.get_point_cloud(joint_state).astype(np.float32)
         obs_dict["observation.points.point_cloud"] = torch.from_numpy(np.concatenate([scene_pcd, hand_pcd], axis=0))
         obs_dict["observation.points.gripper_pcds"] = torch.from_numpy(self.hand_model.get_hand_skeleton(joint_state).astype(np.float32))

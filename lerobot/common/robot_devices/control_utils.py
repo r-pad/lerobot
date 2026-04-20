@@ -40,6 +40,25 @@ from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
 
+
+def _to_numpy(value):
+    if isinstance(value, torch.Tensor):
+        return value.cpu().numpy()
+    return np.asarray(value)
+
+
+def _tensor_stats_str(name: str, value, max_preview: int = 5) -> str:
+    arr = _to_numpy(value).reshape(-1)
+    if arr.size == 0:
+        return f"{name}: empty"
+
+    preview = np.array2string(arr[:max_preview], precision=4, separator=", ")
+    return (
+        f"{name}: shape={list(_to_numpy(value).shape)} "
+        f"min={arr.min():.4f} max={arr.max():.4f} mean={arr.mean():.4f} std={arr.std():.4f} "
+        f"l2={np.linalg.norm(arr):.4f} head={preview}"
+    )
+
 def add_eef_pose(robot, real_joints):
     if robot.robot_type == "aloha":
         eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
@@ -266,8 +285,8 @@ def compute_goal_prediction(policy, policy_cfg, single_task, observation):
                     f"Available keys: {policy.high_level.camera_names}"
                 )
             camera_obs[cam_name] = {
-                "rgb": observation[rgb_key].numpy(),
-                "depth": observation[depth_key].numpy().squeeze()
+                "rgb": _to_numpy(observation[rgb_key]),
+                "depth": _to_numpy(observation[depth_key]).squeeze()
             }
 
         # Get dict of projections for all cameras
@@ -300,7 +319,7 @@ def get_phantomized_observation(policy, policy_cfg, camera_names, observation):
             virtual_camera_names.append(VIRTUAL_CAMERA_MAPPING[cam_name_])
 
         # Get image dimensions from first camera
-        height, width, _ = observation[camera_names[0]].numpy().shape
+        height, width, _ = _to_numpy(observation[camera_names[0]]).shape
 
         # Setup renderer with all cameras at once
         policy.renderer = setup_renderer(
@@ -313,19 +332,43 @@ def get_phantomized_observation(policy, policy_cfg, camera_names, observation):
             virtual_camera_names
         )
 
-    state = observation["observation.state"].numpy()
+    state = _to_numpy(observation["observation.state"])
     for cam_name in camera_names:
         # Overlay RGB with rendered robot
         render = render_and_overlay(
             policy.renderer,
             ALOHA_MODEL,
             state,
-            observation[cam_name].numpy().copy(),
+            _to_numpy(observation[cam_name]).copy(),
             policy.downsample_factor,
             VIRTUAL_CAMERA_MAPPING[cam_name.split('.')[2]],
         )
         observation[cam_name] = torch.from_numpy(render)
     return observation
+
+
+def _prune_observation_for_policy_inference(observation: dict, policy: PreTrainedPolicy | None) -> dict:
+    """Drop unused heavy modalities before policy inference.
+
+    DP3 rollout only consumes state/EEF + point-cloud keys in select_action,
+    so RGB/depth tensors can be removed after pointcloud construction.
+    """
+    if policy is None:
+        return observation
+
+    if getattr(policy, "name", None) != "dp3":
+        return observation
+
+    return {
+        key: value
+        for key, value in observation.items()
+        if not key.startswith("observation.images.")
+    }
+
+
+def _should_skip_image_logging(policy: PreTrainedPolicy | None) -> bool:
+    """Skip expensive per-frame image logging for DP3 rollout."""
+    return policy is not None and getattr(policy, "name", None) == "dp3"
 
 @safe_stop_image_writer
 def control_loop(
@@ -387,10 +430,30 @@ def control_loop(
                 observation = robot.get_pointcloud_obs(observation)
                 observation = compute_goal_prediction(policy, policy.config, single_task, observation)
 
-                observation["task"] = single_task
+                # Keep full observation for optional display / dataset writing,
+                # but prune heavy image tensors for policy inference.
+                inference_observation = _prune_observation_for_policy_inference(observation, policy)
+                inference_observation["task"] = single_task
                 pred_action, pred_action_eef = predict_action(
-                    observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
+                    inference_observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
                 )
+
+                # Periodic action diagnostics for rollout verification.
+                if getattr(policy, "name", None) == "dp3":
+                    if not hasattr(policy, "_rollout_diag_step"):
+                        policy._rollout_diag_step = 0
+                    policy._rollout_diag_step += 1
+                    if policy._rollout_diag_step % 20 == 0:
+                        raw_action = getattr(policy, "last_action_raw", None)
+                        stats = [
+                            _tensor_stats_str("state", observation["observation.state"]),
+                            _tensor_stats_str("pred_action_joint", pred_action),
+                            _tensor_stats_str("pred_action_eef", pred_action_eef),
+                        ]
+                        if raw_action is not None:
+                            stats.insert(1, _tensor_stats_str("pred_action_raw", raw_action))
+                        print("[DP3 rollout stats] " + " | ".join(stats))
+
                 # Action can eventually be clipped using `max_relative_target`,
                 # so action actually sent is saved in the dataset.
                 action = robot.send_action(pred_action)
@@ -424,9 +487,10 @@ def control_loop(
                         colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
                     ))
 
-            image_keys = [key for key in observation if "image" in key]
-            for key in image_keys:
-                rr.log(key, rr.Image(observation[key].numpy()), static=True)
+            if not _should_skip_image_logging(policy):
+                image_keys = [key for key in observation if "image" in key]
+                for key in image_keys:
+                    rr.log(key, rr.Image(_to_numpy(observation[key])), static=True)
 
             # Add point cloud visualization from high-level model
             if policy is not None and hasattr(policy, 'high_level'):

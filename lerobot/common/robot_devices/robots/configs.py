@@ -652,6 +652,11 @@ class FrankaLeapRobotConfig(RobotConfig):
     # save end-effector pose info
     use_eef: bool = True
 
+    # Point cloud sampling mode used during rollout-time observation construction.
+    # - "random": fastest, random downsampling/padding to fixed size.
+    # - "fps": slower, farthest-point sampling for better spatial coverage.
+    pcd_sampling_mode: str = "random"
+
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {
             "cam_main": AzureKinectCameraConfig(
