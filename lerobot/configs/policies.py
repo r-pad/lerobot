@@ -183,6 +183,9 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):
         elif self.robot_type == "droid":
             from lerobot.common.policies.robot_adapters import DroidAdapter
             return DroidAdapter(self.action_space)
+        elif self.robot_type == "franka_leap":
+            from lerobot.common.policies.robot_adapters import FrankaLeapAdapter
+            return FrankaLeapAdapter(self.action_space)
         elif self.robot_type == "libero_franka":
             from lerobot.common.policies.robot_adapters import LiberoFrankaAdapter
             obs_key = "observation.state"
