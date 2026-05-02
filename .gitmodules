@@ -4,3 +4,6 @@
 [submodule "third_party/gello"]
 	path = third_party/gello
 	url = https://github.com/wuphilipp/gello_software.git
+[submodule "polaris"]
+	path = polaris
+	url = https://github.com/DavidZ2851/polaris.git
