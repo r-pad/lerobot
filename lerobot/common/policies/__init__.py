@@ -18,3 +18,4 @@ from .pi0.configuration_pi0 import PI0Config as PI0Config
 from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
 from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig
 from .dp3.configuration_dp3 import DP3Config as DP3Config
+from .polaris_policy.diffusion_policy.diffusion_policy_client import DiffusionPolicyConfig as DiffusionPolicyConfig
