@@ -587,6 +587,9 @@ class DroidRobotConfig(RobotConfig):
     deoxys_controller_type: str = "JOINT_IMPEDANCE"
     deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/joint-impedance-controller.yml"
 
+    # Set True during policy inference to skip moving Franka to match GELLO at startup
+    skip_gello_calibration: bool = False
+
     # Teleop mapping: scale + sign for delta mapping from GELLO to Franka
     mapping_coefficients: tuple[float, ...] = (0.8, -0.8, 0.8, 0.8, 0.8, 0.8, 0.8)
     gripper_threshold: float = 0.5
