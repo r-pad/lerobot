@@ -396,6 +396,11 @@ def control_loop(
                 if robot.use_eef:
                     action["action.right_eef_pose"] = pred_action_eef
 
+        if policy is not None and getattr(policy, "_current_vis_frame", None) is not None:
+            import torch as _torch
+            vis_np = policy._current_vis_frame  # (H, W*v, 3) uint8 RGB
+            observation["observation.images.amplify_tracks"] = _torch.from_numpy(vis_np)
+
         if dataset is not None:
             frame = {**observation, **action, "task": single_task}
             dataset.add_frame(frame)
@@ -477,7 +482,7 @@ def control_loop(
             break
 
 
-def reset_environment(robot, events, reset_time_s, fps):
+def reset_environment(robot, events, reset_time_s, fps, teleoperate=True):
     # TODO(rcadene): refactor warmup_record and reset_environment
     if has_method(robot, "teleop_safety_stop"):
         robot.teleop_safety_stop()
@@ -487,7 +492,7 @@ def reset_environment(robot, events, reset_time_s, fps):
         control_time_s=reset_time_s,
         events=events,
         fps=fps,
-        teleoperate=True,
+        teleoperate=teleoperate,
     )
 
 
