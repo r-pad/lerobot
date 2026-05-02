@@ -156,8 +156,9 @@ class DroidRobot:
 
         self.is_connected = True
 
-        # Run interactive home calibration
-        self.run_calibration()
+        # Run interactive home calibration (skip during policy inference)
+        if not self.config.skip_gello_calibration:
+            self.run_calibration()
 
     def _init_gello(self):
         """Initialize the GELLO leader arm."""
@@ -448,6 +449,7 @@ class DroidRobot:
         joint_target = np.array(action_list[:7])
 
         # Threshold continuous gripper value into open/close
+        print(f"[action] joints={[round(v,4) for v in action_list[:7]]}  gripper={action_list[7]:.4f} threshold={self.config.gripper_threshold}")
         if action_list[7] < self.config.gripper_threshold:
             gripper_action = self.config.gripper_close_action
         else:
@@ -463,6 +465,7 @@ class DroidRobot:
 
         # Send joint target to Franka via deoxys
         deoxys_action = list(joint_target) + [gripper_action]
+
         self.robot_interface.control(
             controller_type=self.config.deoxys_controller_type,
             action=deoxys_action,
@@ -471,6 +474,11 @@ class DroidRobot:
         self.logs["write_follower_dt_s"] = 0.0
 
         return action
+
+    def open_gripper(self):
+        """Open the gripper and reset the cached gripper state."""
+        self.robotiq_gripper.open()
+        self._last_gripper_action = self.config.gripper_open_action
 
     def print_logs(self):
         pass
