@@ -64,6 +64,14 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.pi0fast.modeling_pi0fast import PI0FASTPolicy
 
         return PI0FASTPolicy
+    elif name == "diffusion_policy":
+        from lerobot.common.policies.polaris_policy.diffusion_policy.diffusion_policy_client import DiffusionPolicyClient
+
+        return DiffusionPolicyClient
+    elif name == "amplify":
+        from lerobot.common.policies.polaris_policy.amplify.amplify_client import AMPLIFYPolicyClient
+
+        return AMPLIFYPolicyClient
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -83,6 +91,12 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return PI0Config(**kwargs)
     elif policy_type == "pi0fast":
         return PI0FASTConfig(**kwargs)
+    elif policy_type == "diffusion_policy":
+        from lerobot.common.policies.polaris_policy.diffusion_policy.diffusion_policy_client import DiffusionPolicyConfig
+        return DiffusionPolicyConfig(**kwargs)
+    elif policy_type == "amplify":
+        from lerobot.common.policies.polaris_policy.amplify.amplify_client import AMPLIFYPolicyConfig
+        return AMPLIFYPolicyConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 
