@@ -139,11 +139,13 @@ import os
 import time
 import json
 from dataclasses import asdict
+from pathlib import Path
 from pprint import pformat
 
 import rerun as rr
 
 # from safetensors.torch import load_file, save_file
+from lerobot.common.constants import HF_LEROBOT_HOME
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.common.policies.factory import make_policy
 from lerobot.common.robot_devices.control_configs import (
@@ -248,8 +250,15 @@ def record(
     cfg: RecordControlConfig,
 ) -> LeRobotDataset:
     # TODO(rcadene): Add option to record logs
+    dataset_root = Path(cfg.root) if cfg.root is not None else HF_LEROBOT_HOME / cfg.repo_id
+    if not cfg.resume and dataset_root.exists():
+        logging.info(
+            f"Dataset directory already exists at '{dataset_root}'. Auto-resuming data collection."
+        )
+        cfg.resume = True
+
     if cfg.resume:
-        dataset = LeRobotDataset(
+        dataset = LeRobotDataset.from_prerecorded(
             cfg.repo_id,
             root=cfg.root,
         )
@@ -268,11 +277,25 @@ def record(
                 calibration_data = json.load(f)
             cam_names = calibration_data.keys()
             extra_features = {f"observation.images.{cam}.goal_gripper_proj":
-                              {'dtype': 'video', 'shape': (720, 1280, 3), 
-                               'names': ['height', 'width', 'channels'], 
+                              {'dtype': 'video', 'shape': (720, 1280, 3),
+                               'names': ['height', 'width', 'channels'],
                                'info': 'Projection of gripper pcd at goal position onto image'} for cam in cam_names}
         else:
             extra_features = {}
+
+        if (
+            cfg.policy is not None
+            and getattr(cfg.policy, "vis_tracks", False)
+            and getattr(cfg.policy, "image_resize", None) is not None
+            and getattr(cfg.policy, "cam_image_keys", None)
+        ):
+            h, w = cfg.policy.image_resize
+            num_views = len(cfg.policy.cam_image_keys)
+            extra_features["observation.images.amplify_tracks"] = {
+                "dtype": "video",
+                "shape": (h, w * num_views, 3),
+                "names": ["height", "width", "channels"],
+            }
 
         dataset = LeRobotDataset.create(
             cfg.repo_id,
@@ -304,10 +327,18 @@ def record(
     if has_method(robot, "teleop_safety_stop"):
         robot.teleop_safety_stop()
 
-    recorded_episodes = 0
+    recorded_episodes = dataset.num_episodes
     while True:
         if recorded_episodes >= cfg.num_episodes:
             break
+
+        if has_method(robot, "open_gripper"):
+            robot.open_gripper()
+
+        # Give time to position GELLO at the desired start pose before each episode
+        if cfg.reset_time_s > 0 and policy is not None:
+            log_say("Position GELLO at start pose", cfg.play_sounds)
+            robot.run_calibration()
 
         log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
         record_episode(
@@ -321,15 +352,7 @@ def record(
             single_task=cfg.single_task,
         )
 
-        # Execute a few seconds without recording to give time to manually reset the environment
-        # Current code logic doesn't allow to teleoperate during this time.
-        # TODO(rcadene): add an option to enable teleoperation during reset
-        # Skip reset for the last episode to be recorded
-        if not events["stop_recording"] and (
-            (recorded_episodes < cfg.num_episodes - 1) or events["rerecord_episode"]
-        ):
-            log_say("Reset the environment", cfg.play_sounds)
-            reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
+        # Skip post-episode reset — environment reset is handled pre-episode above
 
         if events["rerecord_episode"]:
             log_say("Re-record episode", cfg.play_sounds)
