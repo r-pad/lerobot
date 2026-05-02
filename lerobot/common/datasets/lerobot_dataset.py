@@ -1037,6 +1037,63 @@ class LeRobotDataset(torch.utils.data.Dataset):
         return video_paths
 
     @classmethod
+    def from_prerecorded(
+        cls,
+        repo_id: str,
+        root: str | Path | None = None,
+        tolerance_s: float = 1e-4,
+        image_writer_processes: int = 0,
+        image_writer_threads: int = 0,
+        video_backend: str | None = None,
+    ) -> "LeRobotDataset":
+        """Load an existing locally-recorded dataset for resuming data collection.
+
+        Unlike the regular constructor, this skips episode file existence checks and does not
+        attempt to download missing files from the Hub. Use this when resuming recording on a
+        dataset that exists locally but may not be pushed to the Hub yet.
+
+        If info.json reports more episodes than episodes.jsonl contains (e.g. due to a crash
+        mid-save), the metadata is repaired to reflect only the complete episodes.
+        """
+        obj = cls.__new__(cls)
+        obj.meta = LeRobotDatasetMetadata(repo_id, root=root)
+
+        # Repair info.json if a crash left total_episodes higher than the number of complete
+        # episodes recorded in episodes.jsonl (which is the ground truth for what's on disk).
+        actual_episodes = len(obj.meta.episodes)
+        if obj.meta.total_episodes != actual_episodes:
+            logging.warning(
+                f"info.json reports {obj.meta.total_episodes} episodes but episodes.jsonl has "
+                f"{actual_episodes}. Repairing metadata to reflect {actual_episodes} complete episodes."
+            )
+            actual_frames = sum(ep["length"] for ep in obj.meta.episodes.values())
+            actual_videos = actual_episodes * len(obj.meta.video_keys)
+            obj.meta.info["total_episodes"] = actual_episodes
+            obj.meta.info["total_frames"] = actual_frames
+            obj.meta.info["total_videos"] = actual_videos
+            obj.meta.info["splits"] = {"train": f"0:{actual_episodes}"}
+            write_info(obj.meta.info, obj.meta.root)
+
+        obj.repo_id = obj.meta.repo_id
+        obj.root = obj.meta.root
+        obj.revision = None
+        obj.tolerance_s = tolerance_s
+        obj.image_writer = None
+        obj.episode_buffer = obj.create_episode_buffer()
+        obj.episodes = None
+        obj.hf_dataset = obj.create_hf_dataset()
+        obj.image_transforms = None
+        obj.delta_timestamps = None
+        obj.delta_indices = None
+        obj.episode_data_index = None
+        obj.video_backend = video_backend if video_backend is not None else get_safe_default_codec()
+
+        if image_writer_processes or image_writer_threads:
+            obj.start_image_writer(image_writer_processes, image_writer_threads)
+
+        return obj
+
+    @classmethod
     def create(
         cls,
         repo_id: str,
