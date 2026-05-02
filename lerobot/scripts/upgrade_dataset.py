@@ -390,7 +390,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
     # Add embodiment name
     if humanize: frame_data["embodiment"] = "human"
-    else: frame_data["embodiment"] = "aloha"
+    else: frame_data["embodiment"] = "droid"
 
     frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
     camera_names = list(calibrations.keys())
@@ -494,20 +494,7 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
 
     if humanize:
         episode_gripper_pcds = episode_extras['episode_gripper_pcds']
-
-    # Determine goal indices
-    if 'episode_events' in episode_extras:
-        # Use events from external file (human data, phantom, or robot with manual annotation)
-        goal_indices = episode_extras['episode_events']['event_idxs']
-        # Ensure last frame is included as a goal
-        if goal_indices[-1] != episode_length - 1:
-            goal_indices = goal_indices + [episode_length - 1]
-    else:
-        # Fall back to gripper-based detection for robot data
-        close_thresh, open_thresh = 25, 30
-        goal_indices = extract_events_with_gripper_pos(
-            joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
-
+    
     camera_names = list(calibrations.keys())
 
     # Check if any camera has goal_gripper_proj feature
@@ -515,6 +502,19 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
                         for cam_name in camera_names)
 
     if has_goal_proj:
+        # Determine goal indices
+        if 'episode_events' in episode_extras:
+            # Use events from external file (human data, phantom, or robot with manual annotation)
+            goal_indices = episode_extras['episode_events']['event_idxs']
+            # Ensure last frame is included as a goal
+            if goal_indices[-1] != episode_length - 1:
+                goal_indices = goal_indices + [episode_length - 1]
+        else:
+            # Fall back to gripper-based detection for robot data
+            close_thresh, open_thresh = 25, 30
+            goal_indices = extract_events_with_gripper_pos(
+                joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
+
         # Generate goal images for each camera at each goal index
         for cam_name in camera_names:
             goal_key = f"observation.images.{cam_name}.goal_gripper_proj"
@@ -698,7 +698,7 @@ if __name__ == "__main__":
                         help="Source dataset repository ID")
     parser.add_argument("--target_repo_id", type=str, default="sriramsk/fold_onesie_20250831_subsampled_heatmapGoal",
                         help="Target dataset repository ID")
-    parser.add_argument("--calibration_config", type=str, default="aloha_calibration/calibration_multiview.json",
+    parser.add_argument("--calibration_config", type=str, default="droid_calibration/calibration_multiview.json",
                         help="Path to calibration JSON config file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")

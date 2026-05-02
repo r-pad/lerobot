@@ -1,6 +1,0 @@
-{
-  "cam_azure_kinect_front": {
-    "intrinsics": "polaris_calibration/intrinsics_sim.txt",
-    "extrinsics": "polaris_calibration/T_world_from_camera_front_sim.txt"
-  }
-}
