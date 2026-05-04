@@ -3,6 +3,10 @@ Post-process a LeRobot dataset by transforming right_eef_pose fields:
   1. Apply -45° clockwise rotation around world Z to the rot6d part.
   2. Reorder layout from [rot6d(6), trans(3), gripper(1)]
                       to [trans(3), rot6d(6), gripper(1)].
+  3. Binarize the gripper to polaris convention (1=closed, 0=open).
+     The binary value is computed from action.right_eef_pose's gripper
+     (commanded intent) and reused for observation.right_eef_pose, so a
+     partially-closed jaw on a thick object is still labeled "closed".
 
 All other fields (images, joint states, task) are copied unchanged.
 
@@ -36,11 +40,21 @@ R_Z45 = torch.tensor(
 )
 
 
-def transform_eef(eef: torch.Tensor) -> torch.Tensor:
+def binarize_gripper(gripper: torch.Tensor) -> torch.Tensor:
+    """lerobot continuous gripper → polaris binary: <0.5 → 1.0 (closed), else 0.0 (open)."""
+    return torch.where(gripper < 0.5, torch.ones_like(gripper), torch.zeros_like(gripper))
+
+
+def transform_eef(eef: torch.Tensor, gripper_bin_override: torch.Tensor | None = None) -> torch.Tensor:
     """
     Input:  [rot6d(6), trans(3), gripper(1)]  (lerobot default)
-    Output: [trans(3), rot6d_new(6), gripper(1)]
+    Output: [trans(3), rot6d_new(6), gripper_bin(1)]
     Rotation: R_z(-45°) applied to the orientation.
+
+    If gripper_bin_override is given, use it instead of binarizing the local gripper
+    field. This lets the observation's gripper bit be sourced from the action signal
+    (intent) rather than from the observed jaw width, which can read "open" while the
+    user is actually commanding "close" against a thick object.
     """
     rot6d   = eef[0:6]
     trans   = eef[6:9]
@@ -50,8 +64,7 @@ def transform_eef(eef: torch.Tensor) -> torch.Tensor:
     R_new   = R_Z45 @ R_orig
     rot6d_new = transforms.matrix_to_rotation_6d(R_new.unsqueeze(0)).squeeze(0)  # (6,)
 
-    # Binarize gripper: lerobot <0.5 → closed (1.0), ≥0.5 → open (0.0)
-    gripper_bin = torch.where(gripper < 0.5, torch.ones_like(gripper), torch.zeros_like(gripper))
+    gripper_bin = gripper_bin_override if gripper_bin_override is not None else binarize_gripper(gripper)
 
     return torch.cat([trans, rot6d_new, gripper_bin])  # [trans(3), rot6d(6), gripper_bin(1)]
 
@@ -91,8 +104,21 @@ def transform_eef_dataset(source_repo_id: str, target_repo_id: str, target_fps: 
             }
             frame_data["task"] = source_meta.tasks[frame["task_index"].item()]
 
-            # Transform EEF pose fields
+            # Transform EEF pose fields. Source the binary gripper bit from the ACTION
+            # (commanded intent), then reuse it for the OBSERVATION so the observation
+            # gripper isn't fooled by a partially-closed jaw on a thick object.
+            action_key = "action.right_eef_pose"
+            obs_key    = "observation.right_eef_pose"
+            gripper_bin_from_action = None
+            if action_key in frame_data:
+                gripper_bin_from_action = binarize_gripper(frame_data[action_key].float()[9:10])
+                frame_data[action_key] = transform_eef(frame_data[action_key].float(), gripper_bin_from_action)
+            if obs_key in frame_data:
+                frame_data[obs_key] = transform_eef(frame_data[obs_key].float(), gripper_bin_from_action)
+            # Any other EEF keys (none today) keep the legacy width-based binarization.
             for key in EEF_KEYS:
+                if key in (action_key, obs_key):
+                    continue
                 if key in frame_data:
                     frame_data[key] = transform_eef(frame_data[key].float())
 
