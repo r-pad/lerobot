@@ -397,9 +397,14 @@ def control_loop(
                     action["action.right_eef_pose"] = pred_action_eef
 
         if policy is not None and getattr(policy, "_current_vis_frame", None) is not None:
-            import torch as _torch
-            vis_np = policy._current_vis_frame  # (H, W*v, 3) uint8 RGB
-            observation["observation.images.amplify_tracks"] = _torch.from_numpy(vis_np)
+            # Each policy declares the observation key for its visualization frame
+            # via cfg.vis_obs_key; we just route the (H, W*v, 3) uint8 RGB array
+            # to that key here without knowing what policy produced it.
+            vis_key = getattr(getattr(policy, "config", None), "vis_obs_key", None) \
+                or getattr(policy, "vis_obs_key", None)
+            if vis_key:
+                import torch as _torch
+                observation[vis_key] = _torch.from_numpy(policy._current_vis_frame)
 
         if dataset is not None:
             frame = {**observation, **action, "task": single_task}

@@ -283,19 +283,23 @@ def record(
         else:
             extra_features = {}
 
-        if (
-            cfg.policy is not None
-            and getattr(cfg.policy, "vis_tracks", False)
-            and getattr(cfg.policy, "image_resize", None) is not None
-            and getattr(cfg.policy, "cam_image_keys", None)
-        ):
-            h, w = cfg.policy.image_resize
-            num_views = len(cfg.policy.cam_image_keys)
-            extra_features["observation.images.amplify_tracks"] = {
-                "dtype": "video",
-                "shape": (h, w * num_views, 3),
-                "names": ["height", "width", "channels"],
-            }
+        # Generic per-policy visualization channel. A policy that wants to record a
+        # per-step visualization frame into the dataset declares two fields on its
+        # config:
+        #   - vis_obs_key: str — observation key under which the frame is stored.
+        #   - vis_shape:  (H, W, C) — shape of the uint8 RGB frame.
+        # Both can be plain dataclass fields or @property's. The policy instance
+        # must also assign `self._current_vis_frame` to a (H, W, C) uint8 numpy
+        # array each step it wants the frame recorded.
+        if cfg.policy is not None:
+            vis_key   = getattr(cfg.policy, "vis_obs_key", None)
+            vis_shape = getattr(cfg.policy, "vis_shape", None)
+            if vis_key and vis_shape:
+                extra_features[vis_key] = {
+                    "dtype": "video",
+                    "shape": tuple(vis_shape),
+                    "names": ["height", "width", "channels"],
+                }
 
         dataset = LeRobotDataset.create(
             cfg.repo_id,
