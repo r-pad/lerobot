@@ -34,6 +34,8 @@ from PIL import Image
 import imageio.v3 as iio
 import numpy as np
 from tqdm import tqdm
+import pytorch3d.transforms as transforms
+import torch
 from lerobot.scripts.dataset_utils import generate_heatmap_from_points, project_points_to_image
 
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -119,6 +121,18 @@ def load_calibrations(calibration_config_path: str):
     print(f"Loaded calibrations for: {list(calibrations.keys())}")
     return calibrations
 
+def upgrade_action_space(arr: np.ndarray) -> np.ndarray:
+    """(N, 8) [pos, quat_wxyz, gripper] → (N, 10) [rot6d, pos, gripper]."""
+    pos = arr[:, 0:3]
+    quat_wxyz = arr[:, 3:7]
+    gripper = arr[:, 7:8]
+
+    # quaternion_to_matrix expects wxyz (real part first), which matches storage order
+    R = transforms.quaternion_to_matrix(torch.from_numpy(quat_wxyz))  # (N, 3, 3)
+    rot6d = transforms.matrix_to_rotation_6d(R).numpy()  # (N, 6)
+
+    return np.concatenate([rot6d, pos, gripper], axis=1).astype(np.float32)
+
 
 def generate_goal_gripper_proj(gripper_pcd_4x3: np.ndarray, K: np.ndarray,
                                 world_to_cam: np.ndarray, H: int, W: int) -> np.ndarray:
@@ -157,9 +171,9 @@ def gen_h2rd_dataset(
     sample_dir = episode_dirs[0]
     sample_npz = np.load(os.path.join(sample_dir, "trajectory.npz"))
 
-    states_ee_dim         = sample_npz["states_ee"].shape[-1]
+    states_ee_dim         = 10 # sample_npz["states_ee"].shape[-1]
     states_joint_dim      = sample_npz["states_joint"].shape[-1]
-    action_ee_dim         = sample_npz["action_ee"].shape[-1]
+    action_ee_dim         = 10 # sample_npz["action_ee"].shape[-1]
     action_joint_dim      = sample_npz["action_joint"].shape[-1]
     gripper_pcd_dim         = sample_npz["gripper_pcd"].shape[1]
     goal_gripper_pcd_dim    = sample_npz["goal_gripper_pcd"].shape[1]
@@ -194,17 +208,17 @@ def gen_h2rd_dataset(
         },
         "observation.right_eef_pose": {
             "dtype": "float32",
-            "shape": (states_ee_dim,),
-            "names": [f"states_ee_{i}" for i in range(states_ee_dim)],
+            "shape": (10,),
+            "names": [f"states_ee_{i}" for i in range(10)],
         }, 
         "observation.points.gripper_pcds": {
             "dtype": "pcd",
-            "shape": (gripper_pcd_dim, 3),
+            "shape": (-1, 3),
             "names": ['N', 'channels'],
         },
-        "observation.goal_gripper_pcd": {
+        "observation.points.goal_gripper_pcds": {
             "dtype": "pcd",
-            "shape": (goal_gripper_pcd_dim, 3),
+            "shape": (-1, 3),
             "names": ['N', 'channels'],
         },
         # ── actions ──
@@ -215,8 +229,8 @@ def gen_h2rd_dataset(
         },
         "action.right_eef_pose": {
             "dtype": "float32",
-            "shape": (action_ee_dim,),
-            "names": [f"action_ee_{i}" for i in range(action_ee_dim)],
+            "shape": (10,),
+            "names": [f"action_ee_{i}" for i in range(10)],
         },
         # ── RGB cameras ──
         "observation.images.cam_azure_kinect_front.color": {
@@ -260,6 +274,27 @@ def gen_h2rd_dataset(
             "dtype": "video",
             "shape": (H, W, 3),
             "names": ["height", "width", "channels"],
+        },
+        # ── camera calibration (constant per episode) ──
+        "observation.cam_azure_kinect_front.intrinsics": {
+            "dtype": "float32",
+            "shape": (3, 3),
+            "names": ["rows", "cols"],
+        },
+        "observation.cam_azure_kinect_front.extrinsics": {
+            "dtype": "float32",
+            "shape": (4, 4),
+            "names": ["rows", "cols"],
+        },
+        "observation.cam_azure_kinect_left.intrinsics": {
+            "dtype": "float32",
+            "shape": (3, 3),
+            "names": ["rows", "cols"],
+        },
+        "observation.cam_azure_kinect_left.extrinsics": {
+            "dtype": "float32",
+            "shape": (4, 4),
+            "names": ["rows", "cols"],
         },
         "next_event_idx": {
             "dtype": "int32",
@@ -315,6 +350,9 @@ def gen_h2rd_dataset(
             goal_gripper_pcd = npz["goal_gripper_pcd"].astype(np.float32)
             gripper_width    = npz["gripper_width"].astype(np.float32)
             delta_action     = npz["delta_action"].astype(np.float32)
+
+            states_ee = upgrade_action_space(states_ee)
+            action_ee = upgrade_action_space(action_ee)
 
             T = action_ee.shape[0]
 
@@ -421,6 +459,11 @@ def gen_h2rd_dataset(
             cam1_depth_mm  = (cam1_depth  * 1000).astype(np.uint16)[:, :, :, None]
             wrist_depth_mm = (wrist_depth * 1000).astype(np.uint16)[:, :, :, None]
 
+            front_K  = calibrations["cam_azure_kinect_front"]["K"].astype(np.float32)
+            front_T  = calibrations["cam_azure_kinect_front"]["T_world_cam"].astype(np.float32)
+            left_K   = calibrations["cam_azure_kinect_left"]["K"].astype(np.float32)
+            left_T   = calibrations["cam_azure_kinect_left"]["T_world_cam"].astype(np.float32)
+
             zeros_heatmap = np.zeros((H, W, 3), dtype=np.uint8)
             for t in range(T_min):
                 d0 = cam0_depth_mm[t]
@@ -433,7 +476,7 @@ def gen_h2rd_dataset(
                     "observation.state":             states_joint[t],
                     "observation.right_eef_pose":    states_ee[t],
                     "observation.points.gripper_pcds":       gripper_pcd[t],
-                    "observation.goal_gripper_pcd":          goal_gripper_pcd[t],
+                    "observation.points.goal_gripper_pcds":          goal_gripper_pcd[t],
                     # actions
                     "action":                        action_joint[t],  # joint action
                     "action.right_eef_pose":         action_ee[t],
@@ -445,6 +488,10 @@ def gen_h2rd_dataset(
                     "observation.images.cam_azure_kinect_front.transformed_depth": d0,
                     "observation.images.cam_azure_kinect_left.transformed_depth":  d1,
                     # "observation.images.cam_wrist.transformed_depth":              dw,
+                    "observation.cam_azure_kinect_front.intrinsics": front_K,
+                    "observation.cam_azure_kinect_front.extrinsics": front_T,
+                    "observation.cam_azure_kinect_left.intrinsics":  left_K,
+                    "observation.cam_azure_kinect_left.extrinsics":  left_T,
                     "next_event_idx": np.array([next_event_idx[t]], dtype=np.int32),
                     "embodiment": "droid",
                     # placeholder — filled below via episode_buffer

@@ -425,6 +425,10 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
     if 'observation.images.cam_wrist' in frame_data:
         wrist_rgb_data = (frame_data["observation.images.cam_wrist"].permute(1,2,0) * 255).to(torch.uint8)
         frame_data["observation.images.cam_wrist"] = wrist_rgb_data
+    
+    elif humanize:
+        ref_shape = rgb_data[camera_names[0]].shape  # (H, W, 3)
+        frame_data["observation.images.cam_wrist"] = torch.zeros(ref_shape, dtype=torch.uint8)
 
     frame_data["observation.right_eef_pose"] = eef_data
     frame_data["observation.state"] = joint_state
@@ -470,7 +474,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
     # Dummy values, replaced at the end of the episode
     goal_key = f"observation.points.goal_gripper_pcds"
     if goal_key in new_features:
-        frame_data[goal_key] = torch.zeros_like(frame_data[f"observation.points.gripper_pcds"])
+        frame_data[goal_key] = np.zeros_like(frame_data[f"observation.points.gripper_pcds"])
 
     if "next_event_idx" in new_features:
         frame_data["next_event_idx"] = np.array([0], dtype=np.int32)
@@ -563,8 +567,8 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
 
     if "observation.points.goal_gripper_pcds" in new_features:
         for i in range(episode_length):
-            current_goal_idx = target_dataset.episode_buffer["next_event_idx"][i]
-            target_dataset.episode_buffer["observation.points.goal_gripper_pcds"][i] = target_dataset.episode_buffer["observation.points.gripper_pcds"][current_goal_idx[0]]
+            goal_frame_idx = int(np.asarray(target_dataset.episode_buffer["next_event_idx"][i]).flat[0])
+            target_dataset.episode_buffer["observation.points.goal_gripper_pcds"][i] = target_dataset.episode_buffer["observation.points.gripper_pcds"][goal_frame_idx]
 
 def upgrade_dataset(
     source_repo_id: str,
@@ -616,6 +620,15 @@ def upgrade_dataset(
 
     # Add new features
     expanded_features.update(new_features)
+
+    # When humanizing, ensure cam_wrist is in the schema (filled with black frames if absent)
+    if humanize and 'observation.images.cam_wrist' not in expanded_features:
+        ref_cam_feat = expanded_features[f"observation.images.{first_cam}.color"]
+        expanded_features['observation.images.cam_wrist'] = {
+            "dtype": ref_cam_feat["dtype"],
+            "shape": ref_cam_feat["shape"],
+            "names": ref_cam_feat["names"],
+        }
 
     print(f"Original features: {list(source_dataset.features.keys())}")
     print(f"New features: {list(new_features.keys())}")
