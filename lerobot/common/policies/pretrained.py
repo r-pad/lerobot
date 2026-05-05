@@ -136,18 +136,19 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
 
     @classmethod
     def _load_as_safetensor(cls, model: T, model_file: str, map_location: str, strict: bool) -> T:
-        if packaging.version.parse(safetensors.__version__) < packaging.version.parse("0.4.3"):
-            load_model_as_safetensor(model, model_file, strict=strict)
-            if map_location != "cpu":
-                logging.warning(
-                    "Loading model weights on other devices than 'cpu' is not supported natively in your version of safetensors."
-                    " This means that the model is loaded on 'cpu' first and then copied to the device."
-                    " This leads to a slower loading time."
-                    " Please update safetensors to version 0.4.3 or above for improved performance."
-                )
-                model.to(map_location)
-        else:
-            safetensors.torch.load_model(model, model_file, strict=strict, device=map_location)
+        ckpt = safetensors.torch.load_file(model_file, device=map_location)
+        model_sd = model.state_dict()
+        fixed = {}
+        for k, v in ckpt.items():
+            if k in model_sd and v.shape != model_sd[k].shape:
+                try:
+                    fixed[k] = v.reshape(model_sd[k].shape)
+                    logging.warning(f"Reshaped checkpoint buffer {k}: {tuple(v.shape)} → {tuple(model_sd[k].shape)}")
+                except Exception:
+                    fixed[k] = v
+            else:
+                fixed[k] = v
+        model.load_state_dict(fixed, strict=strict)
         return model
 
     # def generate_model_card(self, *args, **kwargs) -> ModelCard:

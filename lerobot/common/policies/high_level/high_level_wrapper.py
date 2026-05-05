@@ -98,7 +98,9 @@ def _get_gripper_pcd(robot_type, robot_kwargs):
             cur_joint_angle=robot_kwargs["gripper_angle"],
             world_to_cam_mat=np.eye(4), # render in world frame
         )#[self.GRIPPER_IDX[robot_type]]
-    else:
+    elif robot_type == "droid":
+        # gripper_pcd is (4, 3) world-frame points provided directly
+        return robot_kwargs["gripper_pcd"]
         raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
 
 @dataclass
@@ -208,6 +210,7 @@ class HighLevelWrapper:
             "aloha": torch.tensor([6, 197, 174]),
             "human": torch.tensor([343, 763, 60]),
             "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
+            "droid": torch.tensor([0, 1, 2]),
         }
 
         # For rerun visualization
@@ -231,7 +234,9 @@ class HighLevelWrapper:
             trimesh object transformed to goal pose
         """
         if robot_type != "aloha":
-            raise NotImplementedError(f"Goal gripper mesh visualization not implemented for robot_type={robot_type}")
+            print(f"Goal gripper mesh visualization not implemented for robot_type={robot_type}")
+            return goal_prediction
+            # raise NotImplementedError(f"Goal gripper mesh visualization not implemented for robot_type={robot_type}")
         # Get gripper mesh at current position in world frame
         gripper_mesh = render_aloha_gripper_mesh(np.eye(4), joint_state)
 

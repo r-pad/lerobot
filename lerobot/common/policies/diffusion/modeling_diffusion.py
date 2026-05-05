@@ -143,6 +143,7 @@ class DiffusionPolicy(PreTrainedPolicy):
             "aloha": torch.tensor([6, 197, 174]),
             "human": torch.tensor([343, 763, 60]),
             "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
+            "droid": torch.tensor([0, 1, 2]),
         }
 
         if self.config.enable_goal_conditioning:
