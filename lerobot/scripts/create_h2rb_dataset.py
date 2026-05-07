@@ -561,12 +561,14 @@ if __name__ == "__main__":
     parser.add_argument("--calibration_config", type=str, required=False,
                         default="droid_calibration/calibration_multiview.json",
                         help="Path to calibration JSON config file")
+    parser.add_argument("--push_to_hub", action="store_true",
+                        help="Whether to push the dataset to HuggingFace Hub after creation")
     args = parser.parse_args()
 
     img_shape = (args.img_height, args.img_width) if args.img_height > 0 else None
     calibrations = load_calibrations(args.calibration_config)
 
-    gen_h2rd_dataset(
+    dataset = gen_h2rd_dataset(
         data_dir=args.data_dir,
         repo_id=args.repo_id,
         task=args.task,
@@ -575,3 +577,7 @@ if __name__ == "__main__":
         num_episodes=args.num_episodes,
         target_fps=args.target_fps,
     )
+
+    if args.push_to_hub:
+        print("Pushing dataset to hub...")
+        dataset.push_to_hub(repo_id=args.target_repo_id)

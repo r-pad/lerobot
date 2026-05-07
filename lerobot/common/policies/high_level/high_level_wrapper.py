@@ -599,7 +599,7 @@ def initialize_articubot_model(run_id, use_text_embedding, use_dual_head, in_cha
     """Initialize Articubot PointNet2 model from wandb artifact"""
     # Initialize WandB API and download artifact
     # Follows naming convention in lfd3d
-    artifact_dir = "wandb"
+    artifact_dir = f"wandb/{run_id}"
     checkpoint_reference = f"r-pad/lfd3d/best_rmse_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
@@ -629,7 +629,7 @@ def initialize_dino_heatmap_model(entity, project, checkpoint_type, run_id, dino
     model_cfg = ModelConfig(dino_model, use_gripper_pcd, use_text_embedding)
     model = DinoHeatmapNetwork(model_cfg)
 
-    artifact_dir = "wandb"
+    artifact_dir = f"wandb/{run_id}"
     checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
@@ -674,7 +674,7 @@ def initialize_dino_3dgp_model(entity, project, checkpoint_type,
     )
     model = Dino3DGPNetwork(model_cfg)
 
-    artifact_dir = "wandb"
+    artifact_dir = f"wandb/{run_id}"
     checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
@@ -728,7 +728,7 @@ def initialize_vit_3dgp_model(entity, project, checkpoint_type,
     )
     model = ViT3DGPNetwork(model_cfg)
 
-    artifact_dir = "wandb"
+    artifact_dir = f"wandb/{run_id}"
     checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
