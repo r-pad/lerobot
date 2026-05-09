@@ -556,7 +556,7 @@ if __name__ == "__main__":
                         help="Resize image width  (0 = keep original)")
     parser.add_argument("--num_episodes", type=str, default="all",
                         help="Max episodes to process ('all' for all)")
-    parser.add_argument("--target_fps",   type=int, default=None,
+    parser.add_argument("--target_fps",   type=int, default=15,
                         help="Target FPS after subsampling (default: keep source FPS)")
     parser.add_argument("--calibration_config", type=str, required=False,
                         default="droid_calibration/calibration_multiview.json",
