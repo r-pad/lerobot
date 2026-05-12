@@ -7,3 +7,6 @@
 [submodule "polaris"]
 	path = polaris
 	url = https://github.com/DavidZ2851/polaris.git
+[submodule "map-anything"]
+	path = map-anything
+	url = https://github.com/facebookresearch/map-anything.git

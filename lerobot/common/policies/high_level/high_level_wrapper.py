@@ -85,6 +85,60 @@ def _gripper_pcd_to_token(gripper_pcd):
 
     return gripper_token
 
+def _get_gripper_pcd_droid(robot_type, robot_kwargs):
+    """Compute a (4, 3) world-frame gripper point cloud for the droid robot.
+
+    Returns gripper_pcd directly if provided, otherwise builds it analytically
+    from observation.right_eef_pose = [rot6d(6) | trans(3) | gripper(1)]
+    using the Isaac Lab 4-point convention:
+        [0] top   : directly above EE  (z = -0.05 in local frame)
+        [1] right : right finger tip   (+y by half-width)
+        [2] left  : left  finger tip   (-y by half-width)
+        [3] grasp : grasp center       (origin)
+    """
+    if "gripper_pcd" in robot_kwargs:
+        return robot_kwargs["gripper_pcd"]
+
+    import pytorch3d.transforms as p3d
+
+    ee_pose = robot_kwargs["observation.right_eef_pose"]
+    ee_pose_t = ee_pose if isinstance(ee_pose, torch.Tensor) else torch.as_tensor(ee_pose)
+    ee_pose_t = ee_pose_t.detach().cpu().float().reshape(-1)
+
+    rot_6d = ee_pose_t[:6]
+    xyz = ee_pose_t[6:9].numpy().astype(np.float32)
+    gripper = float(ee_pose_t[-1])
+
+    # rot_6d → rotation matrix (3, 3)
+    R_pose = p3d.rotation_6d_to_matrix(rot_6d.unsqueeze(0)).squeeze(0)
+
+    # Mirror training-time Z-rotation augmentation on the obs side.
+    # The action-side undo uses +undo_z_rotation_deg; obs-side uses the opposite sign.
+    do_z_rotation_deg = 45
+
+    a = np.deg2rad(do_z_rotation_deg)
+    R_z = torch.tensor(
+        [[np.cos(a), -np.sin(a), 0.0],
+            [np.sin(a),  np.cos(a), 0.0],
+            [0.0,        0.0,       1.0]], dtype=torch.float32,
+    )
+    R_pose = R_z @ R_pose
+
+    rot_mat = R_pose.numpy().astype(np.float32)
+
+    # Franka finger joint: ~0 closed, ~0.04 open → half-width in meters
+    half_width = float(np.clip(gripper, 0.0, 0.04))
+
+    offsets = np.array([
+        [0.0,         0.0, -0.05],
+        [0.0,  half_width,  0.0 ],
+        [0.0, -half_width,  0.0 ],
+        [0.0,         0.0,  0.0 ],
+    ], dtype=np.float32)
+
+    return (offsets @ rot_mat.T + xyz).astype(np.float32)
+
+
 def _get_gripper_pcd(robot_type, robot_kwargs):
     """Extract gripper point cloud for different robot types"""
     if robot_type == "aloha":
@@ -98,6 +152,8 @@ def _get_gripper_pcd(robot_type, robot_kwargs):
             cur_joint_angle=robot_kwargs["gripper_angle"],
             world_to_cam_mat=np.eye(4), # render in world frame
         )#[self.GRIPPER_IDX[robot_type]]
+    elif robot_type == "droid":
+        return _get_gripper_pcd_droid(robot_type, robot_kwargs)
     else:
         raise NotImplementedError(f"Need to implement code to extract gripper pcd for {robot_type}.")
 
@@ -208,6 +264,7 @@ class HighLevelWrapper:
             "aloha": torch.tensor([6, 197, 174]),
             "human": torch.tensor([343, 763, 60]),
             "libero_franka": torch.tensor([1, 2, 0]),  # top, left, right -> left, right, top in agentview
+            "droid": torch.tensor([0, 1, 2]),
         }
 
         # For rerun visualization
@@ -230,6 +287,8 @@ class HighLevelWrapper:
         Returns:
             trimesh object transformed to goal pose
         """
+        if robot_type == "droid":
+            return goal_prediction
         if robot_type != "aloha":
             raise NotImplementedError(f"Goal gripper mesh visualization not implemented for robot_type={robot_type}")
         # Get gripper mesh at current position in world frame

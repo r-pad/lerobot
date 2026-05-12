@@ -72,6 +72,14 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.polaris_policy.amplify.amplify_client import AMPLIFYPolicyClient
 
         return AMPLIFYPolicyClient
+    elif name == "point-policy":
+        from lerobot.common.policies.polaris_policy.point_policy.point_policy_client import PointPolicyClient
+
+        return PointPolicyClient
+    elif name == "ghost":
+        from lerobot.common.policies.polaris_policy.ghost.ghost_client import GhostClient
+
+        return GhostClient
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -97,6 +105,12 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
     elif policy_type == "amplify":
         from lerobot.common.policies.polaris_policy.amplify.amplify_client import AMPLIFYPolicyConfig
         return AMPLIFYPolicyConfig(**kwargs)
+    elif policy_type == "point-policy":
+        from lerobot.common.policies.polaris_policy.point_policy.point_policy_client import PointPolicyConfig
+        return PointPolicyConfig(**kwargs)
+    elif policy_type == "ghost":
+        from lerobot.common.policies.polaris_policy.ghost.ghost_client import GhostConfig
+        return GhostConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 
