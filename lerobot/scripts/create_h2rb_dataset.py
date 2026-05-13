@@ -122,7 +122,7 @@ def load_calibrations(calibration_config_path: str):
     return calibrations
 
 def upgrade_action_space(arr: np.ndarray) -> np.ndarray:
-    """(N, 8) [pos, quat_wxyz, gripper] → (N, 10) [rot6d, pos, gripper]."""
+    """(N, 8) [pos, quat_wxyz, gripper] → (N, 10) [pos, rot6d, gripper]."""
     pos = arr[:, 0:3]
     quat_wxyz = arr[:, 3:7]
     gripper = arr[:, 7:8]
@@ -131,7 +131,7 @@ def upgrade_action_space(arr: np.ndarray) -> np.ndarray:
     R = transforms.quaternion_to_matrix(torch.from_numpy(quat_wxyz))  # (N, 3, 3)
     rot6d = transforms.matrix_to_rotation_6d(R).numpy()  # (N, 6)
 
-    return np.concatenate([rot6d, pos, gripper], axis=1).astype(np.float32)
+    return np.concatenate([pos, rot6d, gripper], axis=1).astype(np.float32)
 
 
 def generate_goal_gripper_proj(gripper_pcd_4x3: np.ndarray, K: np.ndarray,

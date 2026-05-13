@@ -10,6 +10,7 @@ import torch
 from tqdm import tqdm
 import numpy as np
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd, retarget_aloha_gripper_pcd
+from lerobot.common.utils.droid_utils import retarget_droid_gripper_pcd, extract_events_with_gripper_pos_droid
 from lerobot.common.policies.high_level.classify_utils import TASK_SPEC
 from PIL import Image
 from typing import List, Dict
@@ -255,7 +256,7 @@ def prep_eef_pose(eef_pos, eef_rot, eef_artic):
     eef_pose = np.concatenate([rot_6d, eef_pos, eef_artic[:, None]], axis=1).astype(np.float32)
     return eef_pose
 
-def get_goal_image(K, width, height, four_points=True, goal_repr="heatmap", humanize=False, gripper_pcd=None, cam_to_world=None, joint_state=None):
+def get_goal_image(K, width, height, four_points=True, goal_repr="heatmap", humanize=False, gripper_pcd=None, cam_to_world=None, joint_state=None, eef_pose=None, robot_type="aloha"):
     """
     Generate goal image from robot/human hand point cloud data
 
@@ -263,8 +264,17 @@ def get_goal_image(K, width, height, four_points=True, goal_repr="heatmap", huma
     Hand: Extracted with WiLoR and postprocessed to be in world frame
     """
     if not humanize:
-        mesh = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
-        gripper_idx = np.array([6, 197, 174]) # Handpicked idxs
+        if robot_type == "aloha":
+            mesh = render_aloha_gripper_pcd(cam_to_world=cam_to_world, joint_state=joint_state)
+            gripper_idx = np.array([6, 197, 174]) # Handpicked idxs
+        elif robot_type == "droid":
+            mesh = retarget_droid_gripper_pcd(
+                cam_to_world=cam_to_world,
+                eef_pose=eef_pose,
+            )
+            gripper_idx = np.array([0, 1, 2]) # Handpicked idxs
+        else:
+            raise ValueError(f"Unknown robot type: {robot_type}")
     else:
         mesh = gripper_pcd
         gripper_idx = np.array([343, 763, 60]) # Handpicked idxs
@@ -376,7 +386,7 @@ def _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata, c
 
 def _process_frame_data(original_frame, source_dataset, expanded_features, source_meta,
                        phantomize, humanize, episode_extras, frame_idx, episode_length,
-                       new_features, calibrations):
+                       new_features, calibrations, robot_type):
     """Process a single frame's data with additional features."""
     frame_data = {}
 
@@ -390,7 +400,7 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
     # Add embodiment name
     if humanize: frame_data["embodiment"] = "human"
-    else: frame_data["embodiment"] = "droid"
+    else: frame_data["embodiment"] = robot_type
 
     frame_data["task"] = source_meta.tasks[original_frame['task_index'].item()]
     camera_names = list(calibrations.keys())
@@ -439,9 +449,16 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
         if humanize:
             # We've made the switch to keeping gripper_pcds in robot frame, so the detected hand pcd also needs to be transformed to the robot frame.
             frame_data["observation.points.gripper_pcds"] = episode_extras['episode_gripper_pcds'][frame_idx]
-        else:
+        elif robot_type == "aloha":
             # Keep in world frame
             frame_data["observation.points.gripper_pcds"] = render_aloha_gripper_pcd(cam_to_world=np.eye(4), joint_state=joint_state).astype(np.float32)
+        elif robot_type == "droid":
+            # Keep in world frame
+            frame_data["observation.points.gripper_pcds"] = retarget_droid_gripper_pcd(
+                cam_to_world=np.eye(4), eef_pose=eef_data
+            ).astype(np.float32)
+        else:
+            raise ValueError(f"Unknown robot type: {robot_type}")
 
     # Add calibration data if feature is enabled
     for cam_name in camera_names:
@@ -492,9 +509,10 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
 
 def _process_episode_goals(target_dataset, episode_length, new_features, humanize,
-                          episode_extras, phantomize, calibrations, width, height):
+                          episode_extras, phantomize, calibrations, width, height, robot_type):
     """Process goal projections, event indices, and subgoals for an episode."""
     joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
+    eef_pose = np.concatenate([target_dataset.episode_buffer['observation.right_eef_pose']])
 
     if humanize:
         episode_gripper_pcds = episode_extras['episode_gripper_pcds']
@@ -515,9 +533,15 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
                 goal_indices = goal_indices + [episode_length - 1]
         else:
             # Fall back to gripper-based detection for robot data
-            close_thresh, open_thresh = 25, 30
-            goal_indices = extract_events_with_gripper_pos(
-                joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
+            if robot_type == "droid":
+                goal_indices = extract_events_with_gripper_pos_droid(
+                    joint_states)
+            elif robot_type == "aloha":
+                close_thresh, open_thresh = 25, 30
+                goal_indices = extract_events_with_gripper_pos(
+                    joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
+            else:
+                raise ValueError(f"Unknown robot type: {robot_type}")
 
         # Generate goal images for each camera at each goal index
         for cam_name in camera_names:
@@ -529,8 +553,12 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
             for goal_idx in goal_indices:
                 if humanize:
                     goal_img = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[goal_idx], cam_to_world=cam_to_world)
-                else:
+                elif robot_type == "aloha":
                     goal_img = get_goal_image(K, width, height, cam_to_world=cam_to_world, joint_state=joint_states[goal_idx])
+                elif robot_type == "droid":
+                    goal_img = get_goal_image(K, width, height, cam_to_world=cam_to_world, eef_pose=eef_pose[goal_idx], robot_type="droid")
+                else:
+                    raise ValueError(f"Unknown robot type: {robot_type}")
                 goal_images.append(Image.fromarray(goal_img).convert("RGB"))
 
             # Assign goal images to frames based on segments
@@ -579,6 +607,7 @@ def upgrade_dataset(
     discard_episodes: List[int],
     phantomize: bool,
     humanize: bool,
+    robot_type: str,
     path_to_extradata: Optional[str],
 ):
     """
@@ -671,7 +700,7 @@ def upgrade_dataset(
             frame_data = _process_frame_data(
                 original_frame, source_dataset, expanded_features, source_meta,
                 phantomize, humanize, episode_extras, frame_idx, episode_length,
-                new_features, calibrations
+                new_features, calibrations, robot_type
             )
 
             target_dataset.add_frame(frame_data)
@@ -679,7 +708,7 @@ def upgrade_dataset(
         # Process episode-level goals and events
         _process_episode_goals(
             target_dataset, episode_length, new_features, humanize,
-            episode_extras, phantomize, calibrations, width, height
+            episode_extras, phantomize, calibrations, width, height, robot_type
         )
 
         # Save episode
@@ -728,6 +757,8 @@ if __name__ == "__main__":
                         help="Push upgraded dataset to HF Hub.")
     parser.add_argument("--remove_features", type=str, nargs='*', default=[],
                         help="Names of features to be removed")
+    parser.add_argument("--robot_type", type=str, default="droid",
+                        help="Type of robot for which to generate point clouds")
     args = parser.parse_args()
 
     # Load calibrations
@@ -825,6 +856,7 @@ if __name__ == "__main__":
         phantomize=args.phantomize,
         humanize=args.humanize,
         path_to_extradata=path_to_extradata,
+        robot_type=args.robot_type,
     )
 
     if args.push_to_hub: upgraded_dataset.push_to_hub(repo_id=args.target_repo_id)
