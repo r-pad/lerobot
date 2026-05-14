@@ -559,7 +559,7 @@ if __name__ == "__main__":
     parser.add_argument("--target_fps",   type=int, default=15,
                         help="Target FPS after subsampling (default: keep source FPS)")
     parser.add_argument("--calibration_config", type=str, required=False,
-                        default="droid_calibration/calibration_multiview.json",
+                        default="/home/haotian/lerobot/lerobot/scripts/droid_calibration/calibration_multiview.json",
                         help="Path to calibration JSON config file")
     parser.add_argument("--push_to_hub", action="store_true",
                         help="Whether to push the dataset to HuggingFace Hub after creation")
