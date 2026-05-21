@@ -325,18 +325,20 @@ def record(
     # 2. give times to the robot devices to connect and start synchronizing,
     # 3. place the cameras windows on screen
     enable_teleoperation = policy is None
-    log_say("Warmup record", cfg.play_sounds)
-    warmup_record(robot, events, enable_teleoperation, cfg.warmup_time_s, cfg.display_data, cfg.fps)
+    if robot.robot_type != "script":
+        log_say("Warmup record", cfg.play_sounds)
+        warmup_record(robot, events, enable_teleoperation, cfg.warmup_time_s, cfg.display_data, cfg.fps)
 
     if has_method(robot, "teleop_safety_stop"):
         robot.teleop_safety_stop()
 
     recorded_episodes = dataset.num_episodes
+    recording_stopped = False
     while True:
         if recorded_episodes >= cfg.num_episodes:
             break
 
-        if has_method(robot, "open_gripper"):
+        if has_method(robot, "open_gripper") and robot.robot_type != "script":
             robot.open_gripper()
 
         # Give time to position GELLO at the desired start pose before each episode
@@ -368,13 +370,14 @@ def record(
         dataset.save_episode()
         recorded_episodes += 1
 
-        if events["stop_recording"]:
+        if recorded_episodes >= cfg.num_episodes:
             break
 
         input("Press Enter to continue...")
 
-    log_say("Stop recording", cfg.play_sounds, blocking=True)
-    stop_recording(robot, listener, cfg.display_data)
+    if not recording_stopped:
+        log_say("Stop recording", cfg.play_sounds, blocking=True)
+        stop_recording(robot, listener, cfg.display_data)
 
     if cfg.push_to_hub:
         dataset.push_to_hub(tags=cfg.tags, private=cfg.private)

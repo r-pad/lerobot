@@ -51,9 +51,8 @@ import pytorch3d.transforms as transforms
 import rerun as rr
 import torch
 
-from lerobot.common.policies.robot_adapters import DroidAdapter
 from lerobot.common.robot_devices.cameras.configs import AzureKinectCameraConfig, ZedCameraConfig
-from lerobot.common.robot_devices.control_utils import is_headless
+from lerobot.common.robot_devices.control_utils import droid_eef_to_joints, is_headless
 from lerobot.common.robot_devices.robots.configs import DroidRobotConfig
 from lerobot.common.robot_devices.robots.droid import DroidRobot
 
@@ -184,7 +183,6 @@ def gello_reset_loop(robot: DroidRobot, fps: float = 30.0):
 def replay_episode(
     actions_np: np.ndarray,
     robot: DroidRobot,
-    adapter: DroidAdapter,
     dataset,
     dt: float,
     undo_z_rotation_deg: float,
@@ -204,7 +202,7 @@ def replay_episode(
     current_state = obs["observation.state"]
     if not isinstance(current_state, torch.Tensor):
         current_state = torch.from_numpy(current_state).float()
-    first_joints = adapter._eef_to_joints(first_eef, current_state).numpy()
+    first_joints = droid_eef_to_joints(first_eef, current_state).numpy()
     current_joints = robot._get_franka_joints()
     max_delta = float(np.max(np.abs(first_joints[:7] - current_joints)))
     print(f"  Target joints: {first_joints.round(3)}  max_delta={max_delta:.4f} rad")
@@ -232,7 +230,7 @@ def replay_episode(
         if not isinstance(current_state, torch.Tensor):
             current_state = torch.from_numpy(current_state).float()
 
-        joint_action = adapter._eef_to_joints(eef_lerobot, current_state)
+        joint_action = droid_eef_to_joints(eef_lerobot, current_state)
 
         if step_idx % 30 == 0:
             trans   = eef_lerobot[6:9].numpy().round(4)
@@ -319,7 +317,6 @@ def main():
     )
     robot = DroidRobot(robot_cfg)
     robot.connect()
-    adapter = DroidAdapter(action_space="right_eef")
     dt = 1.0 / args.fps
 
     display_data = args.display_data and not is_headless()
@@ -347,7 +344,6 @@ def main():
             replay_episode(
                 actions_np=actions_np,
                 robot=robot,
-                adapter=adapter,
                 dataset=dataset,
                 dt=dt,
                 undo_z_rotation_deg=args.undo_z_rotation_deg,

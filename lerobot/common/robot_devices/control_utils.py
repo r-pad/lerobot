@@ -18,6 +18,8 @@
 
 
 import logging
+import json
+import os
 import time
 import traceback
 from contextlib import nullcontext
@@ -39,6 +41,240 @@ from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
+import sys
+import termios
+import tty
+import select
+import numpy as np
+
+
+@cache
+def get_droid_ik_wrapper():
+    """Lazily construct the deoxys IK wrapper used by Droid/Script Franka control."""
+    from deoxys.utils.ik_utils import IKWrapper
+
+    return IKWrapper()
+
+
+def droid_eef_to_joints(eef_action: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    """Convert a Droid/Franka EEF action to an 8D joint-space action.
+
+    Args:
+        eef_action: (10,) [rot6d, xyz, gripper] in LeRobot convention.
+        state: (8,) current state [7 joints, gripper].
+    """
+    eef_action = eef_action.squeeze()
+    state = state.squeeze()
+
+    rot6d = eef_action[:6]
+    pos = eef_action[6:9]
+    gripper = eef_action[9:10]
+
+    ik_wrapper = get_droid_ik_wrapper()
+    target_mat = transforms.rotation_6d_to_matrix(rot6d[None]).squeeze().detach().cpu().numpy()
+    target_pos = pos.detach().cpu().numpy()
+    current_joints = state[:7].detach().cpu().numpy().tolist()
+
+    joint_positions = ik_wrapper.inverse_kinematics(
+        ik_wrapper.model,
+        ik_wrapper.data,
+        target_mat,
+        target_pos,
+        current_joints,
+    )
+    return torch.cat(
+        [
+            torch.as_tensor(joint_positions, dtype=torch.float32, device=eef_action.device),
+            gripper,
+        ]
+    )
+
+
+def droid_ik_model_eef_pose(joints) -> tuple[np.ndarray, np.ndarray]:
+    """Return the IK model's current controlled site pose for a 7D Franka joint state."""
+    import mujoco
+
+    ik_wrapper = get_droid_ik_wrapper()
+    joints = np.asarray(joints, dtype=np.float64).reshape(7)
+    ik_wrapper.data.qpos[:] = joints.tolist() + [0.04] * 2
+    mujoco.mj_fwdPosition(ik_wrapper.model, ik_wrapper.data)
+    gripper_site_id = ik_wrapper.model.site("grip_site").id
+    pos = np.copy(ik_wrapper.data.site(gripper_site_id).xpos)
+    mat = np.copy(ik_wrapper.data.site(gripper_site_id).xmat).reshape(3, 3)
+    return mat, pos
+
+
+def droid_delta_eef_to_joints(
+    delta_pos,
+    state: torch.Tensor,
+    *,
+    target_rot: torch.Tensor | np.ndarray | None = None,
+    gripper_action: float | torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Apply a Cartesian delta in the IK model frame and return an 8D joint action.
+
+    This avoids feeding Franka's reported O_T_EE pose directly into MuJoCo IK,
+    which may use a different controlled site frame.
+    """
+    state = state.squeeze()
+    current_mat, current_pos = droid_ik_model_eef_pose(state[:7].detach().cpu().numpy())
+    target_pos = current_pos + np.asarray(delta_pos, dtype=np.float64).reshape(3)
+
+    if target_rot is None:
+        target_mat = torch.as_tensor(current_mat, dtype=state.dtype, device=state.device)
+    elif isinstance(target_rot, torch.Tensor):
+        target_mat = target_rot.to(device=state.device, dtype=state.dtype)
+    else:
+        target_mat = torch.as_tensor(target_rot, dtype=state.dtype, device=state.device)
+
+    rot6d = transforms.matrix_to_rotation_6d(target_mat[None]).squeeze(0)
+    pos = torch.as_tensor(target_pos, dtype=state.dtype, device=state.device)
+    if gripper_action is None:
+        gripper = state[-1:]
+    else:
+        gripper = torch.as_tensor([gripper_action], dtype=state.dtype, device=state.device).reshape(1)
+    return droid_eef_to_joints(torch.cat([rot6d, pos, gripper]), state)
+
+
+def print_droid_ik_diagnostics(robot, state: torch.Tensor, action: torch.Tensor | None = None, prefix: str = "[ik]"):
+    """Print frame and joint-delta diagnostics for Droid/Script IK debugging."""
+    state = state.squeeze()
+    robot_rot, robot_pos = robot.robot_interface.last_eef_rot_and_pos
+    model_rot, model_pos = droid_ik_model_eef_pose(state[:7].detach().cpu().numpy())
+
+    msg = (
+        f"{prefix} robot_eef_pos={np.round(robot_pos.squeeze(), 5).tolist()} "
+        f"ik_model_grip_site_pos={np.round(model_pos, 5).tolist()} "
+        f"frame_pos_delta={np.round(model_pos - robot_pos.squeeze(), 5).tolist()}"
+    )
+    if action is not None:
+        joint_delta = action[:7].detach().cpu() - state[:7].detach().cpu()
+        msg += f" joint_delta={np.round(joint_delta.numpy(), 6).tolist()}"
+    print(msg)
+
+
+def droid_pose_to_eef_action(
+    target_pos,
+    target_quat,
+    gripper_action,
+    *,
+    device=None,
+    dtype=torch.float32,
+) -> torch.Tensor:
+    """Build a LeRobot Droid EEF action [rot6d, xyz, gripper] from pose + gripper."""
+    from deoxys.utils import transform_utils
+
+    target_pos = np.array(target_pos, dtype=np.float32)
+    target_quat = np.array(target_quat, dtype=np.float32)
+    target_mat = torch.from_numpy(transform_utils.quat2mat(target_quat)).to(device=device, dtype=dtype)
+    rot6d = transforms.matrix_to_rotation_6d(target_mat[None]).squeeze(0)
+    pos = torch.as_tensor(target_pos, device=device, dtype=dtype)
+    gripper = torch.as_tensor([gripper_action], device=device, dtype=dtype)
+    return torch.cat([rot6d, pos, gripper])
+
+
+def send_droid_eef_action(robot, eef_action: torch.Tensor, state: torch.Tensor | None = None) -> torch.Tensor:
+    """IK an EEF action and send it through the robot's joint-space send_action path."""
+    if state is None:
+        state = torch.tensor(
+            list(robot._get_franka_joints()) + [robot._get_gripper_width()],
+            dtype=torch.float32,
+        )
+    elif not isinstance(state, torch.Tensor):
+        state = torch.as_tensor(state, dtype=torch.float32)
+
+    joint_action = droid_eef_to_joints(eef_action.float(), state.float())
+    robot.send_action(joint_action)
+    return joint_action
+
+
+def droid_robot_pose_to_joint_action(
+    robot,
+    target_pos,
+    target_quat,
+    state: torch.Tensor | None = None,
+    gripper_action: float | None = None,
+) -> torch.Tensor:
+    """Build a joint action for a Franka-reported EEF target pose.
+
+    The robot reports Franka O_T_EE, while deoxys IK controls MuJoCo's grip_site.
+    This maps the desired robot-frame position into the current IK-site frame
+    before solving IK.
+    """
+    if state is None:
+        state = torch.tensor(
+            list(robot._get_franka_joints()) + [robot._get_gripper_width()],
+            dtype=torch.float32,
+        )
+    elif not isinstance(state, torch.Tensor):
+        state = torch.as_tensor(state, dtype=torch.float32)
+
+    _, robot_pos = robot.robot_interface.last_eef_rot_and_pos
+    _, ik_pos = droid_ik_model_eef_pose(state[:7].detach().cpu().numpy())
+    robot_to_ik_pos_offset = ik_pos - robot_pos.squeeze()
+    target_ik_pos = np.asarray(target_pos, dtype=np.float64).reshape(3) + robot_to_ik_pos_offset
+    if gripper_action is None:
+        gripper_action = state[-1].item()
+    eef_action = droid_pose_to_eef_action(
+        target_ik_pos,
+        target_quat,
+        gripper_action,
+        device=state.device,
+        dtype=state.dtype,
+    )
+    return droid_eef_to_joints(eef_action, state)
+
+
+def read_key(timeout_s: float | None = None):
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        if timeout_s is not None:
+            ready, _, _ = select.select([sys.stdin], [], [], timeout_s)
+            if not ready:
+                return None
+        ch = sys.stdin.read(1)
+
+        if ch == "\r" or ch == "\n":
+            return "enter"
+
+        if ch == "\x1b":  # arrow keys start escape sequence
+            seq = sys.stdin.read(2)
+            if seq == "[D":
+                return "left"
+            if seq == "[C":
+                return "right"
+            if seq == "[A":
+                return "up"
+            if seq == "[B":
+                return "down"
+
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def hold_pose_until_key(robot, target_pos, target_quat, prompt: str):
+    print(prompt, end="", flush=True)
+    while True:
+        key = read_key(timeout_s=0.02)
+        if key is not None:
+            print(key)
+            return key.strip().lower()
+
+        state = torch.tensor(
+            list(robot._get_franka_joints()) + [robot._get_gripper_width()],
+            dtype=torch.float32,
+        )
+        joint_action = droid_robot_pose_to_joint_action(
+            robot,
+            target_pos,
+            target_quat,
+            state=state,
+            gripper_action=state[-1].item(),
+        )
+        robot.send_action(joint_action)
 
 def add_eef_pose(robot, real_joints):
     if robot.robot_type == "aloha":
@@ -70,17 +306,16 @@ def smooth_pose_move_to(
     num_steps_per_waypoint: int = 20,
     num_additional_steps: int = 0,
 ):
-    """Interpolate the end-effector position before sending OSC pose targets."""
-    current_pose = robot._pose_controller.eef_pose
-    current_pos = current_pose[:3, 3].copy()
+    """Interpolate a Franka EEF target and send direct joint-space actions."""
+    _, eef_pos = robot.robot_interface.last_eef_rot_and_pos
+    current_pos = eef_pos.squeeze().copy()
     target_pos = np.array(target_pos, dtype=np.float64)
     target_quat = np.array(target_quat, dtype=np.float64)
 
     delta = target_pos - current_pos
     max_delta = np.linalg.norm(delta)
     num_waypoints = max(int(np.ceil(max_delta / step_m)), 1)
-    max_delta_pos = min(getattr(robot.config, "pose_max_delta_pos", step_m), step_m)
-    action_smoothing = max(getattr(robot.config, "pose_action_smoothing", 0.0), 0.75)
+    num_repeats = max(int(num_steps_per_waypoint), 1)
 
     for i in range(num_waypoints):
         alpha = (i + 1) / num_waypoints
@@ -88,18 +323,22 @@ def smooth_pose_move_to(
         waypoint_pos = current_pos + alpha * delta
         print(
             f"Step {i + 1}/{num_waypoints}: "
-            f"Moving EEF to {np.round(waypoint_pos, 4).tolist()}"
+            f"Sending joint action for EEF {np.round(waypoint_pos, 4).tolist()}"
         )
-        robot._pose_controller.move_to(
-            target_pos=waypoint_pos,
-            target_quat=target_quat,
-            num_steps=num_steps_per_waypoint,
-            num_additional_steps=num_additional_steps,
-            pos_tolerance=robot.config.pose_pos_tolerance,
-            rot_tolerance=robot.config.pose_rot_tolerance,
-            max_delta_pos=max_delta_pos,
-            action_smoothing=action_smoothing,
-        )
+        for _ in range(num_repeats):
+            state = torch.tensor(
+                list(robot._get_franka_joints()) + [robot._get_gripper_width()],
+                dtype=torch.float32,
+            )
+            joint_action = droid_robot_pose_to_joint_action(
+                robot,
+                waypoint_pos,
+                target_quat,
+                state=state,
+                gripper_action=state[-1].item(),
+            )
+            robot.send_action(joint_action)
+            time.sleep(0.01)
 
     return max_delta, num_waypoints
 
@@ -113,55 +352,277 @@ def slow_close_gripper(robot, speed: int = 60, force: int = 100):
     robot._last_gripper_action = robot.config.gripper_close_action
 
 
+def record_droid_insertion_pose(robot, path: str = "outputs/scripted_insertion_pose.json") -> dict:
+    """Record the current insertion pose in robot and IK frames.
+
+    Use the ``ik_grip_site`` pose for later delta-action interpolation and IK.
+    The ``robot_eef`` pose is kept for readability/debugging against deoxys.
+    """
+    final_rot, final_pos = robot.robot_interface.last_eef_rot_and_pos
+    final_pos = final_pos.squeeze()
+    final_rot_6d = transforms.matrix_to_rotation_6d(
+        torch.from_numpy(final_rot[None])
+    ).squeeze()
+
+    joints = robot._get_franka_joints()
+    ik_rot, ik_pos = droid_ik_model_eef_pose(joints)
+    ik_rot_6d = transforms.matrix_to_rotation_6d(
+        torch.from_numpy(ik_rot[None])
+    ).squeeze()
+
+    try:
+        gripper_width = float(robot._get_gripper_width())
+    except Exception:
+        gripper_width = None
+
+    record = {
+        "recommended_policy_frame": "ik_grip_site",
+        "timestamp_unix_s": time.time(),
+        "ik_grip_site": {
+            "position": [float(v) for v in ik_pos.tolist()],
+            "rotation_matrix": [[float(v) for v in row] for row in ik_rot.tolist()],
+            "rotation_6d": [float(v) for v in ik_rot_6d.tolist()],
+        },
+        "robot_eef": {
+            "position": [float(v) for v in final_pos.tolist()],
+            "rotation_matrix": [[float(v) for v in row] for row in final_rot.tolist()],
+            "rotation_6d": [float(v) for v in final_rot_6d.tolist()],
+        },
+        "state": {
+            "joints": [float(v) for v in joints.tolist()],
+            "gripper_width": gripper_width,
+        },
+    }
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(record, f, indent=2)
+
+    print(f"Recorded insertion pose to {path}")
+    print(
+        "Insertion pose for scripted policy (ik_grip_site pos + rot_6d): "
+        f"{np.round(ik_pos, 6).tolist()} + "
+        f"{[round(v, 6) for v in ik_rot_6d.tolist()]}"
+    )
+    print(
+        "Debug robot_eef pose (pos + rot_6d): "
+        f"{np.round(final_pos, 6).tolist()} + "
+        f"{[round(v, 6) for v in final_rot_6d.tolist()]}"
+    )
+    print(
+        "Frame offset ik_grip_site - robot_eef: "
+        f"{np.round(ik_pos - final_pos, 6).tolist()}"
+    )
+    return record
+
+
+def lift_from_recorded_insertion_pose(
+    robot,
+    record: dict,
+    lift_m: float = 0.03,
+    num_steps: int = 60,
+    sleep_s: float = 0.02,
+):
+    """Lift straight up using the same robot-frame smooth pose primitive as keyboard tuning."""
+    from deoxys.utils import transform_utils
+
+    recorded_start_pos = np.asarray(record["ik_grip_site"]["position"], dtype=np.float64)
+    start_ik_rot, start_ik_pos = droid_ik_model_eef_pose(robot._get_franka_joints())
+    robot_rot, robot_pos = robot.robot_interface.last_eef_rot_and_pos
+    robot_pos = robot_pos.squeeze()
+    target_robot_pos = robot_pos.copy()
+    target_robot_pos[2] += lift_m
+    target_quat = transform_utils.mat2quat(robot_rot)
+
+    print(
+        "Lifting with smooth_pose_move_to: "
+        f"robot_start={np.round(robot_pos, 6).tolist()} "
+        f"robot_target={np.round(target_robot_pos, 6).tolist()} "
+        f"ik_start={np.round(start_ik_pos, 6).tolist()} "
+        f"recorded_start={np.round(recorded_start_pos, 6).tolist()} "
+        f"lift_z={lift_m:.6f}"
+    )
+
+    smooth_pose_move_to(
+        robot,
+        target_pos=target_robot_pos,
+        target_quat=target_quat,
+        step_m=0.001,
+        num_steps_per_waypoint=10,
+        num_additional_steps=0,
+    )
+    _, final_ik_pos = droid_ik_model_eef_pose(robot._get_franka_joints())
+    _, final_robot_pos = robot.robot_interface.last_eef_rot_and_pos
+    final_robot_pos = final_robot_pos.squeeze()
+    print(
+        "After smooth lift: "
+        f"robot_pos={np.round(final_robot_pos, 6).tolist()} "
+        f"robot_error={np.round(target_robot_pos - final_robot_pos, 6).tolist()} "
+        f"ik_pos={np.round(final_ik_pos, 6).tolist()} "
+        f"ik_delta={np.round(final_ik_pos - start_ik_pos, 6).tolist()}"
+    )
+
 def run_scripted_grasp_sequence(robot):
     target_quat = np.array(robot.config.target_quat, dtype=np.float64)
     approach_pos = np.array(robot.config.approach_pos, dtype=np.float64)
-    grasp_pos = np.array(robot.config.target_pos, dtype=np.float64)
 
     print("Moving to the approach pose")
-    smooth_pose_move_to(
-        robot,
-        target_pos=approach_pos,
-        target_quat=target_quat,
-        step_m=0.01,
-        num_steps_per_waypoint=20,
-        num_additional_steps=0,
-    )
+    # smooth_pose_move_to(
+    #     robot,
+    #     target_pos=approach_pos,
+    #     target_quat=target_quat,
+    #     step_m=0.01,
+    #     num_steps_per_waypoint=20,
+    #     num_additional_steps=0,
+    # )
 
-    print("Moving to the grasp pose")
-    max_delta, num_waypoints = smooth_pose_move_to(
-        robot,
-        target_pos=grasp_pos,
-        target_quat=target_quat,
-        step_m=0.01,
-        num_steps_per_waypoint=20,
-        num_additional_steps=0,
-    )
-    print(f"Moved to the grasp pose in {num_waypoints} waypoints, max_delta={max_delta:.4f} m")
-    return
-    slow_close_gripper(robot)
-    print("Close gripper slowly")
+    if not hasattr(robot, "_robot_ik_controller") or robot._robot_ik_controller is None:
+        raise RuntimeError("RobotIKController is required for the approach lift test.")
+    for _ in range(10):
+        before_joints = robot._get_franka_joints()
+        before_pos, before_quat = robot._robot_ik_controller.bullet_ik_wrapper.forward_kinematics(before_joints)
+        before_franka_pose = robot._robot_ik_controller.eef_pose
+        print("EEF pose: ", robot._robot_ik_controller.eef_pose)
+        print("Before Pose: ", before_pos)
+        # before_pos = np.asarray(before_pos, dtype=np.float64)
+        before_pos = np.asarray(before_franka_pose[:3, 3], dtype=np.float64)
+        target_pos = before_pos.copy()
+        target_pos[1] +=-0.001
+        target_rot = transforms.quaternion_to_matrix(
+            torch.tensor([before_quat[3], before_quat[0], before_quat[1], before_quat[2]], dtype=torch.float64)
+        ).numpy()
 
-    print("Moving back to the approach pose")
-    smooth_pose_move_to(
-        robot,
-        target_pos=approach_pos,
-        target_quat=target_quat,
-        step_m=0.01,
-        num_steps_per_waypoint=20,
-        num_additional_steps=0,
-    )
-    final_pose = robot._pose_controller.eef_pose
-    final_pos = final_pose[:3, 3]
-    final_rot_6d = transforms.matrix_to_rotation_6d(
-        torch.from_numpy(final_pose[:3, :3][None])
-    ).squeeze()
-    print(
-        "Final EEF pose (pos + rot_6d): "
-        f"{np.round(final_pos, 4).tolist()} + "
-        f"{[round(v, 4) for v in final_rot_6d.tolist()]}"
-    )
+        print(
+            "[approach_lift_test] command "
+            f"before_pybullet_pos={np.round(before_pos, 6).tolist()} "
+            f"target_pybullet_pos={np.round(target_pos, 6).tolist()} "
+            "delta=[0.0, 0.0, 0.001]"
+        )
 
+        success = robot._robot_ik_controller.control(
+            target_pos=target_pos,
+            target_rot=target_rot,
+            grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+            # wait_times=int(getattr(robot.config, "script_joint_wait_times", 50)),
+            wait_times=100,
+            joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+        )
+
+        after_joints = robot._get_franka_joints()
+        after_pos, _ = robot._robot_ik_controller.bullet_ik_wrapper.forward_kinematics(after_joints)
+        after_pos = np.asarray(after_pos, dtype=np.float64)
+        after_pos_real_franka = robot._robot_ik_controller.eef_pose[:3, 3]
+        target_joints = getattr(robot._robot_ik_controller, "last_joint_target", None)
+        if target_joints is None:
+            joint_error = None
+        else:
+            joint_error = np.asarray(target_joints, dtype=np.float64) - after_joints
+
+        print(
+            "[approach_lift_test] result\n"
+            f"  success={success}\n"
+            f"  after_pybullet_pos={np.round(after_pos, 6).tolist()}\n"
+            f"  actual_delta={np.round(after_pos - before_pos, 6).tolist()}\n"
+            f"  target_error={np.round(target_pos - after_pos_real_franka, 6).tolist()}\n"
+            f"  target_joints={None if target_joints is None else np.round(target_joints, 6).tolist()}\n"
+            f"  after_joints={np.round(after_joints, 6).tolist()}\n"
+            f"  joint_error={None if joint_error is None else np.round(joint_error, 6).tolist()}\n"
+            f"  joint_error_norm={None if joint_error is None else float(np.linalg.norm(joint_error)):.6f}"
+        )
+        time.sleep(0.5)
+    return {"debug_lift_only": True}
+
+    # _, actual_approach_pos = robot.robot_interface.last_eef_rot_and_pos
+    # plane_z = actual_approach_pos.squeeze()[2]
+    # approach_pos[2] = plane_z
+    # print(
+    #     "Tune grasp XY at the current approach height. "
+    #     f"Keyboard plane robot_frame_z={plane_z:.4f}. Press Enter to finish tuning."
+    # )
+    # while True:
+    #     approach_pos[2] = plane_z
+    #     key = input("w/a/s/d to adjust XY, Enter to finish: ").strip().lower()
+
+    #     if key in ("", "enter"):
+    #         break
+
+    #     if key == "a":
+    #         approach_pos[2] -= 0.001   # y -
+    #     elif key == "d":
+    #         approach_pos[2] += 0.001   # y +
+    #     elif key == "w":
+    #         approach_pos[0] -= 0.001   # x -
+    #     elif key == "s":
+    #         approach_pos[0] += 0.001   # x +
+    #     else:
+    #         continue
+
+    #     approach_pos[2] = plane_z
+    #     grasp_pos[:2] = approach_pos[:2]
+    #     print(
+    #         "Adjusted grasp XY: "
+    #         f"approach={np.round(approach_pos, 6).tolist()} "
+    #         f"grasp={np.round(grasp_pos, 6).tolist()}"
+    #     )
+    #     _, before_robot_pos = robot.robot_interface.last_eef_rot_and_pos
+    #     before_robot_pos = before_robot_pos.squeeze()
+    #     _, before_ik_pos = droid_ik_model_eef_pose(robot._get_franka_joints())
+    #     before_ik_offset = before_ik_pos - before_robot_pos
+    #     target_ik_pos = approach_pos + before_ik_offset
+    #     smooth_pose_move_to(
+    #         robot,
+    #         target_pos=approach_pos,
+    #         target_quat=target_quat,
+    #         step_m=0.001,
+    #         num_steps_per_waypoint=5,
+    #         num_additional_steps=0,
+    #     )
+    #     _, after_robot_pos = robot.robot_interface.last_eef_rot_and_pos
+    #     after_robot_pos = after_robot_pos.squeeze()
+    #     _, after_ik_pos = droid_ik_model_eef_pose(robot._get_franka_joints())
+    #     print(
+    #         "[keyboard:drift] "
+    #         f"target_robot={np.round(approach_pos, 6).tolist()} "
+    #         f"before_robot={np.round(before_robot_pos, 6).tolist()} "
+    #         f"after_robot={np.round(after_robot_pos, 6).tolist()} "
+    #         f"robot_actual_delta={np.round(after_robot_pos - before_robot_pos, 6).tolist()} "
+    #         f"robot_target_error={np.round(approach_pos - after_robot_pos, 6).tolist()}"
+    #     )
+    #     print(
+    #         "[keyboard:drift] "
+    #         f"target_ik_est={np.round(target_ik_pos, 6).tolist()} "
+    #         f"before_ik={np.round(before_ik_pos, 6).tolist()} "
+    #         f"after_ik={np.round(after_ik_pos, 6).tolist()} "
+    #         f"ik_actual_delta={np.round(after_ik_pos - before_ik_pos, 6).tolist()} "
+    #         f"ik_target_error={np.round(target_ik_pos - after_ik_pos, 6).tolist()} "
+    #         f"ik_xy_error_norm={np.linalg.norm(target_ik_pos[:2] - after_ik_pos[:2]):.6f}"
+    #     )
+
+    # grasp_pos[:2] = approach_pos[:2]
+    # print(
+    #     "Finished XY tuning: "
+    #     f"approach={np.round(approach_pos, 6).tolist()} "
+    #     f"grasp={np.round(grasp_pos, 6).tolist()}"
+    # )
+
+    # slow_close_gripper(robot)
+    # print("Press Enter when the gripper is at the insertion pose to record it...")
+    # input()
+    record = record_droid_insertion_pose(robot)
+    # if hasattr(robot, "_recorded_insertion_pose"):
+    #     robot._recorded_insertion_pose = record
+    #     robot._pose_target_pos = None
+    #     robot._pose_target_origin_pos = None
+    #     robot._pose_target_rot = None
+    # lift_m = float(np.random.uniform(0.02, 0.04))
+    # print(
+    #     "Randomized post-insertion lift: "
+    #     f"z={lift_m:.4f} m"
+    # )
+    # lift_from_recorded_insertion_pose(robot, record, lift_m=lift_m)
+    # print("Ready for Collecting Data. press enter to continue")
+    # input()
+    return record
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
     log_items = []
@@ -473,9 +934,12 @@ def control_loop(
             if not getattr(robot, "_scripted_grasp_sequence_done", False):
                 robot._scripted_grasp_sequence_done = True
                 print("Script Step")
-                run_scripted_grasp_sequence(robot)
+                insert_meta_data = run_scripted_grasp_sequence(robot)
+                if insert_meta_data.get("debug_lift_only", False):
+                    print("Approach lift debug complete; stopping before teleop_step commands.")
+                    break
 
-            observation, action = robot.teleop_step(record_data=True)
+            # observation, action = robot.teleop_step(record_data=True, insert_meta_data=insert_meta_data)
             if robot.use_eef:
                 observation["observation.right_eef_pose"] = add_eef_pose(robot, observation['observation.state'])
                 action["action.right_eef_pose"] = add_eef_pose(robot, action['action'])

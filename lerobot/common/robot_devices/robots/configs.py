@@ -624,16 +624,23 @@ class DroidRobotConfig(RobotConfig):
 class ScriptRobotConfig(RobotConfig):
     # Direct scripted Franka control via deoxys. This skips GELLO teleoperation.
     deoxys_general_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/charmander_droid.yml"
-    deoxys_controller_type: str = "OSC_POSE"
-    deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/tuned-osc-pose-controller.yml"
+    deoxys_controller_type: str = "JOINT_POSITION"
+    deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/joint-position-controller.yml"
 
-    # Lift command applied on every teleop/control step, in metres.
+    # Cartesian delta applied on every scripted control step, in metres.
+    script_delta_pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    insertion_pose_path: str = "outputs/scripted_insertion_pose.json"
     z_step: float = 0.0001
     script_mode: str = "pose"
     # Task 1
-    target_pos: tuple[float, float, float] = (0.625, -0.02, 0.14)
-    approach_pos: tuple[float, float, float] = (0.625, -0.02, 0.21)
-    target_quat: tuple[float, float, float, float] = (0.9238795, 0.3826834, 0.0, 0.0)
+    target_pos: tuple[float, float, float] = (0.485,  -0.0405, 0.21)
+    approach_pos: tuple[float, float, float] = (0.485, -0.0405, 0.21)
+    target_quat: tuple[float, float, float, float] = (
+    0.9233162,
+    0.3824501,
+    0.0322324,
+    0.0133496,
+    )
     pose_num_steps: int = 200
     pose_num_additional_steps: int = 100
     pose_pos_tolerance: float = 0.004
@@ -652,6 +659,9 @@ class ScriptRobotConfig(RobotConfig):
         2.34971468,
     )
     max_joint_step: float = 0.002
+    script_joint_wait_times: int = 100
+    script_joint_convergence_tolerance: float = 1e-3
+    script_joint_solution_threshold: float = 0.5
 
     gripper_threshold: float = 0.5
     gripper_open_action: float = 1.0

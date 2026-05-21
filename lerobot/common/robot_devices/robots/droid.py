@@ -470,7 +470,6 @@ class DroidRobot:
         joint_target = np.array(action_list[:7])
 
         # Threshold continuous gripper value into open/close
-        print(f"[action] joints={[round(v,4) for v in action_list[:7]]}  gripper={action_list[7]:.4f} threshold={self.config.gripper_threshold}")
         if action_list[7] < self.config.gripper_threshold:
             gripper_action = self.config.gripper_close_action
         else:
