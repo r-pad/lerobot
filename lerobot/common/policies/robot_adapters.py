@@ -162,9 +162,6 @@ class DroidAdapter(RobotAdapter):
     def __init__(self, action_space: str):
         assert action_space in ["right_eef", "joint", "right_eef_relative"]
         self.action_space = action_space
-        if action_space in ["right_eef", "right_eef_relative"]:
-            from deoxys.utils.ik_utils import IKWrapper
-            self.ik_wrapper = IKWrapper()
 
     def get_obs_key(self) -> str:
         if self.action_space in ["right_eef", "right_eef_relative"]:
@@ -238,24 +235,9 @@ class DroidAdapter(RobotAdapter):
         Returns:
             (8,) joint positions [7 joints, gripper]
         """
-        rot6d = eef_action[:6]
-        pos = eef_action[6:9]
-        gripper = eef_action[9:10]
+        from lerobot.common.robot_devices.control_utils import droid_eef_to_joints
 
-        # Convert 6D rotation to 3x3 matrix for deoxys IK
-        target_mat = transforms.rotation_6d_to_matrix(rot6d[None]).squeeze().cpu().numpy()
-        target_pos = pos.cpu().numpy()
-        current_joints = state[:7].cpu().numpy().tolist()
-
-        joint_positions = self.ik_wrapper.inverse_kinematics(
-            self.ik_wrapper.model, self.ik_wrapper.data,
-            target_mat, target_pos, current_joints
-        )
-        result = torch.cat([
-            torch.from_numpy(joint_positions).float().to(eef_action.device),
-            gripper,
-        ])
-        return result
+        return droid_eef_to_joints(eef_action, state)
 
     def transform_action(self, action: torch.Tensor, state: torch.Tensor, reference_eef: torch.Tensor | None = None) -> torch.Tensor:
         """Transform policy output to robot-executable action.

@@ -97,7 +97,7 @@ class DiffusionPolicyConfig(PreTrainedConfig):
     image_resize: list | None = None          # [H, W], e.g. [240, 426]
     transform_eef_to_agent_pos: bool = False
     gripper_binarize_threshold: float = 0.8   # width <threshold → 1.0 (closed in polaris); ≥threshold → 0.0 (open)
-    use_ik: bool = False                      # convert EEF action → joint positions via deoxys IKWrapper
+    use_ik: bool = False                      # convert EEF action → joint positions via Droid IK utility
     enable_goal_conditioning: bool = False    # compatibility with control_robot.py
     undo_z_rotation_deg: float = 0.0         # undo training-time Z rotation; e.g. 45.0 to undo -45° aug
 
@@ -139,11 +139,7 @@ class DiffusionPolicyClient(PreTrainedPolicy):
         self.socket.connect(f"tcp://{config.host}:{config.port}")
         print(f"[DiffusionPolicyClient] Connected to polaris server at {config.host}:{config.port}")
 
-        if config.use_ik:
-            from lerobot.common.policies.robot_adapters import DroidAdapter
-            self._droid_adapter = DroidAdapter(action_space="right_eef")
-        else:
-            self._droid_adapter = None
+        self._use_droid_ik = config.use_ik
 
         # Per-episode gripper trace buffers. agent_pos: lerobot width (before) and
         # polaris binary (after). action: polaris binary from server (before) and
@@ -276,13 +272,15 @@ class DiffusionPolicyClient(PreTrainedPolicy):
         self._gripper_buf["action_before"].append(float(gripper.item()))
         self._gripper_buf["action_after"].append(float((1.0 - gripper).item()))
 
-        if self._droid_adapter is not None:
+        if self._use_droid_ik:
+            from lerobot.common.robot_devices.control_utils import droid_eef_to_joints
+
             # Server returns binary gripper in polaris convention (1=closed, 0=open).
             # Flip to lerobot convention (0=closed, 1=open).
             gripper_lerobot = 1.0 - gripper
             eef_lerobot = torch.cat([rot6d, trans, gripper_lerobot])  # lerobot format
             state = batch.get("observation.state", torch.zeros(1, 8)).squeeze(0).cpu()
-            joint_action = self._droid_adapter._eef_to_joints(eef_lerobot, state)
+            joint_action = droid_eef_to_joints(eef_lerobot, state)
             action = joint_action.unsqueeze(0)
         else:
             action = action_eef.unsqueeze(0)

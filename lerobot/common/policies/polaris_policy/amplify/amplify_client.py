@@ -142,11 +142,7 @@ class AMPLIFYPolicyClient(PreTrainedPolicy):
         print(f"[AMPLIFYPolicyClient] Camera views: {config.cam_image_keys}")
         print(f"[AMPLIFYPolicyClient] Open-loop horizon: {config.open_loop_horizon}")
 
-        if config.use_ik:
-            from lerobot.common.policies.robot_adapters import DroidAdapter
-            self._droid_adapter = DroidAdapter(action_space="right_eef")
-        else:
-            self._droid_adapter = None
+        self._use_droid_ik = config.use_ik
 
         self._action_chunk: np.ndarray | None = None
         self._actions_done = 0
@@ -220,10 +216,12 @@ class AMPLIFYPolicyClient(PreTrainedPolicy):
 
         gripper_lerobot = 1.0 - gripper  # lerobot: 0=closed, 1=open
 
-        if self._droid_adapter is not None:
+        if self._use_droid_ik:
+            from lerobot.common.robot_devices.control_utils import droid_eef_to_joints
+
             eef_lerobot = torch.cat([rot6d, trans, gripper_lerobot])  # lerobot format
             state = batch.get("observation.state", torch.zeros(1, 8)).squeeze(0).cpu()
-            joint_action = self._droid_adapter._eef_to_joints(eef_lerobot, state)
+            joint_action = droid_eef_to_joints(eef_lerobot, state)
             action = joint_action.unsqueeze(0)
         else:
             action = action_eef.unsqueeze(0)

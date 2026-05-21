@@ -133,11 +133,7 @@ class PointPolicyClient(PreTrainedPolicy):
         print(f"[PointPolicyClient] Server URI: {self.uri}")
         print(f"[PointPolicyClient] Camera views: {config.cam_image_keys}")
 
-        if config.use_ik:
-            from lerobot.common.policies.robot_adapters import DroidAdapter
-            self._droid_adapter = DroidAdapter(action_space="right_eef")
-        else:
-            self._droid_adapter = None
+        self._use_droid_ik = config.use_ik
 
         self._current_vis_frame: np.ndarray | None = None  # (H, W*v, 3) uint8 RGB
 
@@ -218,10 +214,12 @@ class PointPolicyClient(PreTrainedPolicy):
 
         print(f"[action_eef] trans={pos.numpy().round(4)}  gripper={gripper_polaris.item():.4f}")
 
-        if self._droid_adapter is not None:
+        if self._use_droid_ik:
+            from lerobot.common.robot_devices.control_utils import droid_eef_to_joints
+
             eef_lerobot = torch.cat([rot6d, pos, gripper_lerobot])
             state = batch.get("observation.state", torch.zeros(1, 8)).squeeze(0).cpu()
-            joint_action = self._droid_adapter._eef_to_joints(eef_lerobot, state)
+            joint_action = droid_eef_to_joints(eef_lerobot, state)
             action = joint_action.unsqueeze(0)
         else:
             # Fall back to polaris-format eef action (pos|rot6d|gripper)
