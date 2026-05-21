@@ -9,6 +9,7 @@ traj_interpolator_cfg:
 joint_kp: [240., 240., 240., 240., 100., 60., 20.]
 joint_kd: [20., 20., 20., 10., 10., 10., 5.]
 
+
 state_estimator_cfg:
   is_estimation: true
   state_estimator_type: EXPONENTIAL_SMOOTHING
