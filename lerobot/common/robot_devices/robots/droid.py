@@ -1,7 +1,9 @@
 """DroidRobot: Franka Panda (via deoxys) + GELLO leader arm integration for LeRobot."""
 
 import glob
+import os
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -47,6 +49,31 @@ class DroidRobot:
             "joint_7",
             "gripper",
         ]
+
+    def _camera_output_to_tensors(self, camera_output):
+        if isinstance(camera_output, dict):
+            return {
+                img_name: torch.from_numpy(image)
+                for img_name, image in camera_output.items()
+            }
+
+        if isinstance(camera_output, tuple):
+            if len(camera_output) != 2:
+                raise ValueError(f"Expected camera tuple to contain (color, depth), got {len(camera_output)} items.")
+
+            color_image, depth_map = camera_output
+            if depth_map.ndim == 2:
+                depth_map = depth_map[..., None]
+            if np.issubdtype(depth_map.dtype, np.floating):
+                depth_map = np.nan_to_num(depth_map, nan=0.0, posinf=65535.0, neginf=0.0)
+                depth_map = np.clip(depth_map, 0, 65535).astype(np.uint16)
+
+            return {
+                "color": torch.from_numpy(color_image),
+                "depth": torch.from_numpy(depth_map),
+            }
+
+        return torch.from_numpy(camera_output)
 
     @property
     def camera_features(self) -> dict:
@@ -109,6 +136,7 @@ class DroidRobot:
         self.robot_interface = FrankaInterface(
             self.config.deoxys_general_cfg_file,
             use_visualizer=False,
+            has_gripper=False,
         )
         self.controller_cfg = YamlConfig(
             self.config.deoxys_controller_cfg_file
@@ -255,18 +283,21 @@ class DroidRobot:
             f"or check that the gripper is connected. (GELLO is on {self._gello_port})"
         )
 
-    def _smooth_move_to(self, target_joints: np.ndarray, step_rad: float = 0.01):
+    def _smooth_move_to(self, target_joints: np.ndarray, gripper_action: int = None, step_rad: float = 0.01):
         """Smoothly interpolate Franka from its current pose to target_joints."""
         franka_current = self._get_franka_joints()
         max_delta = np.max(np.abs(target_joints - franka_current))
         num_steps = max(int(max_delta / step_rad), 1)
 
-        gripper_action = getattr(self, '_last_gripper_action', self.config.gripper_open_action)
+        if gripper_action is None:
+            gripper_action = getattr(self, '_last_gripper_action', self.config.gripper_open_action)
 
-        for i in range(num_steps):
+        for i in range(min(num_steps,5)):
+            print("Step" f"{i+1}/{num_steps}: Moving Franka towards target joints...")
             alpha = (i + 1) / num_steps
             waypoint = franka_current + alpha * (target_joints - franka_current)
             deoxys_action = list(waypoint) + [gripper_action]
+            print(self.config.deoxys_controller_type)
             self.robot_interface.control(
                 controller_type=self.config.deoxys_controller_type,
                 action=deoxys_action,
@@ -380,12 +411,7 @@ class DroidRobot:
         images = {}
         for name in self.cameras:
             before_camread_t = time.perf_counter()
-            images[name] = self.cameras[name].async_read()
-            if type(images[name]) == dict:
-                for img_name in images[name].keys():
-                    images[name][img_name] = torch.from_numpy(images[name][img_name])
-            else:
-                images[name] = torch.from_numpy(images[name])
+            images[name] = self._camera_output_to_tensors(self.cameras[name].async_read())
             self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
             self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
 
@@ -420,12 +446,7 @@ class DroidRobot:
         images = {}
         for name in self.cameras:
             before_camread_t = time.perf_counter()
-            images[name] = self.cameras[name].async_read()
-            if type(images[name]) == dict:
-                for img_name in images[name].keys():
-                    images[name][img_name] = torch.from_numpy(images[name][img_name])
-            else:
-                images[name] = torch.from_numpy(images[name])
+            images[name] = self._camera_output_to_tensors(self.cameras[name].async_read())
             self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
             self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
 

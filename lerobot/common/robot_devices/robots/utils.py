@@ -27,6 +27,7 @@ from lerobot.common.robot_devices.robots.configs import (
     RobotConfig,
     So100RobotConfig,
     So101RobotConfig,
+    ScriptRobotConfig,
     StretchRobotConfig,
 )
 
@@ -68,6 +69,8 @@ def make_robot_config(robot_type: str, **kwargs) -> RobotConfig:
         return So101RobotConfig(**kwargs)
     elif robot_type == "droid":
         return DroidRobotConfig(**kwargs)
+    elif robot_type == "script":
+        return ScriptRobotConfig(**kwargs)
     elif robot_type == "franka_leap":
         return FrankaLeapRobotConfig(**kwargs)
     elif robot_type == "stretch":
@@ -87,6 +90,10 @@ def make_robot_from_config(config: RobotConfig):
         from lerobot.common.robot_devices.robots.droid import DroidRobot
 
         return DroidRobot(config)
+    elif isinstance(config, ScriptRobotConfig):
+        from lerobot.common.robot_devices.robots.script import ScriptRobot
+
+        return ScriptRobot(config)
     elif isinstance(config, FrankaLeapRobotConfig):
         from lerobot.common.robot_devices.robots.franka_leap import FrankaLeapRobot
 

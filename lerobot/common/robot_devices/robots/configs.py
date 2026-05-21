@@ -611,7 +611,55 @@ class DroidRobotConfig(RobotConfig):
     # Prevents jerky motion when GELLO drifts between episodes.
     max_safe_joint_delta: float = 0.3
 
+    # Skip interactive GELLO-to-Franka alignment during startup.
+    skip_gello_calibration: bool = False
+
     # save end-effector pose info
+    use_eef: bool = True
+    mock: bool = False
+
+
+@RobotConfig.register_subclass("script")
+@dataclass
+class ScriptRobotConfig(RobotConfig):
+    # Direct scripted Franka control via deoxys. This skips GELLO teleoperation.
+    deoxys_general_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/charmander_droid.yml"
+    deoxys_controller_type: str = "OSC_POSE"
+    deoxys_controller_cfg_file: str = "lerobot/common/robot_devices/robots/franka_configs/tuned-osc-pose-controller.yml"
+
+    # Lift command applied on every teleop/control step, in metres.
+    z_step: float = 0.0001
+    script_mode: str = "pose"
+    # Task 1
+    target_pos: tuple[float, float, float] = (0.625, -0.02, 0.14)
+    approach_pos: tuple[float, float, float] = (0.625, -0.02, 0.21)
+    target_quat: tuple[float, float, float, float] = (0.9238795, 0.3826834, 0.0, 0.0)
+    pose_num_steps: int = 200
+    pose_num_additional_steps: int = 100
+    pose_pos_tolerance: float = 0.004
+    pose_rot_tolerance: float = 0.05
+    pose_pos_action_gain: float = 20.0
+    pose_rot_action_gain: float = 2.0
+    pose_max_delta_pos: float = 0.025
+    pose_action_smoothing: float = 0.6
+    home_joints: tuple[float, ...] = (
+        -0.74921682,
+        0.13623207,
+        0.37435664,
+        -2.00871515,
+        -0.54053575,
+        2.19774203,
+        2.34971468,
+    )
+    max_joint_step: float = 0.002
+
+    gripper_threshold: float = 0.5
+    gripper_open_action: float = 1.0
+    gripper_close_action: float = 0.0
+    robotiq_port: str | None = None
+
+    cameras: dict[str, CameraConfig] = field(default_factory=lambda: {})
+
     use_eef: bool = True
     mock: bool = False
 

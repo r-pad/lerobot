@@ -326,7 +326,8 @@ class ZedCameraConfig(CameraConfig):
         feature_specs = {}
         base = f"observation.images.{cam_key}"
 
-        feature_specs[base] = {
+        color_key = f"{base}.color" if self.use_depth else base
+        feature_specs[color_key] = {
             "shape": (self.height, self.width, self.channels),
             "names": ["height", "width", "channels"],
             "info": f"{self.color_mode.upper()} color image",

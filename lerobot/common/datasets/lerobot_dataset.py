@@ -993,9 +993,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Prepare all video encoding tasks
         for key in self.meta.video_keys:
             video_path = self.root / self.meta.get_video_file_path(episode_index, key)
-            video_paths[key] = str(video_path)
-            if video_path.is_file():
+            if video_path.is_file() or video_path.with_suffix(".mkv").is_file():
                 # Skip if video is already encoded. Could be the case when resuming data recording.
+                video_paths[key] = str(video_path if video_path.is_file() else video_path.with_suffix(".mkv"))
                 continue
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
@@ -1020,6 +1020,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             else:
                 raise NotImplementedError
 
+            video_paths[key] = str(video_path)
             encoding_tasks.append((img_dir, video_path, self.fps, vcodec, pix_fmt))
 
         # Encode all videos in parallel

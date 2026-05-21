@@ -44,7 +44,7 @@ def add_eef_pose(robot, real_joints):
     if robot.robot_type == "aloha":
         eef_pose, eef_pose_se3 = forward_kinematics(ALOHA_CONFIGURATION, real_joints)
         eef_pose = torch.cat([eef_pose, real_joints[-1][None]], axis=0).float()
-    elif robot.robot_type == "droid":
+    elif robot.robot_type in ["droid", "script"]:
         eef_rot, eef_pos = robot.robot_interface.last_eef_rot_and_pos
         rot_6d = transforms.matrix_to_rotation_6d(torch.from_numpy(eef_rot[None])).squeeze()
         trans = torch.from_numpy(eef_pos.squeeze())
@@ -60,6 +60,108 @@ def add_eef_pose(robot, real_joints):
     else:
         raise ValueError(f"Unknown robot type {robot.robot_type}")
     return eef_pose
+
+
+def smooth_pose_move_to(
+    robot,
+    target_pos: np.ndarray,
+    target_quat: np.ndarray,
+    step_m: float = 0.01,
+    num_steps_per_waypoint: int = 20,
+    num_additional_steps: int = 0,
+):
+    """Interpolate the end-effector position before sending OSC pose targets."""
+    current_pose = robot._pose_controller.eef_pose
+    current_pos = current_pose[:3, 3].copy()
+    target_pos = np.array(target_pos, dtype=np.float64)
+    target_quat = np.array(target_quat, dtype=np.float64)
+
+    delta = target_pos - current_pos
+    max_delta = np.linalg.norm(delta)
+    num_waypoints = max(int(np.ceil(max_delta / step_m)), 1)
+    max_delta_pos = min(getattr(robot.config, "pose_max_delta_pos", step_m), step_m)
+    action_smoothing = max(getattr(robot.config, "pose_action_smoothing", 0.0), 0.75)
+
+    for i in range(num_waypoints):
+        alpha = (i + 1) / num_waypoints
+        alpha = 0.5 - 0.5 * np.cos(np.pi * alpha)
+        waypoint_pos = current_pos + alpha * delta
+        print(
+            f"Step {i + 1}/{num_waypoints}: "
+            f"Moving EEF to {np.round(waypoint_pos, 4).tolist()}"
+        )
+        robot._pose_controller.move_to(
+            target_pos=waypoint_pos,
+            target_quat=target_quat,
+            num_steps=num_steps_per_waypoint,
+            num_additional_steps=num_additional_steps,
+            pos_tolerance=robot.config.pose_pos_tolerance,
+            rot_tolerance=robot.config.pose_rot_tolerance,
+            max_delta_pos=max_delta_pos,
+            action_smoothing=action_smoothing,
+        )
+
+    return max_delta, num_waypoints
+
+
+def slow_close_gripper(robot, speed: int = 60, force: int = 100):
+    """Close Robotiq more gently when the gripper API exposes speed control."""
+    if hasattr(robot.robotiq_gripper, "goTo"):
+        robot.robotiq_gripper.goTo(255, speed=speed, force=force)
+    else:
+        robot.robotiq_gripper.close()
+    robot._last_gripper_action = robot.config.gripper_close_action
+
+
+def run_scripted_grasp_sequence(robot):
+    target_quat = np.array(robot.config.target_quat, dtype=np.float64)
+    approach_pos = np.array(robot.config.approach_pos, dtype=np.float64)
+    grasp_pos = np.array(robot.config.target_pos, dtype=np.float64)
+
+    print("Moving to the approach pose")
+    smooth_pose_move_to(
+        robot,
+        target_pos=approach_pos,
+        target_quat=target_quat,
+        step_m=0.01,
+        num_steps_per_waypoint=20,
+        num_additional_steps=0,
+    )
+
+    print("Moving to the grasp pose")
+    max_delta, num_waypoints = smooth_pose_move_to(
+        robot,
+        target_pos=grasp_pos,
+        target_quat=target_quat,
+        step_m=0.01,
+        num_steps_per_waypoint=20,
+        num_additional_steps=0,
+    )
+    print(f"Moved to the grasp pose in {num_waypoints} waypoints, max_delta={max_delta:.4f} m")
+    return
+    slow_close_gripper(robot)
+    print("Close gripper slowly")
+
+    print("Moving back to the approach pose")
+    smooth_pose_move_to(
+        robot,
+        target_pos=approach_pos,
+        target_quat=target_quat,
+        step_m=0.01,
+        num_steps_per_waypoint=20,
+        num_additional_steps=0,
+    )
+    final_pose = robot._pose_controller.eef_pose
+    final_pos = final_pose[:3, 3]
+    final_rot_6d = transforms.matrix_to_rotation_6d(
+        torch.from_numpy(final_pose[:3, :3][None])
+    ).squeeze()
+    print(
+        "Final EEF pose (pos + rot_6d): "
+        f"{np.round(final_pos, 4).tolist()} + "
+        f"{[round(v, 4) for v in final_rot_6d.tolist()]}"
+    )
+
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
     log_items = []
@@ -81,7 +183,7 @@ def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, f
     log_dt("dt", dt_s)
 
     # TODO(aliberts): move robot-specific logs logic in robot.print_logs()
-    if robot.robot_type not in ["stretch", "droid", "dummy", "franka_leap"]:
+    if robot.robot_type not in ["stretch", "droid", "script", "dummy", "franka_leap"]:
         for name in robot.leader_arms:
             key = f"read_leader_{name}_pos_dt_s"
             if key in robot.logs:
@@ -368,6 +470,11 @@ def control_loop(
         start_loop_t = time.perf_counter()
 
         if teleoperate:
+            if not getattr(robot, "_scripted_grasp_sequence_done", False):
+                robot._scripted_grasp_sequence_done = True
+                print("Script Step")
+                run_scripted_grasp_sequence(robot)
+
             observation, action = robot.teleop_step(record_data=True)
             if robot.use_eef:
                 observation["observation.right_eef_pose"] = add_eef_pose(robot, observation['observation.state'])
