@@ -352,154 +352,15 @@ def slow_close_gripper(robot, speed: int = 60, force: int = 100):
     robot._last_gripper_action = robot.config.gripper_close_action
 
 
-def record_droid_insertion_pose(robot, path: str = "outputs/scripted_insertion_pose.json") -> dict:
-    """Record the current insertion pose in robot and IK frames.
 
-    Use the ``ik_grip_site`` pose for later delta-action interpolation and IK.
-    The ``robot_eef`` pose is kept for readability/debugging against deoxys.
-    """
-    final_rot, final_pos = robot.robot_interface.last_eef_rot_and_pos
-    final_pos = final_pos.squeeze()
-    final_rot_6d = transforms.matrix_to_rotation_6d(
-        torch.from_numpy(final_rot[None])
-    ).squeeze()
-
-    joints = robot._get_franka_joints()
-    ik_rot, ik_pos = droid_ik_model_eef_pose(joints)
-    ik_rot_6d = transforms.matrix_to_rotation_6d(
-        torch.from_numpy(ik_rot[None])
-    ).squeeze()
-
-    try:
-        gripper_width = float(robot._get_gripper_width())
-    except Exception:
-        gripper_width = None
-
-    record = {
-        "recommended_policy_frame": "ik_grip_site",
-        "timestamp_unix_s": time.time(),
-        "ik_grip_site": {
-            "position": [float(v) for v in ik_pos.tolist()],
-            "rotation_matrix": [[float(v) for v in row] for row in ik_rot.tolist()],
-            "rotation_6d": [float(v) for v in ik_rot_6d.tolist()],
-        },
-        "robot_eef": {
-            "position": [float(v) for v in final_pos.tolist()],
-            "rotation_matrix": [[float(v) for v in row] for row in final_rot.tolist()],
-            "rotation_6d": [float(v) for v in final_rot_6d.tolist()],
-        },
-        "state": {
-            "joints": [float(v) for v in joints.tolist()],
-            "gripper_width": gripper_width,
-        },
-    }
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(record, f, indent=2)
-
-    print(f"Recorded insertion pose to {path}")
-    print(
-        "Insertion pose for scripted policy (ik_grip_site pos + rot_6d): "
-        f"{np.round(ik_pos, 6).tolist()} + "
-        f"{[round(v, 6) for v in ik_rot_6d.tolist()]}"
-    )
-    print(
-        "Debug robot_eef pose (pos + rot_6d): "
-        f"{np.round(final_pos, 6).tolist()} + "
-        f"{[round(v, 6) for v in final_rot_6d.tolist()]}"
-    )
-    print(
-        "Frame offset ik_grip_site - robot_eef: "
-        f"{np.round(ik_pos - final_pos, 6).tolist()}"
-    )
-    return record
-
-
-def lift_from_recorded_insertion_pose(
-    robot,
-    record: dict,
-    lift_m: float = 0.03,
-    num_steps: int = 60,
-    sleep_s: float = 0.02,
-):
-    """Lift straight up using the same robot-frame smooth pose primitive as keyboard tuning."""
-    from deoxys.utils import transform_utils
-
-    recorded_start_pos = np.asarray(record["ik_grip_site"]["position"], dtype=np.float64)
-    start_ik_rot, start_ik_pos = droid_ik_model_eef_pose(robot._get_franka_joints())
-    robot_rot, robot_pos = robot.robot_interface.last_eef_rot_and_pos
-    robot_pos = robot_pos.squeeze()
-    target_robot_pos = robot_pos.copy()
-    target_robot_pos[2] += lift_m
-    target_quat = transform_utils.mat2quat(robot_rot)
-
-    print(
-        "Lifting with smooth_pose_move_to: "
-        f"robot_start={np.round(robot_pos, 6).tolist()} "
-        f"robot_target={np.round(target_robot_pos, 6).tolist()} "
-        f"ik_start={np.round(start_ik_pos, 6).tolist()} "
-        f"recorded_start={np.round(recorded_start_pos, 6).tolist()} "
-        f"lift_z={lift_m:.6f}"
-    )
-
-    smooth_pose_move_to(
-        robot,
-        target_pos=target_robot_pos,
-        target_quat=target_quat,
-        step_m=0.001,
-        num_steps_per_waypoint=10,
-        num_additional_steps=0,
-    )
-    _, final_ik_pos = droid_ik_model_eef_pose(robot._get_franka_joints())
-    _, final_robot_pos = robot.robot_interface.last_eef_rot_and_pos
-    final_robot_pos = final_robot_pos.squeeze()
-    print(
-        "After smooth lift: "
-        f"robot_pos={np.round(final_robot_pos, 6).tolist()} "
-        f"robot_error={np.round(target_robot_pos - final_robot_pos, 6).tolist()} "
-        f"ik_pos={np.round(final_ik_pos, 6).tolist()} "
-        f"ik_delta={np.round(final_ik_pos - start_ik_pos, 6).tolist()}"
-    )
 
 def run_scripted_grasp_sequence(robot):
     target_quat = np.array(robot.config.target_quat, dtype=np.float64)
-    approach_pos = np.array(robot.config.approach_pos, dtype=np.float64)
-
-    print("Moving to the approach pose")
-    # smooth_pose_move_to(
-    #     robot,
-    #     target_pos=approach_pos,
-    #     target_quat=target_quat,
-    #     step_m=0.01,
-    #     num_steps_per_waypoint=20,
-    #     num_additional_steps=0,
-    # )
-
-    if not hasattr(robot, "_robot_ik_controller") or robot._robot_ik_controller is None:
-        raise RuntimeError("RobotIKController is required for the approach lift test.")
-    for _ in range(10):
-        before_joints = robot._get_franka_joints()
-        before_pos, before_quat = robot._robot_ik_controller.bullet_ik_wrapper.forward_kinematics(before_joints)
-        before_franka_pose = robot._robot_ik_controller.eef_pose
-        print("EEF pose: ", robot._robot_ik_controller.eef_pose)
-        print("Before Pose: ", before_pos)
-        # before_pos = np.asarray(before_pos, dtype=np.float64)
-        before_pos = np.asarray(before_franka_pose[:3, 3], dtype=np.float64)
-        target_pos = before_pos.copy()
-        target_pos[1] +=-0.001
-        target_rot = transforms.quaternion_to_matrix(
-            torch.tensor([before_quat[3], before_quat[0], before_quat[1], before_quat[2]], dtype=torch.float64)
+    target_pos = np.array(robot.config.approach_pos, dtype=np.float64)
+    target_rot = transforms.quaternion_to_matrix(
+            torch.tensor([target_quat[3], target_quat[0], target_quat[1], target_quat[2]], dtype=torch.float64)
         ).numpy()
-
-        print(
-            "[approach_lift_test] command "
-            f"before_pybullet_pos={np.round(before_pos, 6).tolist()} "
-            f"target_pybullet_pos={np.round(target_pos, 6).tolist()} "
-            "delta=[0.0, 0.0, 0.001]"
-        )
-
-        success = robot._robot_ik_controller.control(
+    robot._robot_ik_controller.control(
             target_pos=target_pos,
             target_rot=target_rot,
             grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
@@ -507,121 +368,72 @@ def run_scripted_grasp_sequence(robot):
             wait_times=100,
             joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
         )
+    z_plane = robot._robot_ik_controller.eef_pose[2,3]
+    while True:
+        key = input("w/a/s/d to adjust XY, Enter to finish: ").strip().lower()
 
-        after_joints = robot._get_franka_joints()
-        after_pos, _ = robot._robot_ik_controller.bullet_ik_wrapper.forward_kinematics(after_joints)
-        after_pos = np.asarray(after_pos, dtype=np.float64)
-        after_pos_real_franka = robot._robot_ik_controller.eef_pose[:3, 3]
-        target_joints = getattr(robot._robot_ik_controller, "last_joint_target", None)
-        if target_joints is None:
-            joint_error = None
+        if key in ("", "enter"):
+            break
+        target_pos = robot._robot_ik_controller.eef_pose[:3,3]
+        if key == "a":
+            target_pos[1] -= 0.001   # y -
+        elif key == "d":
+            target_pos[1] += 0.001   # y +
+        elif key == "w":
+            target_pos[0] -= 0.001   # x -
+        elif key == "s":
+            target_pos[0] += 0.001   # x +
         else:
-            joint_error = np.asarray(target_joints, dtype=np.float64) - after_joints
-
-        print(
-            "[approach_lift_test] result\n"
-            f"  success={success}\n"
-            f"  after_pybullet_pos={np.round(after_pos, 6).tolist()}\n"
-            f"  actual_delta={np.round(after_pos - before_pos, 6).tolist()}\n"
-            f"  target_error={np.round(target_pos - after_pos_real_franka, 6).tolist()}\n"
-            f"  target_joints={None if target_joints is None else np.round(target_joints, 6).tolist()}\n"
-            f"  after_joints={np.round(after_joints, 6).tolist()}\n"
-            f"  joint_error={None if joint_error is None else np.round(joint_error, 6).tolist()}\n"
-            f"  joint_error_norm={None if joint_error is None else float(np.linalg.norm(joint_error)):.6f}"
+            continue
+        target_pos[2] = z_plane
+        robot._robot_ik_controller.control(
+            target_pos=target_pos,
+            target_rot=target_rot,
+            grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+            wait_times=100,
+            joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
         )
-        time.sleep(0.5)
-    return {"debug_lift_only": True}
 
-    # _, actual_approach_pos = robot.robot_interface.last_eef_rot_and_pos
-    # plane_z = actual_approach_pos.squeeze()[2]
-    # approach_pos[2] = plane_z
-    # print(
-    #     "Tune grasp XY at the current approach height. "
-    #     f"Keyboard plane robot_frame_z={plane_z:.4f}. Press Enter to finish tuning."
-    # )
-    # while True:
-    #     approach_pos[2] = plane_z
-    #     key = input("w/a/s/d to adjust XY, Enter to finish: ").strip().lower()
-
-    #     if key in ("", "enter"):
-    #         break
-
-    #     if key == "a":
-    #         approach_pos[2] -= 0.001   # y -
-    #     elif key == "d":
-    #         approach_pos[2] += 0.001   # y +
-    #     elif key == "w":
-    #         approach_pos[0] -= 0.001   # x -
-    #     elif key == "s":
-    #         approach_pos[0] += 0.001   # x +
-    #     else:
-    #         continue
-
-    #     approach_pos[2] = plane_z
-    #     grasp_pos[:2] = approach_pos[:2]
-    #     print(
-    #         "Adjusted grasp XY: "
-    #         f"approach={np.round(approach_pos, 6).tolist()} "
-    #         f"grasp={np.round(grasp_pos, 6).tolist()}"
-    #     )
-    #     _, before_robot_pos = robot.robot_interface.last_eef_rot_and_pos
-    #     before_robot_pos = before_robot_pos.squeeze()
-    #     _, before_ik_pos = droid_ik_model_eef_pose(robot._get_franka_joints())
-    #     before_ik_offset = before_ik_pos - before_robot_pos
-    #     target_ik_pos = approach_pos + before_ik_offset
-    #     smooth_pose_move_to(
-    #         robot,
-    #         target_pos=approach_pos,
-    #         target_quat=target_quat,
-    #         step_m=0.001,
-    #         num_steps_per_waypoint=5,
-    #         num_additional_steps=0,
-    #     )
-    #     _, after_robot_pos = robot.robot_interface.last_eef_rot_and_pos
-    #     after_robot_pos = after_robot_pos.squeeze()
-    #     _, after_ik_pos = droid_ik_model_eef_pose(robot._get_franka_joints())
-    #     print(
-    #         "[keyboard:drift] "
-    #         f"target_robot={np.round(approach_pos, 6).tolist()} "
-    #         f"before_robot={np.round(before_robot_pos, 6).tolist()} "
-    #         f"after_robot={np.round(after_robot_pos, 6).tolist()} "
-    #         f"robot_actual_delta={np.round(after_robot_pos - before_robot_pos, 6).tolist()} "
-    #         f"robot_target_error={np.round(approach_pos - after_robot_pos, 6).tolist()}"
-    #     )
-    #     print(
-    #         "[keyboard:drift] "
-    #         f"target_ik_est={np.round(target_ik_pos, 6).tolist()} "
-    #         f"before_ik={np.round(before_ik_pos, 6).tolist()} "
-    #         f"after_ik={np.round(after_ik_pos, 6).tolist()} "
-    #         f"ik_actual_delta={np.round(after_ik_pos - before_ik_pos, 6).tolist()} "
-    #         f"ik_target_error={np.round(target_ik_pos - after_ik_pos, 6).tolist()} "
-    #         f"ik_xy_error_norm={np.linalg.norm(target_ik_pos[:2] - after_ik_pos[:2]):.6f}"
-    #     )
-
-    # grasp_pos[:2] = approach_pos[:2]
-    # print(
-    #     "Finished XY tuning: "
-    #     f"approach={np.round(approach_pos, 6).tolist()} "
-    #     f"grasp={np.round(grasp_pos, 6).tolist()}"
-    # )
-
-    # slow_close_gripper(robot)
-    # print("Press Enter when the gripper is at the insertion pose to record it...")
-    # input()
-    record = record_droid_insertion_pose(robot)
-    # if hasattr(robot, "_recorded_insertion_pose"):
-    #     robot._recorded_insertion_pose = record
-    #     robot._pose_target_pos = None
-    #     robot._pose_target_origin_pos = None
-    #     robot._pose_target_rot = None
-    # lift_m = float(np.random.uniform(0.02, 0.04))
-    # print(
-    #     "Randomized post-insertion lift: "
-    #     f"z={lift_m:.4f} m"
-    # )
-    # lift_from_recorded_insertion_pose(robot, record, lift_m=lift_m)
-    # print("Ready for Collecting Data. press enter to continue")
-    # input()
+    slow_close_gripper(robot)
+    print("Press Enter when the gripper is at the insertion pose to record it...")
+    input()
+    aligned_pose = robot._robot_ik_controller.eef_pose
+    aligned_pos = aligned_pose[:3,3]
+    aligned_rot = aligned_pose[:3,:3]
+    print("aligned_pose:\n", aligned_pose)
+    print("aligned_pos:\n", aligned_pos)
+    print("aligned_rot:\n", aligned_rot)
+    record = {
+        "aligned_pose": aligned_pose,
+        "aligned_pos": aligned_pos,
+        "aligned_rot": aligned_rot,
+    }
+    # Lift Up the Gripper
+    target_pos = aligned_pos.copy()
+    target_pos[2] += 0.02
+    for i in range(50):
+        current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+        # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+        next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
+        robot._robot_ik_controller.control(
+                target_pos=next_tgt_pos,
+                target_rot=aligned_rot,
+                grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                wait_times=100,
+                joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+            )
+    time.sleep(3)
+    # for i in range(50):
+    #     next_tgt_pos = aligned_pos.copy()
+    #     current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+    #     next_tgt_pos[2] = current_pos[2] - 0.0004
+    #     robot._robot_ik_controller.control(
+    #             target_pos=next_tgt_pos,
+    #             target_rot=aligned_rot,
+    #             grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+    #             wait_times=100,
+    #             joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+    #         )
     return record
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
@@ -933,11 +745,7 @@ def control_loop(
         if teleoperate:
             if not getattr(robot, "_scripted_grasp_sequence_done", False):
                 robot._scripted_grasp_sequence_done = True
-                print("Script Step")
-                insert_meta_data = run_scripted_grasp_sequence(robot)
-                if insert_meta_data.get("debug_lift_only", False):
-                    print("Approach lift debug complete; stopping before teleop_step commands.")
-                    break
+                run_scripted_grasp_sequence(robot)
 
             # observation, action = robot.teleop_step(record_data=True, insert_meta_data=insert_meta_data)
             if robot.use_eef:
