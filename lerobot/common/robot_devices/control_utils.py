@@ -352,9 +352,320 @@ def slow_close_gripper(robot, speed: int = 60, force: int = 100):
     robot._last_gripper_action = robot.config.gripper_close_action
 
 
+def get_auxiliary_zed_camera(robot):
+    """Return the auxiliary ZED camera configured for the scripted grasp sequence."""
+    candidate_names = ("cam_auxiliary", "camera_auxiliary", "cam_auxiliray", "camera_auxiliray")
+    for name in candidate_names:
+        if name in robot.cameras:
+            return name, robot.cameras[name]
+
+    raise KeyError(
+        "Could not find the auxiliary camera. Expected one of "
+        f"{candidate_names}, got {tuple(robot.cameras.keys())}."
+    )
+
+
+def read_zed_stereo_rgb(camera) -> dict[str, np.ndarray]:
+    """Read synchronized left/right RGB images from one connected ZED camera."""
+    if camera.__class__.__name__ != "ZedCamera":
+        raise TypeError(f"Expected auxiliary camera to be a ZedCamera, got {camera.__class__.__name__}.")
+    if not camera.is_connected:
+        raise RuntimeError(f"ZedCamera({camera.serial_number}) is not connected.")
+
+    import cv2
+    import pyzed.sl as sl
+
+    start_time = time.perf_counter()
+    err = camera.camera.grab(camera._runtime_params)
+    if err != sl.ERROR_CODE.SUCCESS:
+        raise OSError(f"Can't grab stereo frame from ZedCamera({camera.serial_number}): {err}")
+
+    stereo_images = {}
+    for image_name, view in (("left", sl.VIEW.LEFT), ("right", sl.VIEW.RIGHT)):
+        sl_image = sl.Mat()
+        camera.camera.retrieve_image(sl_image, view)
+        image = sl_image.get_data()[:, :, :3].copy()
+
+        if camera.color_mode == "rgb":
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        elif camera.color_mode != "bgr":
+            raise ValueError(f"Expected color mode 'rgb' or 'bgr', got {camera.color_mode}.")
+
+        h, w, _ = image.shape
+        if h != camera.capture_height or w != camera.capture_width:
+            raise OSError(
+                f"Can't capture {image_name} image with expected height and width "
+                f"({camera.capture_height} x {camera.capture_width}). ({h} x {w}) returned instead."
+            )
+
+        if camera.rotation is not None:
+            image = cv2.rotate(image, camera.rotation)
+
+        stereo_images[image_name] = image
+
+    camera.logs["delta_timestamp_s"] = time.perf_counter() - start_time
+    return stereo_images
+
+
+def get_zed_intrinsics_and_baseline(camera) -> tuple[np.ndarray, float]:
+    """Return rectified left-camera K and stereo baseline in meters for a ZED camera."""
+    cam_info = camera.camera.get_camera_information()
+    calib = cam_info.camera_configuration.calibration_parameters
+    left = calib.left_cam
+
+    k = np.array(
+        [
+            [left.fx, 0.0, left.cx],
+            [0.0, left.fy, left.cy],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+
+    baseline_m = None
+    if hasattr(calib, "get_camera_baseline"):
+        baseline_m = abs(float(calib.get_camera_baseline()))
+
+    if baseline_m is None and hasattr(calib, "stereo_transform"):
+        transform = calib.stereo_transform
+        if hasattr(transform, "get_translation"):
+            translation = transform.get_translation()
+            if hasattr(translation, "get"):
+                baseline_m = abs(float(translation.get()[0]))
+            elif hasattr(translation, "x"):
+                baseline_m = abs(float(translation.x))
+            else:
+                baseline_m = abs(float(translation[0]))
+
+    if baseline_m is None:
+        raise RuntimeError(f"Could not read ZED baseline for camera {camera.serial_number}.")
+
+    if baseline_m > 1.0:
+        baseline_m /= 1000.0
+
+    return k, baseline_m
+
+
+def make_contrast_depth_vis(depth: np.ndarray, max_depth: float | None = None) -> np.ndarray:
+    """Convert metric depth to a high-contrast RGB visualization."""
+    import cv2
+
+    depth = depth.astype(np.float32)
+    valid = np.isfinite(depth) & (depth > 0)
+    if max_depth is not None:
+        valid &= depth < max_depth
+    if not np.any(valid):
+        return np.zeros((*depth.shape, 3), dtype=np.uint8)
+
+    lo, hi = np.percentile(depth[valid], [2, 98])
+    depth_clip = np.clip(depth, lo, hi)
+    depth_norm = (depth_clip - lo) / max(hi - lo, 1e-6)
+    depth_u8 = ((1.0 - depth_norm) * 255.0).astype(np.uint8)
+
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    depth_u8 = clahe.apply(depth_u8)
+
+    depth_bgr = cv2.applyColorMap(depth_u8, cv2.COLORMAP_TURBO)
+    depth_rgb = cv2.cvtColor(depth_bgr, cv2.COLOR_BGR2RGB)
+    depth_rgb[~valid] = 0
+    return depth_rgb
+
+
+def warp_left_depth_vis_to_right(
+    depth: np.ndarray,
+    depth_vis_rgb: np.ndarray,
+    fx: float,
+    baseline_m: float,
+) -> np.ndarray:
+    """Warp a left-registered depth visualization into the right camera frame."""
+    h, w = depth.shape
+    valid = np.isfinite(depth) & (depth > 0)
+    if not np.any(valid):
+        return np.zeros_like(depth_vis_rgb)
+
+    yy, xx = np.nonzero(valid)
+    depth_values = depth[yy, xx]
+    disparity = fx * baseline_m / depth_values
+    right_x = np.rint(xx - disparity).astype(np.int32)
+    in_bounds = (right_x >= 0) & (right_x < w)
+    if not np.any(in_bounds):
+        return np.zeros_like(depth_vis_rgb)
+
+    yy = yy[in_bounds]
+    right_x = right_x[in_bounds]
+    left_x = xx[in_bounds]
+    depth_values = depth_values[in_bounds]
+
+    # Splat far-to-near so nearer surfaces win when multiple left pixels land
+    # on the same right pixel.
+    order = np.argsort(depth_values)[::-1]
+    right_vis = np.zeros_like(depth_vis_rgb)
+    right_vis[yy[order], right_x[order]] = depth_vis_rgb[yy[order], left_x[order]]
+    return right_vis
+
+
+@cache
+def get_foundation_stereo_depth(
+    ckpt: str = "/home/yinongh/FoundationStereo/pretrained_models/23-51-11/model_best_bp2.pth",
+    fs_dir: str = "/home/yinongh/FoundationStereo",
+    valid_iters: int = 16,
+    scale: float = 0.5,
+):
+    """Load FoundationStereo once and reuse it across scripted grasp runs."""
+    frankapanda_root = "/home/yinongh/automate/real_world_visual_planning/frankapanda"
+    if frankapanda_root not in sys.path:
+        sys.path.insert(0, frankapanda_root)
+
+    from zed_cams.foundation_stereo_depth import FoundationStereoDepth
+
+    original_torch_load = torch.load
+
+    def torch_load_with_pickle(*args, **kwargs):
+        kwargs.setdefault("weights_only", False)
+        return original_torch_load(*args, **kwargs)
+
+    try:
+        torch.load = torch_load_with_pickle
+        return FoundationStereoDepth(
+            ckpt=ckpt,
+            fs_dir=fs_dir,
+            valid_iters=valid_iters,
+            scale=scale,
+            device="cuda",
+        )
+    finally:
+        torch.load = original_torch_load
+
+
+def save_auxiliary_stereo_images(
+    images: dict[str, np.ndarray],
+    camera_name: str,
+    output_dir: str = "outputs/scripted_grasp_auxiliary",
+) -> dict[str, str]:
+    """Save the auxiliary stereo images locally for quick visual inspection."""
+    from PIL import Image
+
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    saved_paths = {}
+
+    for image_name, image in images.items():
+        path = os.path.join(output_dir, f"{timestamp}_{camera_name}_{image_name}.png")
+        Image.fromarray(image).save(path)
+
+        latest_path = os.path.join(output_dir, f"latest_{image_name}.png")
+        Image.fromarray(image).save(latest_path)
+        saved_paths[image_name] = path
+
+    return saved_paths
+
+
+def save_foundation_stereo_depth(
+    images: dict[str, np.ndarray],
+    camera,
+    camera_name: str,
+    output_dir: str = "outputs/scripted_grasp_auxiliary",
+    max_depth: float = 5.0,
+) -> dict[str, str | np.ndarray]:
+    """Run FoundationStereo on the auxiliary ZED pair and save depth products."""
+    import cv2
+
+    os.makedirs(output_dir, exist_ok=True)
+    fs_input_dir = os.path.join(output_dir, "foundationstereo_input")
+    fs_output_dir = os.path.join(output_dir, "foundationstereo_output")
+    os.makedirs(fs_input_dir, exist_ok=True)
+    os.makedirs(fs_output_dir, exist_ok=True)
+
+    k, baseline_m = get_zed_intrinsics_and_baseline(camera)
+    left_rgb = images["left"]
+    right_rgb = images["right"]
+
+    cv2.imwrite(os.path.join(fs_input_dir, "left.png"), cv2.cvtColor(left_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(os.path.join(fs_input_dir, "right.png"), cv2.cvtColor(right_rgb, cv2.COLOR_RGB2BGR))
+    with open(os.path.join(fs_input_dir, "K.txt"), "w") as f:
+        f.write(
+            f"{k[0, 0]} {k[0, 1]} {k[0, 2]} "
+            f"{k[1, 0]} {k[1, 1]} {k[1, 2]} "
+            f"{k[2, 0]} {k[2, 1]} {k[2, 2]}\n"
+        )
+        f.write(f"{baseline_m}\n")
+
+    fs_depth = get_foundation_stereo_depth()
+    depth = fs_depth.infer_depth(
+        left_rgb,
+        right_rgb,
+        fx=float(k[0, 0]),
+        baseline_m=baseline_m,
+        remove_invisible=True,
+    )
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    depth_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_meter.npy")
+    depth_vis_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_contrast_rgb.png")
+    right_depth_vis_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_contrast_right_rgb.png")
+    overlay_left_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_overlay_left.png")
+    overlay_right_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_overlay_right.png")
+
+    depth_vis_rgb = make_contrast_depth_vis(depth, max_depth=max_depth)
+    if depth_vis_rgb.shape[:2] != left_rgb.shape[:2]:
+        depth_vis_rgb = cv2.resize(
+            depth_vis_rgb,
+            (left_rgb.shape[1], left_rgb.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+    right_depth_vis_rgb = warp_left_depth_vis_to_right(depth, depth_vis_rgb, float(k[0, 0]), baseline_m)
+    overlay_left_rgb = cv2.addWeighted(left_rgb, 0.45, depth_vis_rgb, 0.55, 0.0)
+    np.save(depth_path, depth)
+    cv2.imwrite(depth_vis_path, cv2.cvtColor(depth_vis_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(right_depth_vis_path, cv2.cvtColor(right_depth_vis_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(overlay_left_path, cv2.cvtColor(overlay_left_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(overlay_right_path, cv2.cvtColor(right_depth_vis_rgb, cv2.COLOR_RGB2BGR))
+
+    latest_depth_path = os.path.join(fs_output_dir, "latest_depth_meter.npy")
+    latest_depth_vis_path = os.path.join(fs_output_dir, "latest_depth_contrast_rgb.png")
+    latest_right_depth_vis_path = os.path.join(fs_output_dir, "latest_depth_contrast_right.png")
+    latest_overlay_left_path = os.path.join(fs_output_dir, "latest_depth_overlay_left.png")
+    latest_overlay_right_path = os.path.join(fs_output_dir, "latest_depth_overlay_right.png")
+    np.save(latest_depth_path, depth)
+    cv2.imwrite(latest_depth_vis_path, cv2.cvtColor(depth_vis_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(latest_right_depth_vis_path, cv2.cvtColor(right_depth_vis_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(latest_overlay_left_path, cv2.cvtColor(overlay_left_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(latest_overlay_right_path, cv2.cvtColor(right_depth_vis_rgb, cv2.COLOR_RGB2BGR))
+
+    return {
+        "depth": depth_path,
+        "depth_vis": depth_vis_path,
+        "right_depth_vis": right_depth_vis_path,
+        "overlay_left": overlay_left_path,
+        "overlay_right": overlay_right_path,
+        "depth_array": depth,
+    }
+
+
 
 
 def run_scripted_grasp_sequence(robot):
+    auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
+    auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
+    robot._last_auxiliary_stereo_rgb = auxiliary_images
+    saved_paths = save_auxiliary_stereo_images(auxiliary_images, auxiliary_camera_name)
+    depth_paths = save_foundation_stereo_depth(auxiliary_images, auxiliary_camera, auxiliary_camera_name)
+    robot._last_auxiliary_depth = depth_paths["depth_array"]
+    print(
+        f"[script] Read {auxiliary_camera_name} stereo RGB images: "
+        f"left={auxiliary_images['left'].shape} right={auxiliary_images['right'].shape}"
+    )
+    print(
+        "[script] Saved auxiliary stereo images: "
+        f"left={saved_paths['left']} right={saved_paths['right']}"
+    )
+    print(
+        "[script] Saved FoundationStereo depth: "
+        f"depth={depth_paths['depth']} left_vis={depth_paths['depth_vis']} "
+        f"right_vis={depth_paths['right_depth_vis']} overlay_left={depth_paths['overlay_left']}"
+    )
+    return
     target_quat = np.array(robot.config.target_quat, dtype=np.float64)
     target_pos = np.array(robot.config.approach_pos, dtype=np.float64)
     target_rot = transforms.quaternion_to_matrix(
@@ -394,7 +705,7 @@ def run_scripted_grasp_sequence(robot):
             joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
         )
 
-    slow_close_gripper(robot)
+    # slow_close_gripper(robot)
     print("Press Enter when the gripper is at the insertion pose to record it...")
     input()
     aligned_pose = robot._robot_ik_controller.eef_pose
