@@ -91,7 +91,7 @@ class ScriptRobot(DroidRobot):
                 )
         print("Franka state buffer ready.")
 
-        # self._init_robotiq_gripper_without_gello()
+        self._init_robotiq_gripper_without_gello()
         self._connect_cameras()
         self._load_recorded_insertion_pose()
         self._init_robot_ik_controller()

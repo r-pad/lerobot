@@ -259,7 +259,7 @@ class RobotIKController():
                 binary_grasping=self.binary_grasping,
             )
             joint_delta = np.array(self.robot_interface._state_buffer[-1].q) - np.array(joint)
-            print("joint_delta", np.round(joint_delta, 3))
+            # print("joint_delta", np.round(joint_delta, 3))
             if (
                 np.max(
                     np.abs(

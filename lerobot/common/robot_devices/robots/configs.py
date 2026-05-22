@@ -633,8 +633,7 @@ class ScriptRobotConfig(RobotConfig):
     z_step: float = 0.0001
     script_mode: str = "pose"
     # Task 1
-    target_pos: tuple[float, float, float] = (0.485,  -0.0405, 0.21)
-    approach_pos: tuple[float, float, float] = (0.485, -0.0405, 0.21)
+    approach_pos: tuple[float, float, float] = (0.485, -0.0495, 0.16)
     target_quat: tuple[float, float, float, float] = (
     0.9233162,
     0.3824501,
