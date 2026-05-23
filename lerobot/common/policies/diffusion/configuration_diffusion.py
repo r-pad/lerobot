@@ -124,7 +124,7 @@ class DiffusionConfig(PreTrainedConfig):
         }
     )
 
-    robot_type: str = "aloha"
+    robot_type: str = "franka_leap"
     action_space: str = "right_eef"
 
     # The original implementation doesn't sample frames for the last 7 steps,
@@ -158,7 +158,7 @@ class DiffusionConfig(PreTrainedConfig):
     clip_sample_range: float = 1.0
 
     use_text_embedding: bool = False
-    calibration_json: str = "lerobot/scripts/aloha_calibration/calibration_multiview.json"
+    calibration_json: str = "lerobot/scripts/franka_leap_calibration/calibration_franka_leap.json"
 
     #Mimicplay latent plan conditioning
     use_latent_plan: bool = False

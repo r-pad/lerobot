@@ -291,6 +291,12 @@ def record(
     if not robot.is_connected:
         robot.connect()
 
+    # Move Franka arm + LEAP hand to initial state from training dataset before rollout
+    if policy is not None and hasattr(robot, "set_initial_state_from_dataset"):
+        init_dataset = LeRobotDataset("YingYuan0414/syringe_0423_8", episodes=[1])
+        robot.set_initial_state_from_dataset(init_dataset)
+        del init_dataset
+
     listener, events = init_keyboard_listener()
 
     # Execute a few seconds without recording to:

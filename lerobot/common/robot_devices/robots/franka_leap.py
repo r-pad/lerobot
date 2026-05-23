@@ -8,6 +8,180 @@ import torch
 
 from lerobot.common.robot_devices.cameras.utils import make_cameras_from_configs
 from lerobot.common.robot_devices.robots.configs import FrankaLeapRobotConfig
+from typing import List, Dict
+import json
+import PIL
+import torchvision.transforms as transforms
+from pytorch3d.ops import sample_farthest_points
+from lerobot.common.utils.franka_leap_utils import URDFHandPointCloud
+
+
+TARGET_SHAPE = 224
+depth_preprocess = transforms.Compose(
+    [
+        transforms.Resize(
+            TARGET_SHAPE,
+            interpolation=transforms.InterpolationMode.NEAREST,
+        ),
+        transforms.CenterCrop(TARGET_SHAPE),
+    ]
+)
+
+
+def load_calibrations(calibration_config_path: str) -> Dict[str, Dict[str, np.ndarray]]:
+    """
+    Load camera calibrations from JSON config.
+
+    JSON format:
+    {
+        "cam_azure_kinect": {
+            "intrinsics": "path/to/intrinsics.txt",
+            "extrinsics": "path/to/extrinsics.txt"
+        }
+    }
+
+    Returns: Dict mapping camera names to {"K": intrinsics, "T_world_cam": extrinsics}
+    """
+    with open(calibration_config_path, 'r') as f:
+        config = json.load(f)
+
+    calibrations = {}
+    root_dir = "/home/leap/Desktop/lerobot_restore/lerobot/lerobot/scripts/"
+    for cam_name, cam_config in config.items():
+        calibrations[cam_name] = {
+            "K": np.loadtxt(root_dir + cam_config["intrinsics"]),
+            "T_world_cam": np.loadtxt(root_dir + cam_config["extrinsics"])
+        }
+
+    print(f"Loaded calibrations for {len(calibrations)} camera(s): {list(calibrations.keys())}")
+    return calibrations
+
+
+def get_scaled_intrinsics(K, orig_shape, target_shape):
+    """
+    Scale camera intrinsics based on image resizing and cropping.
+
+    Args:
+        K (np.ndarray): Original 3x3 camera intrinsic matrix.
+        orig_shape (tuple): Original image shape (height, width).
+        target_shape (int): Target size for resize and crop.
+
+    Returns:
+        np.ndarray: Scaled 3x3 intrinsic matrix.
+    """
+    # Getting scale factor from torchvision.transforms.Resize behaviour
+    K_ = K.copy()
+
+    scale_factor = target_shape / min(orig_shape)
+
+    # Apply the scale factor to the intrinsics
+    K_[0, 0] *= scale_factor  # fx
+    K_[1, 1] *= scale_factor  # fy
+    K_[0, 2] *= scale_factor  # cx
+    K_[1, 2] *= scale_factor  # cy
+
+    # Adjust the principal point (cx, cy) for the center crop
+    crop_offset_x = (orig_shape[1] * scale_factor - target_shape) / 2
+    crop_offset_y = (orig_shape[0] * scale_factor - target_shape) / 2
+
+    # Adjust the principal point (cx, cy) for the center crop
+    K_[0, 2] -= crop_offset_x  # Adjust cx for crop
+    K_[1, 2] -= crop_offset_y  # Adjust cy for crop
+    return K_
+
+
+def _sample_points_fast(points: np.ndarray, num_points: int, rng: np.random.Generator) -> np.ndarray:
+    """Fast sampler that returns exactly `num_points` points.
+
+    Uses random sampling instead of farthest-point sampling for real-time rollout speed.
+    """
+    if points.shape[0] == 0:
+        return np.zeros((num_points, 3), dtype=np.float32)
+
+    if points.shape[0] >= num_points:
+        indices = rng.choice(points.shape[0], size=num_points, replace=False)
+        return points[indices]
+
+    # If there are too few points, pad by sampling with replacement.
+    pad_indices = rng.choice(points.shape[0], size=num_points - points.shape[0], replace=True)
+    return np.concatenate([points, points[pad_indices]], axis=0)
+
+
+def _sample_points_fps(points: np.ndarray, num_points: int, rng: np.random.Generator) -> np.ndarray:
+    """Farthest-point sampler that returns exactly `num_points` points."""
+    if points.shape[0] == 0:
+        return np.zeros((num_points, 3), dtype=np.float32)
+
+    if points.shape[0] < num_points:
+        # Pad first so FPS always receives enough candidates.
+        pad_indices = rng.choice(points.shape[0], size=num_points - points.shape[0], replace=True)
+        points = np.concatenate([points, points[pad_indices]], axis=0)
+
+    points_t = torch.from_numpy(points.astype(np.float32))
+    sampled_t, _ = sample_farthest_points(points_t[None], K=num_points, random_start_point=False)
+    return sampled_t.squeeze(0).cpu().numpy().astype(np.float32)
+
+
+def compute_pcd(depth, K, max_depth, cam_to_world):
+    """
+    Compute a downsampled point cloud from RGB and depth images.
+
+    Args:
+        rgb (np.ndarray): RGB image array (H, W, 3). np.uint8
+        depth (np.ndarray): Depth image array (H, W). np.uint16
+        K (np.ndarray): 3x3 camera intrinsic matrix.
+        rgb_preprocess (transforms.Compose): Preprocessing for RGB.
+        depth_preprocess (transforms.Compose): Preprocessing for depth.
+        device (torch.device): Device for computations.
+        rng (np.random.Generator): Random number generator.
+        max_depth (float): Maximum depth threshold.
+
+    Returns:
+        np.ndarray: Point cloud (N, 3) in world frame after filtering.
+    """
+    if isinstance(depth, torch.Tensor):
+        depth_np = depth.cpu().numpy()
+    else:
+        depth_np = np.asarray(depth)
+
+    depth_ = (depth_np / 1000.0).squeeze().astype(np.float32)
+    depth_ = PIL.Image.fromarray(depth_)
+    depth_ = np.asarray(depth_preprocess(depth_))
+
+    height, width = depth_.shape
+    # Create pixel coordinate grid
+    x = np.arange(width)
+    y = np.arange(height)
+    x_grid, y_grid = np.meshgrid(x, y)
+
+    # Flatten grid coordinates and depth
+    x_flat = x_grid.flatten()
+    y_flat = y_grid.flatten()
+    z_flat = depth_.flatten()
+
+    # Remove points with invalid depth
+    valid_depth = np.logical_and(z_flat > 0, z_flat < max_depth)
+    x_flat = x_flat[valid_depth]
+    y_flat = y_flat[valid_depth]
+    z_flat = z_flat[valid_depth]
+
+    # Create homogeneous pixel coordinates
+    pixels = np.stack([x_flat, y_flat, np.ones_like(x_flat)], axis=0)
+
+    # Unproject points using K inverse
+    K_inv = np.linalg.inv(K)
+    points = K_inv @ pixels
+    points = points * z_flat
+    points = points.T  # Shape: (N, 3)
+
+    pcd_xyz_hom = np.concatenate([points, np.ones((points.shape[0], 1))], axis=1)  # (N, 4)
+    pcd_xyz_world = (cam_to_world @ pcd_xyz_hom.T).T[:, :3]  # (N, 3)
+    # clip to bounding box
+    pcd_xyz_world = pcd_xyz_world[pcd_xyz_world[:, 2] >= 0.]
+    pcd_xyz_world = pcd_xyz_world[np.logical_and(pcd_xyz_world[:, 0] >= 0.22, pcd_xyz_world[:, 0] <= 1.)]
+    pcd_xyz_world = pcd_xyz_world[np.logical_and(pcd_xyz_world[:, 1] >= -0.9, pcd_xyz_world[:, 1] <= 0.1)]
+
+    return pcd_xyz_world.astype(np.float32)
 
 
 class FrankaLeapRobot:
@@ -49,6 +223,25 @@ class FrankaLeapRobot:
             "thumb_0", "thumb_1", "thumb_2", "thumb_3",
         ]
         self.joint_names = self.arm_joint_names + self.hand_joint_names
+
+        # load camera calibrations
+        calibrations = load_calibrations("/home/leap/Desktop/lerobot_restore/lerobot/lerobot/scripts/franka_leap_calibration/calibration_franka_leap.json")
+        self.camera_names = list(calibrations.keys())
+
+        for cam_name in self.camera_names:
+            K = calibrations[cam_name]["K"]
+            scaled_K = get_scaled_intrinsics(K, (720, 1280), TARGET_SHAPE)
+            calibrations[cam_name]["scaled_K"] = scaled_K
+
+        self.calibrations = calibrations
+        self.hand_model = URDFHandPointCloud(total_points=500)
+        self._pcd_rng = np.random.default_rng(0)
+        self._pcd_sampling_mode = self.config.pcd_sampling_mode.lower()
+        if self._pcd_sampling_mode not in {"random", "fps"}:
+            raise ValueError(
+                f"Unsupported pcd_sampling_mode='{self.config.pcd_sampling_mode}'. "
+                "Use one of ['random', 'fps']."
+            )
 
     @property
     def camera_features(self) -> dict:
@@ -169,7 +362,7 @@ class FrankaLeapRobot:
         self.is_connected = True
 
         # Run interactive home calibration
-        self.run_calibration()
+        # self.run_calibration()
 
     def _init_gello(self):
         """Initialize the GELLO leader arm."""
@@ -182,7 +375,7 @@ class FrankaLeapRobot:
                 raise ValueError(
                     "No GELLO port found. Please specify gello_port or plug in GELLO."
                 )
-            port = usb_ports[0]
+            port = usb_ports[1]  # 1
             print(f"Using GELLO port: {port}")
 
         self._gello_port = port
@@ -228,6 +421,18 @@ class FrankaLeapRobot:
         self.manus_mocap = ManusMocap()
         print("Manus glove connected.")
 
+    def set_initial_state_from_dataset(self, dataset):
+        """Move Franka arm + LEAP hand to the initial state from the first episode of a dataset."""
+        first_frame = dataset[0]
+        state = first_frame["observation.state"].numpy()
+        # State is 23D: 7 arm joints + 16 hand joints
+        arm_pos = state[:7].astype(np.float64)
+        hand_pos = state[7:].astype(np.float64)
+        print(f"[FrankaLeapRobot] Setting initial arm state from dataset:  {np.round(arm_pos, 4)}")
+        self._smooth_move_to(arm_pos)
+        print(f"[FrankaLeapRobot] Setting initial hand state from dataset: {np.round(hand_pos, 4)}")
+        self._move_hand_to(hand_pos)
+    
     def _move_hand_to(self, target_allegro: np.ndarray, steps: int = 50, dt: float = 0.02):
         """Linearly interpolate LEAP hand from current position to target (allegro convention)."""
         current_allegro = self.leap_hand.read_pos() - np.pi
@@ -410,6 +615,29 @@ class FrankaLeapRobot:
 
         return obs_dict
 
+    def get_pointcloud_obs(self, obs_dict) -> torch.Tensor:
+        calibrations = self.calibrations
+        # camera_names = list(calibrations.keys())
+        all_pcd = []
+        for cam_name in self.camera_names:
+            scaled_K = calibrations[cam_name]["scaled_K"]
+            cam_to_world = calibrations[cam_name]["T_world_cam"]
+            depth = obs_dict["observation.images.{}.transformed_depth".format(cam_name)].squeeze()
+            pcd = compute_pcd(depth, scaled_K, 1.5, cam_to_world)
+            all_pcd.append(pcd)
+
+        all_pcd = np.concatenate(all_pcd, axis=0)
+        joint_state = obs_dict['observation.state']
+        if self._pcd_sampling_mode == "fps":
+            scene_pcd = _sample_points_fps(all_pcd, num_points=4000, rng=self._pcd_rng)
+        else:
+            scene_pcd = _sample_points_fast(all_pcd, num_points=4000, rng=self._pcd_rng).astype(np.float32)
+        hand_pcd = self.hand_model.get_point_cloud(joint_state).astype(np.float32)
+        obs_dict["observation.points.point_cloud"] = torch.from_numpy(np.concatenate([scene_pcd, hand_pcd], axis=0))
+        obs_dict["observation.points.gripper_pcds"] = torch.from_numpy(self.hand_model.get_hand_skeleton(joint_state).astype(np.float32))
+        obs_dict["observation.urdf_eef_pose"] = torch.from_numpy(self.hand_model.get_eef_pose(joint_state).astype(np.float32))
+        return obs_dict
+    
     def send_action(self, action: torch.Tensor) -> torch.Tensor:
         """Send a 23-value action tensor (7 arm joints + 16 hand joints) to the robot."""
         if not self.is_connected:

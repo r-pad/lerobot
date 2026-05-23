@@ -1,0 +1,97 @@
+name: real_syringe
+
+task_name: RealSyringe
+
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim
+  obs:
+    point_cloud:
+      shape: [4500, 6]
+      type: point_cloud
+    imagin_robot:
+      shape: [16, 3] # [136, 3] # [16, 3]
+      type: point_cloud
+    goal_gripper_pcd:
+      shape: [16, 3] # [136, 3]  # [16, 3]
+      type: point_cloud
+    agent_pos:
+      shape: [25] # [74]  # [94]
+      type: low_dim
+  action:
+    shape: [25]
+
+env_runner:
+  _target_: diffusion_policy_3d.env_runner.maniskill_runner.ManiSkillRunner
+  n_train: 20
+  max_steps: 800
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  fps: 10
+  task_name: RealSyringe
+  split: test  # train
+  hand_pcd_mode: sparse  # dense
+  is_gmm: False
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.maniskill_dataset.ManiSkillDataset
+  # dataset_path: /home/yingyuan/data/demo_src_spray_bottle_task_v1/demo_obs_filter.hdf5
+  # dataset_path: /home/yingyuan/data/demo_src_spray_bottle_task_v1/demo_obs_0905.hdf5
+  dataset_path: /home/yingyuan/data/demo_real_syringe/demo_obs_0423.hdf5
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0 # .01
+  n_demo: 500
+  max_train_episodes: 9000
+  shape_meta: 
+    obs:
+      point_cloud:
+        shape: [4500, 6]
+        type: point_cloud
+      imagin_robot:
+        shape: [16, 3] # [136, 3] # [16, 3]
+        type: point_cloud
+      goal_gripper_pcd:
+        shape: [16, 3] # [136, 3]  # [16, 3]
+        type: point_cloud
+      agent_pos:
+        shape: [25] # [74]  # [94]
+        type: low_dim
+    action:
+      shape: [25]
+  hand_pcd_mode: sparse  # dense
+  # goal_mode: 'pointcloud_oracle'
+
+
+rollout_path: ${task.dataset.dataset_path}
+
+pretrain_dataset:
+  _target_: diffusion_policy_3d.dataset.pretrain_dataset.PretrainDataset
+  # dataset_path: /home/yingyuan/data/demo_src_spray_bottle_task_v1/demo_obs_filter.hdf5
+  # dataset_path: /home/yingyuan/data/demo_src_spray_bottle_task_v1/demo_obs_0905.hdf5
+  dataset_path: /media/yingyuan/020e4f26-f7cf-4fd3-9eb6-c8246caba014/dexonomy_npy/
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0 # .01
+  n_demo: 500
+  max_train_episodes: 9000
+  shape_meta: 
+    obs:
+      point_cloud:
+        shape: [1024, 6]
+        type: point_cloud
+      imagin_robot:
+        shape: [16, 3] # [136, 3] # [16, 3]
+        type: point_cloud
+      goal_gripper_pcd:
+        shape: [16, 3] # [136, 3]  # [16, 3]
+        type: point_cloud
+      agent_pos:
+        shape: [74] # [74]  # [94]
+        type: low_dim
+    action:
+      shape: [22]
+  hand_pcd_mode: sparse  # dense
