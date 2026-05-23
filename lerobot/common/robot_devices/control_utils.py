@@ -730,12 +730,18 @@ def run_scripted_grasp_sequence(robot):
     ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
     target_rot = ctrl_tgt_quat_xyzw.as_matrix()
     for i in range(50):
+        current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
         current_pos = robot._robot_ik_controller.eef_pose[:3,3]
         # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
         next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
+        next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+            current_rot,
+            target_rot,
+            max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+        )
         robot._robot_ik_controller.control(
                 target_pos=next_tgt_pos,
-                target_rot=target_rot,
+                target_rot=next_tgt_rot,
                 grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
                 wait_times=100,
                 joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
@@ -1050,7 +1056,8 @@ def control_loop(
 
         if not getattr(robot, "_scripted_grasp_sequence_done", False):
             robot._scripted_grasp_sequence_done = True
-            insert_meta_data = run_scripted_grasp_sequence(robot)
+            robot._scripted_insert_meta_data = run_scripted_grasp_sequence(robot)
+        insert_meta_data = getattr(robot, "_scripted_insert_meta_data", None)
 
         observation, action = robot.teleop_step(record_data=True, insert_meta_data=insert_meta_data)
         
@@ -1065,85 +1072,20 @@ def control_loop(
                 import torch as _torch
                 observation[vis_key] = _torch.from_numpy(policy._current_vis_frame)
 
-        # if dataset is not None:
-        #     frame = {**observation, **action, "task": single_task}
-        #     dataset.add_frame(frame)
+        if dataset is not None:
+            frame = {**observation, **action, "task": single_task}
+            dataset.add_frame(frame)
+        if fps is not None:
+            dt_s = time.perf_counter() - start_loop_t
+            busy_wait(1 / fps - dt_s)
 
-        # # TODO(Steven): This should be more general (for RemoteRobot instead of checking the name, but anyways it will change soon)
-        # if (display_data and not is_headless()) or (display_data and robot.robot_type.startswith("lekiwi")):
-        #     if action is not None:
-        #         for k, v in action.items():
-        #             for i, vv in enumerate(v):
-        #                 rr.log(f"sent_{k}_{i}", rr.Scalar(vv.numpy()))
+        dt_s = time.perf_counter() - start_loop_t
+        log_control_info(robot, dt_s, fps=fps)
 
-        #         if "action.right_eef_pose" in action:
-        #             eef_pose = action['action.right_eef_pose']
-        #             eef_rot, eef_trans = transforms.rotation_6d_to_matrix(eef_pose[:6]), eef_pose[6:9]
-        #             # Log EEF pose as a 3D coordinate frame
-        #             origin = eef_trans.numpy()
-        #             axes = eef_rot.numpy() @ (np.eye(3) * 0.1)
-        #             rr.log("high_level/eef_frame", rr.Arrows3D(
-        #                 origins=[origin] * 3,
-        #                 vectors=axes,
-        #                 colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
-        #             ))
-
-        #     image_keys = [key for key in observation if "image" in key]
-        #     for key in image_keys:
-        #         rr.log(key, rr.Image(observation[key].numpy()), static=True)
-
-        #     # Add point cloud visualization from high-level model
-        #     if policy is not None and hasattr(policy, 'high_level'):
-        #         hl_wrapper = policy.high_level
-
-        #         white_bg = False
-        #         if white_bg:
-        #             # Set white background for 3D view using blueprint
-        #             blueprint = rr.blueprint.Blueprint(
-        #                 rr.blueprint.Spatial3DView(
-        #                     origin="high_level",
-        #                     background=[255, 255, 255]  # White background
-        #                 )
-        #             )
-        #             rr.send_blueprint(blueprint)
-
-        #         if hl_wrapper.last_pcd_xyz is not None:
-        #             pcd_rgb = ((hl_wrapper.last_pcd_rgb + 1) * 255 / 2).astype(np.uint8)
-        #             # Scene point cloud with colors
-        #             rr.log("high_level/scene_pointcloud", rr.Points3D(hl_wrapper.last_pcd_xyz, colors=pcd_rgb))
-
-        #         # Gripper point cloud
-        #         if hl_wrapper.last_gripper_pcd is not None:
-        #             rr.log("high_level/gripper_pointcloud",
-        #                    rr.Points3D(hl_wrapper.last_gripper_pcd, colors=[0, 255, 0]))
-
-        #         if hl_wrapper.last_goal_prediction is not None:
-        #             # Goal prediction
-        #             rr.log("high_level/goal_prediction",
-        #                 rr.Points3D(hl_wrapper.last_goal_prediction, colors=[255, 0, 0], radii=0.01))
-
-        #         # Goal gripper mesh
-        #         if hl_wrapper.last_goal_gripper_mesh is not None:
-        #             mesh = hl_wrapper.last_goal_gripper_mesh
-        #             LIGHT_PURPLE = (0.25098039, 0.274117647, 0.65882353)
-        #             rr.log("high_level/goal_gripper_mesh", rr.Mesh3D(
-        #                 vertex_positions=mesh.vertices,
-        #                 triangle_indices=mesh.faces,
-        #                 vertex_normals=mesh.vertex_normals,
-        #                 vertex_colors=np.tile(LIGHT_PURPLE, (len(mesh.vertices), 1))
-        #             ))
-
-        # if fps is not None:
-        #     dt_s = time.perf_counter() - start_loop_t
-        #     busy_wait(1 / fps - dt_s)
-
-        # dt_s = time.perf_counter() - start_loop_t
-        # log_control_info(robot, dt_s, fps=fps)
-
-        # timestamp = time.perf_counter() - start_episode_t
-        # if events["exit_early"]:
-        #     events["exit_early"] = False
-        #     break
+        timestamp = time.perf_counter() - start_episode_t
+        if events["exit_early"]:
+            events["exit_early"] = False
+            break
 
 
 def reset_environment(robot, events, reset_time_s, fps, teleoperate=True):

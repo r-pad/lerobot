@@ -61,8 +61,56 @@ class ScriptRobot(DroidRobot):
         self._teleop_hold_z = None
 
     @property
+    def camera_features(self) -> dict:
+        if "cam_wrist" not in self.cameras:
+            return super().camera_features
+
+        cam_cfg = self.cameras["cam_wrist"].config
+        return {
+            "observation.images.cam_wrist": {
+                "shape": (cam_cfg.height, cam_cfg.width, cam_cfg.channels),
+                "names": ["height", "width", "channels"],
+                "info": f"{cam_cfg.color_mode.upper()} color image",
+            }
+        }
+
+    @property
     def motor_features(self) -> dict:
-        return super().motor_features
+        return {
+            "action": {
+                "dtype": "float32",
+                "shape": (9,),
+                "names": [
+                    "delta_x",
+                    "delta_y",
+                    "delta_z",
+                    "delta_rot6d_0",
+                    "delta_rot6d_1",
+                    "delta_rot6d_2",
+                    "delta_rot6d_3",
+                    "delta_rot6d_4",
+                    "delta_rot6d_5",
+                ],
+            },
+            "observation.eef_internal_forces": {
+                "dtype": "float32",
+                "shape": (6,),
+                "names": ["fx", "fy", "fz", "tx", "ty", "tz"],
+            },
+        }
+
+    def _get_eef_internal_forces(self) -> torch.Tensor:
+        if self.robot_interface.state_buffer_size == 0:
+            return torch.zeros(6, dtype=torch.float32)
+
+        state = self.robot_interface._state_buffer[-1]
+        for attr in ("K_F_ext_hat_K", "O_F_ext_hat_K"):
+            if hasattr(state, attr):
+                wrench = np.asarray(getattr(state, attr), dtype=np.float32).reshape(-1)
+                if wrench.size >= 6:
+                    return torch.from_numpy(wrench[:6].copy())
+
+        return torch.zeros(6, dtype=torch.float32)
 
     def connect(self):
         if self.is_connected:
@@ -488,7 +536,17 @@ class ScriptRobot(DroidRobot):
         before_fread_t = time.perf_counter()
         self.logs["read_follower_dt_s"] = time.perf_counter() - before_fread_t
 
+        current_rot_for_action = torch.as_tensor(
+            self._robot_ik_controller.eef_pose[:3, :3],
+            dtype=torch.float32,
+        )
         target_pos, target_rot, insert_action = self._scripted_action(insert_meta_data)
+        target_rot_for_action = torch.as_tensor(target_rot, dtype=torch.float32)
+        action_pos = torch.as_tensor(insert_action, dtype=torch.float32)
+        current_rot6d = transforms.matrix_to_rotation_6d(current_rot_for_action[None]).squeeze(0)
+        target_rot6d = transforms.matrix_to_rotation_6d(target_rot_for_action[None]).squeeze(0)
+        action9d = torch.cat([action_pos, target_rot6d - current_rot6d], dim=-1)
+
         before_fwrite_t = time.perf_counter()
         pybullet_control_success = self._robot_ik_controller.control(
             target_pos=target_pos,
@@ -509,13 +567,10 @@ class ScriptRobot(DroidRobot):
             self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
             self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
 
-            obs_dict, action_dict = {}, {}
-            action_dict["action"] = insert_action
-            # for name in self.cameras:
-            #     if type(images[name]) == dict:
-            #         for img_name in images[name].keys():
-            #             obs_dict[f"observation.images.{name}.{img_name}"] = images[name][img_name]
-            #     else:
-            #         obs_dict[f"observation.images.{name}"] = images[name]
-
+        obs_dict, action_dict = {}, {}
+        obs_dict["observation.eef_internal_forces"] = self._get_eef_internal_forces()
+        action_dict["action"] = action9d
+        for name in ["cam_wrist"]:
+            image = images[name]["color"] if isinstance(images[name], dict) else images[name]
+            obs_dict[f"observation.images.{name}"] = image
         return obs_dict, action_dict

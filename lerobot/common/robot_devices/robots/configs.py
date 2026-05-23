@@ -658,6 +658,7 @@ class ScriptRobotConfig(RobotConfig):
     script_joint_wait_times: int = 100
     script_joint_convergence_tolerance: float = 1e-3
     script_joint_solution_threshold: float = 0.5
+    script_rot_max_angle_step_deg: float = 0.3
 
     gripper_threshold: float = 0.5
     gripper_open_action: float = 1.0
