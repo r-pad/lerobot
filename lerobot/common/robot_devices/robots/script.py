@@ -134,7 +134,6 @@ class ScriptRobot(DroidRobot):
         rot = R.from_quat(quat_xyzw).as_matrix()
         return rot, np.asarray(pos, dtype=np.float64)
 
-    
 
     def _connect_cameras(self):
         from threading import Thread

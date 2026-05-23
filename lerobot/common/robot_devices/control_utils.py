@@ -32,6 +32,7 @@ import torch
 from deepdiff import DeepDiff
 from termcolor import colored
 import pytorch3d.transforms as transforms
+from scipy.spatial.transform import Rotation as R
 
 from lerobot.common.datasets.image_writer import safe_stop_image_writer
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -720,13 +721,21 @@ def run_scripted_grasp_sequence(robot):
     target_pos[2] += 0.02
     target_pos[1] += np.random.uniform(-0.01, 0.01)
     target_pos[0] += np.random.uniform(-0.01, 0.01)
+    yaw_noise = np.random.uniform(-np.pi / 2, np.pi / 2)
+    yaw_quat_xyzw = np.array(
+        [0.0, 0.0, np.sin(yaw_noise * 0.5), np.cos(yaw_noise * 0.5)],
+        dtype=np.float64,
+    )
+    aligned_quat_xyzw = R.from_matrix(aligned_rot).as_quat()
+    ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
+    target_rot = ctrl_tgt_quat_xyzw.as_matrix()
     for i in range(50):
         current_pos = robot._robot_ik_controller.eef_pose[:3,3]
         # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
         next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
         robot._robot_ik_controller.control(
                 target_pos=next_tgt_pos,
-                target_rot=aligned_rot,
+                target_rot=target_rot,
                 grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
                 wait_times=100,
                 joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
