@@ -565,7 +565,7 @@ def save_foundation_stereo_depth(
     camera,
     camera_name: str,
     output_dir: str = "outputs/scripted_grasp_auxiliary",
-    max_depth: float = 5.0,
+    max_depth: float = 0.35,
 ) -> dict[str, str | np.ndarray]:
     """Run FoundationStereo on the auxiliary ZED pair and save depth products."""
     import cv2
@@ -602,9 +602,7 @@ def save_foundation_stereo_depth(
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     depth_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_meter.npy")
     depth_vis_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_contrast_rgb.png")
-    right_depth_vis_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_contrast_right_rgb.png")
-    overlay_left_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_overlay_left.png")
-    overlay_right_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_depth_overlay_right.png")
+    rgb_path = os.path.join(fs_output_dir, f"{timestamp}_{camera_name}_rgb.png")
 
     depth_vis_rgb = make_contrast_depth_vis(depth, max_depth=max_depth)
     if depth_vis_rgb.shape[:2] != left_rgb.shape[:2]:
@@ -614,58 +612,56 @@ def save_foundation_stereo_depth(
             interpolation=cv2.INTER_NEAREST,
         )
 
-    right_depth_vis_rgb = warp_left_depth_vis_to_right(depth, depth_vis_rgb, float(k[0, 0]), baseline_m)
-    overlay_left_rgb = cv2.addWeighted(left_rgb, 0.45, depth_vis_rgb, 0.55, 0.0)
     np.save(depth_path, depth)
     cv2.imwrite(depth_vis_path, cv2.cvtColor(depth_vis_rgb, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(right_depth_vis_path, cv2.cvtColor(right_depth_vis_rgb, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(overlay_left_path, cv2.cvtColor(overlay_left_rgb, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(overlay_right_path, cv2.cvtColor(right_depth_vis_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(rgb_path, cv2.cvtColor(left_rgb, cv2.COLOR_RGB2BGR))
 
     latest_depth_path = os.path.join(fs_output_dir, "latest_depth_meter.npy")
     latest_depth_vis_path = os.path.join(fs_output_dir, "latest_depth_contrast_rgb.png")
-    latest_right_depth_vis_path = os.path.join(fs_output_dir, "latest_depth_contrast_right.png")
-    latest_overlay_left_path = os.path.join(fs_output_dir, "latest_depth_overlay_left.png")
-    latest_overlay_right_path = os.path.join(fs_output_dir, "latest_depth_overlay_right.png")
+    latest_rgb_path = os.path.join(fs_output_dir, "latest_rgb.png")
     np.save(latest_depth_path, depth)
     cv2.imwrite(latest_depth_vis_path, cv2.cvtColor(depth_vis_rgb, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(latest_right_depth_vis_path, cv2.cvtColor(right_depth_vis_rgb, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(latest_overlay_left_path, cv2.cvtColor(overlay_left_rgb, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(latest_overlay_right_path, cv2.cvtColor(right_depth_vis_rgb, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(latest_rgb_path, cv2.cvtColor(left_rgb, cv2.COLOR_RGB2BGR))
 
     return {
         "depth": depth_path,
         "depth_vis": depth_vis_path,
-        "right_depth_vis": right_depth_vis_path,
-        "overlay_left": overlay_left_path,
-        "overlay_right": overlay_right_path,
+        "rgb": rgb_path,
         "depth_array": depth,
     }
+
+
+def command_gripper(robot, action, label, ticks=5, sleep_s=0.2):
+    """Franka gripper convention: negative opens, nonnegative closes."""
+    print(f"Commanding gripper {label}...")
+    for tick in range(ticks):
+        robot.robot_interface.gripper_control(action)
+        print(f"  {label} command {tick + 1}/{ticks}")
+        time.sleep(sleep_s)
 
 
 
 
 def run_scripted_grasp_sequence(robot):
-    auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
-    auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
-    robot._last_auxiliary_stereo_rgb = auxiliary_images
-    saved_paths = save_auxiliary_stereo_images(auxiliary_images, auxiliary_camera_name)
-    depth_paths = save_foundation_stereo_depth(auxiliary_images, auxiliary_camera, auxiliary_camera_name)
-    robot._last_auxiliary_depth = depth_paths["depth_array"]
-    print(
-        f"[script] Read {auxiliary_camera_name} stereo RGB images: "
-        f"left={auxiliary_images['left'].shape} right={auxiliary_images['right'].shape}"
-    )
-    print(
-        "[script] Saved auxiliary stereo images: "
-        f"left={saved_paths['left']} right={saved_paths['right']}"
-    )
-    print(
-        "[script] Saved FoundationStereo depth: "
-        f"depth={depth_paths['depth']} left_vis={depth_paths['depth_vis']} "
-        f"right_vis={depth_paths['right_depth_vis']} overlay_left={depth_paths['overlay_left']}"
-    )
-    return
+    # auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
+    # auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
+    # robot._last_auxiliary_stereo_rgb = auxiliary_images
+    # saved_paths = save_auxiliary_stereo_images(auxiliary_images, auxiliary_camera_name)
+    # depth_paths = save_foundation_stereo_depth(auxiliary_images, auxiliary_camera, auxiliary_camera_name)
+    # robot._last_auxiliary_depth = depth_paths["depth_array"]
+    # print(
+    #     f"[script] Read {auxiliary_camera_name} stereo RGB images: "
+    #     f"left={auxiliary_images['left'].shape} right={auxiliary_images['right'].shape}"
+    # )
+    # print(
+    #     "[script] Saved auxiliary stereo images: "
+    #     f"left={saved_paths['left']} right={saved_paths['right']}"
+    # )
+    # print(
+    #     "[script] Saved FoundationStereo depth: "
+    #     f"depth={depth_paths['depth']} left_vis={depth_paths['depth_vis']} rgb={depth_paths['rgb']}"
+    # )
+    # return
     target_quat = np.array(robot.config.target_quat, dtype=np.float64)
     target_pos = np.array(robot.config.approach_pos, dtype=np.float64)
     target_rot = transforms.quaternion_to_matrix(
@@ -704,7 +700,8 @@ def run_scripted_grasp_sequence(robot):
             wait_times=100,
             joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
         )
-
+    command_gripper(robot,action = 1.0, label="close")
+    exit(0)
     # slow_close_gripper(robot)
     print("Press Enter when the gripper is at the insertion pose to record it...")
     input()
