@@ -701,7 +701,6 @@ def run_scripted_grasp_sequence(robot):
             joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
         )
     command_gripper(robot,action = 1.0, label="close")
-    exit(0)
     # slow_close_gripper(robot)
     print("Press Enter when the gripper is at the insertion pose to record it...")
     input()
@@ -719,6 +718,8 @@ def run_scripted_grasp_sequence(robot):
     # Lift Up the Gripper
     target_pos = aligned_pos.copy()
     target_pos[2] += 0.02
+    target_pos[1] += np.random.uniform(-0.01, 0.01)
+    target_pos[0] += np.random.uniform(-0.01, 0.01)
     for i in range(50):
         current_pos = robot._robot_ik_controller.eef_pose[:3,3]
         # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
@@ -730,18 +731,6 @@ def run_scripted_grasp_sequence(robot):
                 wait_times=100,
                 joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
             )
-    time.sleep(3)
-    # for i in range(50):
-    #     next_tgt_pos = aligned_pos.copy()
-    #     current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-    #     next_tgt_pos[2] = current_pos[2] - 0.0004
-    #     robot._robot_ik_controller.control(
-    #             target_pos=next_tgt_pos,
-    #             target_rot=aligned_rot,
-    #             grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-    #             wait_times=100,
-    #             joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-    #         )
     return record
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
