@@ -663,6 +663,28 @@ def run_scripted_grasp_sequence(robot):
     #     f"depth={depth_paths['depth']} left_vis={depth_paths['depth_vis']} rgb={depth_paths['rgb']}"
     # )
     # return
+    home_joints = np.array(
+        [-0.05045543, -0.07240624, -0.03830516, -2.48442205, -0.05757582, 2.33608194, 0.73499261],
+        dtype=np.float64,
+    )
+    print(f"[script] Resetting Franka to hard-coded home joints: {np.round(home_joints, 6).tolist()}")
+    gripper_action = getattr(robot, "_last_gripper_action", robot.config.gripper_open_action)
+    home_action = home_joints.tolist() + [gripper_action]
+    max_home_steps = int(getattr(robot.config, "script_joint_wait_times", 100))
+    home_tolerance = float(getattr(robot.config, "script_joint_convergence_tolerance", 1e-3))
+    for step_idx in range(max_home_steps):
+        robot.robot_interface.control(
+            controller_type=robot.config.deoxys_controller_type,
+            action=home_action,
+            controller_cfg=robot.controller_cfg,
+        )
+        joint_error = float(np.max(np.abs(np.asarray(robot.robot_interface.last_q) - home_joints)))
+        if joint_error < home_tolerance:
+            print(f"[script] Home joint target reached in {step_idx + 1} steps, max_error={joint_error:.6f}")
+            break
+    else:
+        print(f"[script] Home joint target not fully reached, max_error={joint_error:.6f}")
+
     target_quat = np.array(robot.config.target_quat, dtype=np.float64)
     target_pos = np.array(robot.config.approach_pos, dtype=np.float64)
     target_rot = transforms.quaternion_to_matrix(
@@ -747,7 +769,28 @@ def run_scripted_grasp_sequence(robot):
     #             joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
     #         )
     target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-    target_pos = np.array([0.285, -0.2095, 0.14], dtype=np.float64)
+    target_pos = np.array([0.285, -0.3895, 0.35], dtype=np.float64)
+    # Translate to take photo
+    total_photo_steps = 25
+    for i in range(total_photo_steps):
+        current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+        current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+        # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+        next_tgt_pos = (target_pos - current_pos) / (total_photo_steps-i) + current_pos
+        next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+            current_rot,
+            target_rot,
+            max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+        )
+        robot._robot_ik_controller.control(
+                target_pos=next_tgt_pos,
+                target_rot=next_tgt_rot,
+                grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                wait_times=100,
+                joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+            )
+    target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+    target_pos = np.array([0.285, -0.3895, 0.15], dtype=np.float64)
     # Translate to take photo
     total_photo_steps = 25
     for i in range(total_photo_steps):
