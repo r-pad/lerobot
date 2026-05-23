@@ -134,43 +134,7 @@ class ScriptRobot(DroidRobot):
         rot = R.from_quat(quat_xyzw).as_matrix()
         return rot, np.asarray(pos, dtype=np.float64)
 
-    def _init_robotiq_gripper_without_gello(self):
-        from pyrobotiqgripper import RobotiqGripper
-
-        port = self.config.robotiq_port
-        if port is None:
-            port = self._find_robotiq_port_without_gello()
-
-        print(f"Connecting to Robotiq gripper on {port}")
-        self.robotiq_gripper = RobotiqGripper(portname=port)
-        print("Activating Robotiq gripper (will fully open/close during activation)...")
-        self.robotiq_gripper.activate()
-        print("Robotiq gripper activated.")
-
-    def _find_robotiq_port_without_gello(self) -> str:
-        import minimalmodbus as mm
-        import serial
-        import serial.tools.list_ports
-
-        for port_info in serial.tools.list_ports.comports():
-            try:
-                ser = serial.Serial(port_info.device, 115200, 8, "N", 1, 0.2)
-                device = mm.Instrument(ser, 9, mm.MODE_RTU, close_port_after_each_call=False, debug=False)
-                device.write_registers(1000, [0, 100, 0])
-                registers = device.read_registers(2000, 3, 4)
-                echo = registers[1] & 0xFF
-                del device
-                ser.close()
-                if echo == 100:
-                    print(f"Robotiq gripper found on {port_info.device}")
-                    return port_info.device
-            except Exception:
-                continue
-
-        raise RuntimeError(
-            "No Robotiq gripper found. Please specify robotiq_port in the config, "
-            "or check that the gripper is connected."
-        )
+    
 
     def _connect_cameras(self):
         from threading import Thread
@@ -389,6 +353,117 @@ class ScriptRobot(DroidRobot):
         action[2] = 0.0
         return action
 
+    def _interpolate_rotation_matrix(
+        self,
+        current_rot: np.ndarray,
+        aligned_rot: np.ndarray,
+        max_angle_step_deg: float | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return one bounded quaternion step from current_rot toward aligned_rot.
+
+        Quaternion format is xyzw throughout. scipy Rotation.as_quat() returns xyzw,
+        and RobotIKController receives the returned rotation matrix.
+        """
+        if max_angle_step_deg is None:
+            max_angle_step_deg = float(getattr(self.config, "script_rot_max_angle_step_deg", 0.3))
+
+        current_q = torch.as_tensor(
+            R.from_matrix(np.asarray(current_rot, dtype=np.float64)).as_quat(),
+            dtype=torch.float64,
+        )[None]
+        target_q = torch.as_tensor(
+            R.from_matrix(np.asarray(aligned_rot, dtype=np.float64)).as_quat(),
+            dtype=torch.float64,
+        )[None]
+        if torch.sum(current_q * target_q, dim=-1).item() < 0.0:
+            target_q = -target_q
+
+        q_step, _ = self._quat_step_toward(
+            current_q=current_q,
+            target_q=target_q,
+            max_angle_step_deg=max_angle_step_deg,
+        )
+        next_q = self._quat_mul(q_step, current_q)
+        next_q = self._quat_normalize(next_q)
+        target_rot = R.from_quat(next_q.squeeze(0).numpy()).as_matrix()
+        return target_rot, current_q.squeeze(0).numpy(), target_q.squeeze(0).numpy(), next_q.squeeze(0).numpy()
+
+    @staticmethod
+    def _quat_normalize(q: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        return q / torch.clamp(torch.norm(q, dim=-1, keepdim=True), min=eps)
+
+    @staticmethod
+    def _quat_conjugate(q: torch.Tensor) -> torch.Tensor:
+        qc = q.clone()
+        qc[:, :3] = -qc[:, :3]
+        return qc
+
+    @staticmethod
+    def _quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+        # Quaternion format: xyzw.
+        x1, y1, z1, w1 = q1[:, 0], q1[:, 1], q1[:, 2], q1[:, 3]
+        x2, y2, z2, w2 = q2[:, 0], q2[:, 1], q2[:, 2], q2[:, 3]
+
+        return torch.stack(
+            [
+                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            ],
+            dim=-1,
+        )
+
+    @classmethod
+    def _quat_to_axis_angle(cls, q: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
+        q = cls._quat_normalize(q)
+
+        xyz = q[:, :3]
+        w = torch.clamp(q[:, 3], -1.0, 1.0)
+
+        sin_half = torch.norm(xyz, dim=-1)
+        angle = 2.0 * torch.atan2(sin_half, w)
+        angle = torch.remainder(angle + torch.pi, 2.0 * torch.pi) - torch.pi
+
+        axis = xyz / torch.clamp(sin_half.unsqueeze(-1), min=eps)
+        default_axis = torch.zeros_like(axis)
+        default_axis[:, 2] = 1.0
+        small_mask = sin_half < eps
+        axis[small_mask] = default_axis[small_mask]
+        return axis, angle
+
+    @classmethod
+    def _axis_angle_to_quat(cls, axis: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
+        axis = axis / torch.clamp(torch.norm(axis, dim=-1, keepdim=True), min=1e-8)
+
+        half = 0.5 * angle
+        s = torch.sin(half).unsqueeze(-1)
+        c = torch.cos(half).unsqueeze(-1)
+        q = torch.cat([axis * s, c], dim=-1)
+        return cls._quat_normalize(q)
+
+    @classmethod
+    def _quat_step_toward(
+        cls,
+        current_q: torch.Tensor,
+        target_q: torch.Tensor,
+        max_angle_step_deg: float = 0.3,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        current_q = cls._quat_normalize(current_q)
+        target_q = cls._quat_normalize(target_q)
+
+        q_err = cls._quat_mul(target_q, cls._quat_conjugate(current_q))
+        q_err = cls._quat_normalize(q_err)
+
+        axis, angle = cls._quat_to_axis_angle(q_err)
+        max_angle_step = torch.deg2rad(
+            torch.tensor(max_angle_step_deg, device=current_q.device, dtype=current_q.dtype)
+        )
+        step_angle = torch.clamp(angle, min=-max_angle_step, max=max_angle_step)
+
+        q_step = cls._axis_angle_to_quat(axis, step_angle)
+        return q_step, angle
+
     def _scripted_action(self, insert_meta_data: dict) -> tuple[torch.Tensor, torch.Tensor]:
         current_pose = self._robot_ik_controller.eef_pose
         current_rot = current_pose[:3, :3]
@@ -396,13 +471,13 @@ class ScriptRobot(DroidRobot):
         if self._teleop_hold_z is None:
             self._teleop_hold_z = float(current_pos[2])
         aligned_pos = insert_meta_data["aligned_pos"]
+        aligned_rot = insert_meta_data["aligned_rot"]
         delta_pos = aligned_pos - current_pos
         insert_action = self.compute_insert_action(torch.as_tensor(delta_pos, dtype=torch.float32)).numpy()
         target_pos = current_pos.copy()
         target_pos[:2] = target_pos[:2] + insert_action[:2] * 5
-        target_pos[2] = target_pos[2] + 0.0005 # This is for compensating gravity
-        target_pos[2] = self._teleop_hold_z
-        target_rot = current_rot.copy()
+        target_pos[2] = self._teleop_hold_z + 0.0005 # This is for compensating gravity
+        target_rot, _, _, _ = self._interpolate_rotation_matrix(current_rot, aligned_rot)
         return target_pos, target_rot, insert_action
         
 
