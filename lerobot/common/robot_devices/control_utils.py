@@ -729,11 +729,32 @@ def run_scripted_grasp_sequence(robot):
     aligned_quat_xyzw = R.from_matrix(aligned_rot).as_quat()
     ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
     target_rot = ctrl_tgt_quat_xyzw.as_matrix()
-    for i in range(50):
+    # for i in range(50):
+    #     current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+    #     current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+    #     # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+    #     next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
+    #     next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+    #         current_rot,
+    #         target_rot,
+    #         max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+    #     )
+    #     robot._robot_ik_controller.control(
+    #             target_pos=next_tgt_pos,
+    #             target_rot=next_tgt_rot,
+    #             grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+    #             wait_times=100,
+    #             joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+    #         )
+    target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+    target_pos = np.array([0.285, -0.2095, 0.14], dtype=np.float64)
+    # Translate to take photo
+    total_photo_steps = 25
+    for i in range(total_photo_steps):
         current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
         current_pos = robot._robot_ik_controller.eef_pose[:3,3]
         # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-        next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
+        next_tgt_pos = (target_pos - current_pos) / (total_photo_steps-i) + current_pos
         next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
             current_rot,
             target_rot,
@@ -746,6 +767,7 @@ def run_scripted_grasp_sequence(robot):
                 wait_times=100,
                 joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
             )
+    exit(0)
     return record
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
