@@ -58,6 +58,7 @@ class ScriptRobot(DroidRobot):
         self._robot_ik_controller = None
         self._last_joint_target = None
         self._last_joint_target_reached = True
+        self._teleop_hold_z = None
 
     @property
     def motor_features(self) -> dict:
@@ -91,7 +92,7 @@ class ScriptRobot(DroidRobot):
                 )
         print("Franka state buffer ready.")
 
-        self._init_robotiq_gripper_without_gello()
+        # self._init_robotiq_gripper_without_gello()
         self._connect_cameras()
         self._load_recorded_insertion_pose()
         self._init_robot_ik_controller()
@@ -351,32 +352,59 @@ class ScriptRobot(DroidRobot):
         delta_pos = np.asarray([0,0,0.001],dtype=np.float64)
         return delta_pos
 
-    def _scripted_action(self, state: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        current_rot, current_pos = self._pybullet_current_eef_pose(state[:7].detach().cpu().numpy())
-        if self._pose_target_pos is None:
-            self._pose_target_pos = current_pos.copy()
-            self._pose_target_origin_pos = current_pos.copy()
-            self._pose_target_rot = current_rot.copy()
+    def compute_insert_action(self, delta_pos):
+        """
+        delta_pos: (3,) tensor
+        return:
+            action: (3,)
+        """
+        action = torch.zeros_like(delta_pos)
 
-        delta_pos = self._script_delta_pos(state)
-        if self._last_joint_target_reached:
-            self._last_script_delta_pos = delta_pos.copy()
-            self._pose_target_pos = self._pose_target_pos + delta_pos
+        delta_xy = delta_pos[:2]
+        delta_xy_norm = torch.norm(delta_xy)
+
+        tmp = delta_pos.clone()
+        tmp[2] = 0
+
+        delta_norm = torch.norm(tmp) + 1e-8
+
+        if delta_xy_norm > 0.002:
+            action = tmp / delta_norm * 0.0003
+
+        elif delta_xy_norm > 0.001:
+            action = tmp / delta_norm * 0.00015
+
+        elif delta_xy_norm > 0.0003:
+            action = tmp / 5
+            action[2] = -0.0001
+
+        elif delta_xy_norm > 0.0001:
+            action = tmp
+            action[2] = -0.0002
+
         else:
-            self._last_script_delta_pos = np.zeros(3, dtype=np.float64)
-        target_pos = self._pose_target_pos.copy()
-        target_rot = self._pose_target_rot if self._pose_target_rot is not None else current_rot
-        target_rot_6d = transforms.matrix_to_rotation_6d(
-            torch.from_numpy(target_rot[None])
-        ).squeeze()
-        target_eef = torch.cat(
-            [target_rot_6d, torch.from_numpy(target_pos), state[-1:]],
-            dim=0,
-        ).float()
+            action = tmp
+            action[2] = -0.0004
 
-        action = state.clone()
-        action[-1] = self.config.gripper_close_action
-        return action, target_eef
+        action[2] = 0.0
+        return action
+
+    def _scripted_action(self, insert_meta_data: dict) -> tuple[torch.Tensor, torch.Tensor]:
+        current_pose = self._robot_ik_controller.eef_pose
+        current_rot = current_pose[:3, :3]
+        current_pos = current_pose[:3, 3]
+        if self._teleop_hold_z is None:
+            self._teleop_hold_z = float(current_pos[2])
+        aligned_pos = insert_meta_data["aligned_pos"]
+        delta_pos = aligned_pos - current_pos
+        insert_action = self.compute_insert_action(torch.as_tensor(delta_pos, dtype=torch.float32)).numpy()
+        target_pos = current_pos.copy()
+        target_pos[:2] = target_pos[:2] + insert_action[:2] * 5
+        target_pos[2] = target_pos[2] + 0.0005 # This is for compensating gravity
+        target_pos[2] = self._teleop_hold_z
+        target_rot = current_rot.copy()
+        return target_pos, target_rot, insert_action
+        
 
 
     def teleop_step(self, record_data=False, insert_meta_data: dict | None = None) -> tuple[dict, dict] | None:
@@ -384,107 +412,18 @@ class ScriptRobot(DroidRobot):
             raise RuntimeError("ScriptRobot is not connected. Run `robot.connect()` first.")
         
         before_fread_t = time.perf_counter()
-        franka_joints = self._get_franka_joints()
-        gripper_width = self._get_gripper_width()
         self.logs["read_follower_dt_s"] = time.perf_counter() - before_fread_t
 
-        state = torch.tensor(list(franka_joints) + [gripper_width], dtype=torch.float32)
-        last_joint_gap_before_tick = None
-        if self._last_joint_target is not None:
-            last_joint_gap_before_tick = float(np.max(np.abs(franka_joints - self._last_joint_target)))
-            tolerance = float(getattr(self.config, "script_joint_convergence_tolerance", 1e-3))
-            self._last_joint_target_reached = last_joint_gap_before_tick < tolerance
-        else:
-            self._last_joint_target_reached = True
-        action_tensor, target_eef = self._scripted_action(state)
-        should_log_pose = self._script_step_count % 30 == 0
-        before_ik_pos = None
-        target_ik_pos = None
-        target_rot = transforms.rotation_6d_to_matrix(target_eef[:6][None]).squeeze().numpy()
-        target_pos = target_eef[6:9].numpy()
-        if should_log_pose:
-            _, before_ik_pos = self._pybullet_current_eef_pose(state[:7].detach().cpu().numpy())
-            target_ik_pos = target_pos
-        self._script_step_count += 1
-
+        target_pos, target_rot, insert_action = self._scripted_action(insert_meta_data)
         before_fwrite_t = time.perf_counter()
-        control_path = "robot_ik_unavailable"
-        if self._robot_ik_controller is not None:
-            control_path = "pybullet_robot_ik_controller"
-            if self.config.gripper_close_action < self.config.gripper_threshold:
-                grasping_action = self.config.gripper_close_action
-            else:
-                grasping_action = self.config.gripper_open_action
-            if not hasattr(self, "_last_gripper_action") or grasping_action != self._last_gripper_action:
-                if grasping_action == self.config.gripper_close_action:
-                    self.robotiq_gripper.close()
-                else:
-                    self.robotiq_gripper.open()
-                self._last_gripper_action = grasping_action
-
-            pybullet_control_success = self._robot_ik_controller.control(
-                target_pos=target_pos,
-                target_rot=target_rot,
-                grasping_action=grasping_action,
-                # wait_times=int(getattr(self.config, "script_joint_wait_times", 50)),
-                wait_times = 500,
-                joint_threshold=float(getattr(self.config, "script_joint_solution_threshold", 0.5)),
+        pybullet_control_success = self._robot_ik_controller.control(
+            target_pos=target_pos,
+            target_rot=target_rot,
+            grasping_action=getattr(self, "_last_gripper_action", self.config.gripper_open_action),
+            wait_times=50,
+            joint_threshold=float(getattr(self.config, "script_joint_solution_threshold", 0.5)),
             )
-            if self._robot_ik_controller.last_action is not None:
-                action_tensor = torch.as_tensor(self._robot_ik_controller.last_action, dtype=torch.float32)
-            if self._robot_ik_controller.last_joint_target is not None:
-                self._last_joint_target = np.asarray(
-                    self._robot_ik_controller.last_joint_target,
-                    dtype=np.float64,
-                )
-        else:
-            raise RuntimeError("RobotIKController is required; refusing to use MuJoCo fallback.")
         self.logs["write_follower_dt_s"] = time.perf_counter() - before_fwrite_t
-        if should_log_pose:
-            time.sleep(0.03)
-            after_joints = self._get_franka_joints()
-            _, after_ik_pos = self._pybullet_current_eef_pose(after_joints)
-            step_delta = self._last_script_delta_pos
-            accumulated_target_delta = target_ik_pos - self._pose_target_origin_pos
-            tracking_gap_before = target_ik_pos - before_ik_pos
-            actual_motion = after_ik_pos - before_ik_pos
-            tracking_error_after = target_ik_pos - after_ik_pos
-            commanded_joints = action_tensor[:7].detach().cpu().numpy()
-            measured_joints_before = state[:7].detach().cpu().numpy()
-            joint_command_delta = commanded_joints - measured_joints_before
-            joint_motion_after = after_joints - measured_joints_before
-            controller_debug = (
-                "\n"
-                f"control_path={control_path} "
-                f"target_advanced_this_tick={bool(np.any(step_delta))} "
-                f"last_joint_target_reached_before_tick={self._last_joint_target_reached} "
-                f"last_joint_gap_before_tick={last_joint_gap_before_tick} "
-                f"joint_command_delta_norm={float(np.linalg.norm(joint_command_delta)):.6f} "
-                f"joint_motion_after_norm={float(np.linalg.norm(joint_motion_after)):.6f} \n"
-                f"commanded_joints={[round(v, 6) for v in commanded_joints.tolist()]} \n"
-                f"joint_command_delta={[round(v, 6) for v in joint_command_delta.tolist()]} \n"
-                f"joint_motion_after={[round(v, 6) for v in joint_motion_after.tolist()]}"
-            )
-            if self._robot_ik_controller is not None:
-                controller_debug += (
-                    " \n"
-                    f"pybullet_control_success={getattr(self._robot_ik_controller, 'last_control_success', None)} "
-                    f"pybullet_joint_target={np.round(getattr(self._robot_ik_controller, 'last_joint_target', []), 6).tolist()} "
-                    f"pybullet_action={np.round(getattr(self._robot_ik_controller, 'last_action', []), 6).tolist()}"
-                )
-            print(
-                "[script:pose] \n"
-                f"step_delta_command_this_tick={[round(v, 6) for v in step_delta.tolist()]} \n"
-                f"accumulated_target_delta_from_start={[round(v, 6) for v in accumulated_target_delta.tolist()]} \n"
-                f"before_current_pos={[round(v, 4) for v in before_ik_pos.tolist()]} \n"
-                f"target_accumulated_pos={[round(v, 4) for v in target_ik_pos.tolist()]} \n"
-                f"after_current_pos={[round(v, 4) for v in after_ik_pos.tolist()]} \n"
-                f"tracking_gap_before_send={[round(v, 6) for v in tracking_gap_before.tolist()]} \n"
-                f"actual_motion_after_send={[round(v, 6) for v in actual_motion.tolist()]} \n"
-                f"tracking_error_after_send={[round(v, 6) for v in tracking_error_after.tolist()]}"
-                f"{controller_debug}"
-            )
-            print()
 
         if not record_data:
             return
@@ -496,14 +435,13 @@ class ScriptRobot(DroidRobot):
             self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
             self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
 
-        obs_dict, action_dict = {}, {}
-        obs_dict["observation.state"] = state
-        action_dict["action"] = action_tensor
-        for name in self.cameras:
-            if type(images[name]) == dict:
-                for img_name in images[name].keys():
-                    obs_dict[f"observation.images.{name}.{img_name}"] = images[name][img_name]
-            else:
-                obs_dict[f"observation.images.{name}"] = images[name]
+            obs_dict, action_dict = {}, {}
+            action_dict["action"] = insert_action
+            # for name in self.cameras:
+            #     if type(images[name]) == dict:
+            #         for img_name in images[name].keys():
+            #             obs_dict[f"observation.images.{name}.{img_name}"] = images[name][img_name]
+            #     else:
+            #         obs_dict[f"observation.images.{name}"] = images[name]
 
         return obs_dict, action_dict
