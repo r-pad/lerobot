@@ -139,6 +139,11 @@ class ScriptRobot(DroidRobot):
                 "shape": (4, 4),
                 "names": ["row", "col"],
             },
+            "observation.points.initial_wrist_points_world": {
+                "dtype": "pcd",
+                "shape": (-1, 3),
+                "names": ["points", "xyz"],
+            },
         }
     def _find_robotiq_port_without_gello(self) -> str:
         import minimalmodbus as mm

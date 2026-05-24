@@ -571,10 +571,75 @@ def depth_meters_to_uint16_mm(depth: np.ndarray) -> np.ndarray:
     return depth_mm[..., None]
 
 
+def depth_rgb_to_camera_point_cloud(
+    depth: np.ndarray,
+    rgb: np.ndarray,
+    k: np.ndarray,
+    *,
+    stride: int = 2,
+    max_depth_m: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Unproject a depth image and RGB image into a camera-frame point cloud."""
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.ndim == 3:
+        depth = np.squeeze(depth, axis=-1)
+    h, w = depth.shape
+
+    yy, xx = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
+    sample = np.zeros((h, w), dtype=bool)
+    sample[::stride, ::stride] = True
+    valid = np.isfinite(depth) & (depth > 0) & (depth <= max_depth_m) & sample
+    if not np.any(valid):
+        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.uint8)
+
+    z = depth[valid]
+    x = (xx[valid].astype(np.float32) - float(k[0, 2])) * z / float(k[0, 0])
+    y = (yy[valid].astype(np.float32) - float(k[1, 2])) * z / float(k[1, 1])
+    points = np.stack([x, y, z], axis=-1).astype(np.float32)
+    colors = rgb[valid].astype(np.uint8)
+    return points, colors
+
+
+def transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    """Apply a 4x4 homogeneous transform to Nx3 points."""
+    if points.shape[0] == 0:
+        return points
+    points_h = np.concatenate([points, np.ones((points.shape[0], 1), dtype=points.dtype)], axis=1)
+    return (np.asarray(transform, dtype=np.float64) @ points_h.T).T[:, :3].astype(np.float32)
+
+
+def visualize_open3d_point_cloud(points: np.ndarray, colors: np.ndarray, window_name: str) -> None:
+    """Render an RGB point cloud with the world-frame axes in Open3D."""
+    import open3d as o3d
+
+    if points.shape[0] == 0:
+        print(f"[pointcloud] No points to visualize for {window_name}.")
+        return
+
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(points.astype(np.float64))
+    cloud.colors = o3d.utility.Vector3dVector(colors.astype(np.float64) / 255.0)
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name=window_name)
+    vis.add_geometry(cloud)
+    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0.0, 0.0, 0.0])
+    vis.add_geometry(world_frame)
+    vis.get_render_option().point_size = 1.0
+    vis.get_render_option().background_color = np.array([0.5, 0.5, 0.5])
+    vis.run()
+    vis.destroy_window()
+
+
 def attach_auxiliary_observation_to_frame(observation: dict, robot, dataset: LeRobotDataset | None) -> None:
     """Attach one-shot auxiliary RGB/depth captures to dataset frames when declared."""
     if dataset is None:
         return
+
+    initial_wrist_points = getattr(robot, "_initial_wrist_points_world", None)
+    initial_wrist_points_key = "observation.points.initial_wrist_points_world"
+    if initial_wrist_points is not None and initial_wrist_points_key in dataset.features:
+        observation[initial_wrist_points_key] = initial_wrist_points
 
     left_rgb = getattr(robot, "_last_auxiliary_left_rgb", None)
     depth = getattr(robot, "_last_auxiliary_depth", None)
@@ -708,6 +773,41 @@ def run_scripted_grasp_sequence(robot):
                 wait_times=100,
                 joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
             )
+    print("[script] Rendering initial wrist point cloud in world frame...")
+    wrist_camera = robot.cameras["cam_wrist"]
+    wrist_images = read_zed_stereo_rgb(wrist_camera)
+    wrist_depth = compute_foundation_stereo_depth(wrist_images, wrist_camera)
+    wrist_k, _ = get_zed_intrinsics_and_baseline(wrist_camera)
+    wrist_points_cam, wrist_colors = depth_rgb_to_camera_point_cloud(
+        wrist_depth,
+        wrist_images["left"],
+        wrist_k,
+        stride=2,
+        max_depth_m=0.5,
+    )
+    cam_to_gripper = np.array(
+        [
+            [-0.00768086, -0.94557934, -0.32530096, 0.07294499],
+            [0.99995759, -0.00891583, 0.00230583, -0.03177615],
+            [-0.00508067, -0.32526946, 0.94560772, -0.08727812],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    world_from_gripper = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64)
+    world_from_cam = world_from_gripper @ cam_to_gripper
+    wrist_points_world = transform_points(wrist_points_cam, world_from_cam)
+    world_z_threshold = 0.06
+    keep = wrist_points_world[:, 2] <= world_z_threshold
+    wrist_points_world = wrist_points_world[keep]
+    wrist_colors = wrist_colors[keep]
+    robot._initial_wrist_points_world = wrist_points_world.astype(np.float32)
+    visualize_open3d_point_cloud(
+        wrist_points_world,
+        wrist_colors,
+        "Initial wrist point cloud in world frame",
+    )
+    # return record
     init_pos = robot._robot_ik_controller.eef_pose[:3,3]
     init_rot = robot._robot_ik_controller.eef_pose[:3,:3]
     print("Initial Pose Achieved")
