@@ -22,6 +22,17 @@ from lerobot.common.robot_devices.robots.droid import DroidRobot
 from lerobot.common.robot_devices.robots.robot_ik_controller import RobotIKController
 
 
+WRIST_CAM_TO_GRIPPER = np.array(
+    [
+        [-0.00768086, -0.94557934, -0.32530096, 0.07294499],
+        [0.99995759, -0.00891583, 0.00230583, -0.03177615],
+        [-0.00508067, -0.32526946, 0.94560772, -0.08727812],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float32,
+)
+
+
 class _FrankaInterfaceControlAdapter:
     """Delegate FrankaInterface calls while tolerating mentor controller kwargs."""
 
@@ -113,7 +124,7 @@ class ScriptRobot(DroidRobot):
 
     @property
     def motor_features(self) -> dict:
-        return {
+        motor_features = {
             "action": {
                 "dtype": "float32",
                 "shape": (9,),
@@ -145,6 +156,19 @@ class ScriptRobot(DroidRobot):
                 "names": ["points", "xyz"],
             },
         }
+        if "cam_wrist" in self.cameras:
+            motor_features["observation.cam_wrist.extrinsics"] = {
+                "dtype": "float32",
+                "shape": (4, 4),
+                "names": ["rows", "cols"],
+                "info": "Wrist camera extrinsic matrix (T_world_cam)",
+            }
+        return motor_features
+
+    def _wrist_camera_extrinsics(self, eef_pose: np.ndarray) -> np.ndarray:
+        world_from_gripper = np.asarray(eef_pose, dtype=np.float32).reshape(4, 4)
+        return (world_from_gripper @ WRIST_CAM_TO_GRIPPER).astype(np.float32)
+
     def _find_robotiq_port_without_gello(self) -> str:
         import minimalmodbus as mm
         import serial
@@ -617,6 +641,7 @@ class ScriptRobot(DroidRobot):
         
         before_fread_t = time.perf_counter()
         pre_action_eef_pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float32).copy()
+        pre_action_wrist_extrinsics = self._wrist_camera_extrinsics(pre_action_eef_pose)
         pre_action_eef_internal_forces = self._get_eef_internal_forces()
         pre_action_wrist_images = None
         pre_action_wrist_depth = None
@@ -673,6 +698,7 @@ class ScriptRobot(DroidRobot):
         obs_dict, action_dict = {}, {}
         obs_dict["observation.eef_internal_forces"] = pre_action_eef_internal_forces
         obs_dict["observation.eef_pose"] = pre_action_eef_pose
+        obs_dict["observation.cam_wrist.extrinsics"] = pre_action_wrist_extrinsics
         action_dict["action"] = action9d
         for name in ["cam_wrist"]:
             if pre_action_wrist_images is not None:
