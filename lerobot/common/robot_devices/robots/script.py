@@ -97,8 +97,48 @@ class ScriptRobot(DroidRobot):
                 "shape": (6,),
                 "names": ["fx", "fy", "fz", "tx", "ty", "tz"],
             },
+            "observation.eef_pose": {
+                "dtype": "float32",
+                "shape": (4, 4),
+                "names": ["row", "col"],
+            },
         }
+    def _find_robotiq_port_without_gello(self) -> str:
+        import minimalmodbus as mm
+        import serial
+        import serial.tools.list_ports
 
+        for port_info in serial.tools.list_ports.comports():
+            try:
+                ser = serial.Serial(port_info.device, 115200, 8, "N", 1, 0.2)
+                device = mm.Instrument(ser, 9, mm.MODE_RTU, close_port_after_each_call=False, debug=False)
+                device.write_registers(1000, [0, 100, 0])
+                registers = device.read_registers(2000, 3, 4)
+                echo = registers[1] & 0xFF
+                del device
+                ser.close()
+                if echo == 100:
+                    print(f"Robotiq gripper found on {port_info.device}")
+                    return port_info.device
+            except Exception:
+                continue
+
+        raise RuntimeError(
+            "No Robotiq gripper found. Please specify robotiq_port in the config, "
+            "or check that the gripper is connected."
+        )
+    def _init_robotiq_gripper_without_gello(self):
+        from pyrobotiqgripper import RobotiqGripper
+
+        port = self.config.robotiq_port
+        if port is None:
+            port = self._find_robotiq_port_without_gello()
+
+        print(f"Connecting to Robotiq gripper on {port}")
+        self.robotiq_gripper = RobotiqGripper(portname=port)
+        print("Activating Robotiq gripper (will fully open/close during activation)...")
+        self.robotiq_gripper.activate()
+        print("Robotiq gripper activated.")
     def _get_eef_internal_forces(self) -> torch.Tensor:
         if self.robot_interface.state_buffer_size == 0:
             return torch.zeros(6, dtype=torch.float32)
@@ -534,18 +574,20 @@ class ScriptRobot(DroidRobot):
             raise RuntimeError("ScriptRobot is not connected. Run `robot.connect()` first.")
         
         before_fread_t = time.perf_counter()
+        pre_action_eef_pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float32).copy()
+        pre_action_eef_internal_forces = self._get_eef_internal_forces()
         self.logs["read_follower_dt_s"] = time.perf_counter() - before_fread_t
 
         current_rot_for_action = torch.as_tensor(
-            self._robot_ik_controller.eef_pose[:3, :3],
+            pre_action_eef_pose[:3, :3],
             dtype=torch.float32,
         )
         target_pos, target_rot, insert_action = self._scripted_action(insert_meta_data)
         target_rot_for_action = torch.as_tensor(target_rot, dtype=torch.float32)
         action_pos = torch.as_tensor(insert_action, dtype=torch.float32)
-        current_rot6d = transforms.matrix_to_rotation_6d(current_rot_for_action[None]).squeeze(0)
-        target_rot6d = transforms.matrix_to_rotation_6d(target_rot_for_action[None]).squeeze(0)
-        action9d = torch.cat([action_pos, target_rot6d - current_rot6d], dim=-1)
+        relative_rot = target_rot_for_action @ current_rot_for_action.T
+        relative_rot6d = transforms.matrix_to_rotation_6d(relative_rot[None]).squeeze(0)
+        action9d = torch.cat([action_pos, relative_rot6d], dim=-1)
 
         before_fwrite_t = time.perf_counter()
         pybullet_control_success = self._robot_ik_controller.control(
@@ -568,7 +610,8 @@ class ScriptRobot(DroidRobot):
             self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
 
         obs_dict, action_dict = {}, {}
-        obs_dict["observation.eef_internal_forces"] = self._get_eef_internal_forces()
+        obs_dict["observation.eef_internal_forces"] = pre_action_eef_internal_forces
+        obs_dict["observation.eef_pose"] = pre_action_eef_pose
         action_dict["action"] = action9d
         for name in ["cam_wrist"]:
             image = images[name]["color"] if isinstance(images[name], dict) else images[name]
