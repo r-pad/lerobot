@@ -505,6 +505,70 @@ def warp_left_depth_vis_to_right(
     return right_vis
 
 
+def depth_to_xyz_map(depth: np.ndarray, k: np.ndarray) -> np.ndarray:
+    """Project a metric depth image to an XYZ map in the camera frame."""
+    depth = depth.astype(np.float32)
+    h, w = depth.shape
+    yy, xx = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
+    z = depth
+    x = (xx.astype(np.float32) - float(k[0, 2])) * z / float(k[0, 0])
+    y = (yy.astype(np.float32) - float(k[1, 2])) * z / float(k[1, 1])
+    return np.stack([x, y, z], axis=-1)
+
+
+def to_open3d_cloud(points: np.ndarray, colors: np.ndarray | None = None, normals: np.ndarray | None = None):
+    """Build an Open3D point cloud without writing it to disk."""
+    import open3d as o3d
+
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(points.astype(np.float64))
+    if colors is not None:
+        colors = colors.astype(np.float64)
+        if colors.size > 0 and colors.max() > 1:
+            colors = colors / 255.0
+        cloud.colors = o3d.utility.Vector3dVector(colors)
+    if normals is not None:
+        cloud.normals = o3d.utility.Vector3dVector(normals.astype(np.float64))
+    return cloud
+
+
+def visualize_depth_point_cloud(
+    depth: np.ndarray,
+    rgb: np.ndarray,
+    k: np.ndarray,
+    *,
+    max_depth: float = 0.15,
+    denoise: bool = False,
+    denoise_nb_points: int = 30,
+    denoise_radius: float = 0.03,
+) -> None:
+    """Visualize a depth-derived point cloud in Open3D without saving it."""
+    import open3d as o3d
+
+    xyz_map = depth_to_xyz_map(depth, k)
+    points = xyz_map.reshape(-1, 3)
+    colors = rgb.reshape(-1, 3)
+
+    keep_mask = np.isfinite(points).all(axis=1) & (points[:, 2] > 0) & (points[:, 2] <= max_depth)
+    if not np.any(keep_mask):
+        print(f"[pointcloud] No points to visualize after filtering z <= {max_depth}m.")
+        return
+
+    pcd = to_open3d_cloud(points[keep_mask], colors[keep_mask])
+    if denoise:
+        _, ind = pcd.remove_radius_outlier(nb_points=denoise_nb_points, radius=denoise_radius)
+        pcd = pcd.select_by_index(ind)
+
+    print("[pointcloud] Visualizing point cloud. Press ESC to exit.")
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="FoundationStereo point cloud")
+    vis.add_geometry(pcd)
+    vis.get_render_option().point_size = 1.0
+    vis.get_render_option().background_color = np.array([0.5, 0.5, 0.5])
+    vis.run()
+    vis.destroy_window()
+
+
 @cache
 def get_foundation_stereo_depth(
     ckpt: str = "/home/yinongh/FoundationStereo/pretrained_models/23-51-11/model_best_bp2.pth",
@@ -632,6 +696,28 @@ def save_foundation_stereo_depth(
     }
 
 
+def visualize_foundation_stereo_point_cloud(
+    images: dict[str, np.ndarray],
+    camera,
+    max_depth: float = 0.15,
+) -> np.ndarray:
+    """Run FoundationStereo and visualize the point cloud without saving files."""
+    k, baseline_m = get_zed_intrinsics_and_baseline(camera)
+    left_rgb = images["left"]
+    right_rgb = images["right"]
+
+    fs_depth = get_foundation_stereo_depth()
+    depth = fs_depth.infer_depth(
+        left_rgb,
+        right_rgb,
+        fx=float(k[0, 0]),
+        baseline_m=baseline_m,
+        remove_invisible=True,
+    )
+    visualize_depth_point_cloud(depth, left_rgb, k, max_depth=max_depth)
+    return depth
+
+
 def command_gripper(robot, action, label, ticks=5, sleep_s=0.2):
     """Franka gripper convention: negative opens, nonnegative closes."""
     print(f"Commanding gripper {label}...")
@@ -644,24 +730,7 @@ def command_gripper(robot, action, label, ticks=5, sleep_s=0.2):
 
 
 def run_scripted_grasp_sequence(robot):
-    # auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
-    # auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
-    # robot._last_auxiliary_stereo_rgb = auxiliary_images
-    # saved_paths = save_auxiliary_stereo_images(auxiliary_images, auxiliary_camera_name)
-    # depth_paths = save_foundation_stereo_depth(auxiliary_images, auxiliary_camera, auxiliary_camera_name)
-    # robot._last_auxiliary_depth = depth_paths["depth_array"]
-    # print(
-    #     f"[script] Read {auxiliary_camera_name} stereo RGB images: "
-    #     f"left={auxiliary_images['left'].shape} right={auxiliary_images['right'].shape}"
-    # )
-    # print(
-    #     "[script] Saved auxiliary stereo images: "
-    #     f"left={saved_paths['left']} right={saved_paths['right']}"
-    # )
-    # print(
-    #     "[script] Saved FoundationStereo depth: "
-    #     f"depth={depth_paths['depth']} left_vis={depth_paths['depth_vis']} rgb={depth_paths['rgb']}"
-    # )
+    
     # return
     home_joints = np.array(
         [-0.05045543, -0.07240624, -0.03830516, -2.48442205, -0.05757582, 2.33608194, 0.73499261],
@@ -751,25 +820,27 @@ def run_scripted_grasp_sequence(robot):
     aligned_quat_xyzw = R.from_matrix(aligned_rot).as_quat()
     ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
     target_rot = ctrl_tgt_quat_xyzw.as_matrix()
-    # for i in range(50):
-    #     current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-    #     current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-    #     # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-    #     next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
-    #     next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-    #         current_rot,
-    #         target_rot,
-    #         max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
-    #     )
-    #     robot._robot_ik_controller.control(
-    #             target_pos=next_tgt_pos,
-    #             target_rot=next_tgt_rot,
-    #             grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-    #             wait_times=100,
-    #             joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-    #         )
+    for i in range(50):
+        current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+        current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+        # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+        next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
+        next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+            current_rot,
+            target_rot,
+            max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+        )
+        robot._robot_ik_controller.control(
+                target_pos=next_tgt_pos,
+                target_rot=next_tgt_rot,
+                grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                wait_times=100,
+                joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+            )
+    init_pos = robot._robot_ik_controller.eef_pose[:3,3]
+    init_rot = robot._robot_ik_controller.eef_pose[:3,:3]
     target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-    target_pos = np.array([0.285, -0.3895, 0.35], dtype=np.float64)
+    target_pos = np.array([0.165, -0.3895, 0.35], dtype=np.float64)
     # Translate to take photo
     total_photo_steps = 25
     for i in range(total_photo_steps):
@@ -790,9 +861,58 @@ def run_scripted_grasp_sequence(robot):
                 joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
             )
     target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-    target_pos = np.array([0.285, -0.3895, 0.15], dtype=np.float64)
+    target_pos = np.array([0.135, -0.3895, 0.15], dtype=np.float64)
     # Translate to take photo
     total_photo_steps = 25
+    for i in range(total_photo_steps):
+        current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+        current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+        # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+        next_tgt_pos = (target_pos - current_pos) / (total_photo_steps-i) + current_pos
+        next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+            current_rot,
+            target_rot,
+            max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+        )
+        robot._robot_ik_controller.control(
+                target_pos=next_tgt_pos,
+                target_rot=next_tgt_rot,
+                grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                wait_times=100,
+                joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+            )
+    # Taking Photo
+    print("Taking auxiliary ZED stereo photo...")
+    auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
+    auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
+    robot._last_auxiliary_stereo_rgb = auxiliary_images
+    depth = visualize_foundation_stereo_point_cloud(auxiliary_images, auxiliary_camera)
+    robot._last_auxiliary_depth = depth
+    print(
+        f"Read {auxiliary_camera_name} stereo RGB images: "
+    )
+    total_photo_steps = 25
+    for i in range(total_photo_steps):
+        current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+        current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+        # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+        next_tgt_pos = (target_pos - current_pos) / (total_photo_steps-i) + current_pos
+        next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+            current_rot,
+            target_rot,
+            max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+        )
+        robot._robot_ik_controller.control(
+                target_pos=next_tgt_pos,
+                target_rot=next_tgt_rot,
+                grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                wait_times=100,
+                joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+            )
+    target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+    target_pos = np.array([0.135, -0.3895, 0.15], dtype=np.float64)
+    target_pos = init_pos
+    target_rot = init_rot
     for i in range(total_photo_steps):
         current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
         current_pos = robot._robot_ik_controller.eef_pose[:3,3]
@@ -995,6 +1115,114 @@ def get_camera_names_from_observation(observation):
     """Get the camera names matching a given pattern from the observation, exclude the wrist camera."""
     return [s for s in observation.keys() if s.startswith('observation.images.cam_') and s.endswith('.color') and 'wrist' not in s]
 
+
+def _as_numpy(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _depth_to_camera_frame_points(
+    depth: np.ndarray,
+    intrinsics: np.ndarray,
+    *,
+    stride: int = 4,
+    max_depth_m: float | None = 3.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    depth = np.squeeze(depth).astype(np.float32)
+    if depth.ndim != 2:
+        raise ValueError(f"Expected depth image with shape (H, W), got {depth.shape}.")
+
+    valid = np.isfinite(depth) & (depth > 0)
+    if not np.any(valid):
+        return np.empty((0, 3), dtype=np.float32), valid
+
+    # ZED depth observations are stored as uint16 millimeters in the robot wrappers.
+    if np.nanpercentile(depth[valid], 95) > 20.0:
+        depth = depth / 1000.0
+
+    valid = np.isfinite(depth) & (depth > 0)
+    if max_depth_m is not None:
+        valid &= depth <= max_depth_m
+
+    sample_mask = np.zeros_like(valid, dtype=bool)
+    sample_mask[::stride, ::stride] = True
+    valid &= sample_mask
+    if not np.any(valid):
+        return np.empty((0, 3), dtype=np.float32), valid
+
+    ys, xs = np.nonzero(valid)
+    z = depth[ys, xs]
+    fx, fy = float(intrinsics[0, 0]), float(intrinsics[1, 1])
+    cx, cy = float(intrinsics[0, 2]), float(intrinsics[1, 2])
+    x = (xs.astype(np.float32) - cx) * z / fx
+    y = (ys.astype(np.float32) - cy) * z / fy
+    return np.stack([x, y, z], axis=-1).astype(np.float32), valid
+
+
+def log_point_clouds_to_rerun(
+    observation: dict,
+    robot,
+    *,
+    stride: int = 4,
+    max_depth_m: float | None = 3.0,
+) -> None:
+    """Log point-cloud observations to rerun for live control visualization."""
+    for key, value in observation.items():
+        if not key.startswith("observation.images.") or not key.endswith(".point_cloud"):
+            continue
+
+        points = _as_numpy(value).astype(np.float32)
+        if points.ndim == 3 and points.shape[-1] == 3:
+            points = points.reshape(-1, 3)
+        if points.ndim != 2 or points.shape[-1] != 3 or points.shape[0] == 0:
+            continue
+
+        finite = np.all(np.isfinite(points), axis=-1)
+        points = points[finite]
+        if max_depth_m is not None:
+            points = points[points[:, 2] <= max_depth_m]
+        if points.shape[0] == 0:
+            continue
+
+        rr.log(key.replace("observation.images.", "point_clouds/"), rr.Points3D(points, radii=0.003))
+
+    cameras = getattr(robot, "cameras", {})
+    for name, camera in cameras.items():
+        depth_key = f"observation.images.{name}.depth"
+        color_key = f"observation.images.{name}.color"
+        if depth_key not in observation:
+            depth_key = f"observation.images.{name}.transformed_depth"
+        if depth_key not in observation:
+            continue
+
+        try:
+            intrinsics, _ = get_zed_intrinsics_and_baseline(camera)
+            points, sample_mask = _depth_to_camera_frame_points(
+                _as_numpy(observation[depth_key]),
+                intrinsics,
+                stride=stride,
+                max_depth_m=max_depth_m,
+            )
+        except Exception as exc:
+            logging.debug("Skipping point cloud visualization for %s: %s", name, exc)
+            continue
+
+        if points.shape[0] == 0:
+            continue
+
+        colors = None
+        if color_key in observation:
+            color = _as_numpy(observation[color_key])
+            if color.ndim == 3 and color.shape[:2] == sample_mask.shape:
+                colors = color[sample_mask].astype(np.uint8)
+
+        if colors is None:
+            rr.log(f"point_clouds/{name}/depth", rr.Points3D(points, radii=0.003))
+        else:
+            rr.log(f"point_clouds/{name}/depth", rr.Points3D(points, colors=colors, radii=0.003))
+
+
 def compute_goal_prediction(policy, policy_cfg, single_task, observation):
     if not (hasattr(policy_cfg, "enable_goal_conditioning") and policy_cfg.enable_goal_conditioning):
         return observation
@@ -1125,7 +1353,9 @@ def control_loop(
         insert_meta_data = getattr(robot, "_scripted_insert_meta_data", None)
 
         observation, action = robot.teleop_step(record_data=True, insert_meta_data=insert_meta_data)
-        
+
+        if display_data:
+            log_point_clouds_to_rerun(observation, robot)
 
         if policy is not None and getattr(policy, "_current_vis_frame", None) is not None:
             # Each policy declares the observation key for its visualization frame
