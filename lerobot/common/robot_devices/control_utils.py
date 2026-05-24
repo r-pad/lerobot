@@ -802,11 +802,11 @@ def run_scripted_grasp_sequence(robot):
     wrist_points_world = wrist_points_world[keep]
     wrist_colors = wrist_colors[keep]
     robot._initial_wrist_points_world = wrist_points_world.astype(np.float32)
-    visualize_open3d_point_cloud(
-        wrist_points_world,
-        wrist_colors,
-        "Initial wrist point cloud in world frame",
-    )
+    # visualize_open3d_point_cloud(
+    #     wrist_points_world,
+    #     wrist_colors,
+    #     "Initial wrist point cloud in world frame",
+    # )
     # return record
     init_pos = robot._robot_ik_controller.eef_pose[:3,3]
     init_rot = robot._robot_ik_controller.eef_pose[:3,:3]
