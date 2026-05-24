@@ -10,8 +10,12 @@ import pytorch3d.transforms as transforms
 from scipy.spatial.transform import Rotation as R
 
 from lerobot.common.robot_devices.control_utils import (
+    compute_foundation_stereo_depth,
+    depth_meters_to_uint16_mm,
     droid_ik_model_eef_pose,
+    get_zed_intrinsics_and_baseline,
     print_droid_ik_diagnostics,
+    read_zed_stereo_rgb,
 )
 from lerobot.common.robot_devices.robots.configs import ScriptRobotConfig
 from lerobot.common.robot_devices.robots.droid import DroidRobot
@@ -32,6 +36,34 @@ class _FrankaInterfaceControlAdapter:
         result = self._robot_interface.control(*args, **kwargs)
         time.sleep(0.01)
         return result
+
+
+def _visualize_depth_point_cloud_once(depth: np.ndarray, rgb: np.ndarray, k: np.ndarray, max_depth_m: float = 0.5):
+    import open3d as o3d
+
+    depth = np.asarray(depth, dtype=np.float32)
+    h, w = depth.shape[:2]
+    yy, xx = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
+    z = depth
+    x = (xx.astype(np.float32) - float(k[0, 2])) * z / float(k[0, 0])
+    y = (yy.astype(np.float32) - float(k[1, 2])) * z / float(k[1, 1])
+    points = np.stack([x, y, z], axis=-1).reshape(-1, 3)
+    colors = rgb.reshape(-1, 3).astype(np.float64)
+    if colors.max() > 1:
+        colors /= 255.0
+
+    keep = np.isfinite(points).all(axis=1) & (points[:, 2] > 0) & (points[:, 2] <= max_depth_m)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points[keep].astype(np.float64))
+    pcd.colors = o3d.utility.Vector3dVector(colors[keep])
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="First wrist FoundationStereo point cloud")
+    vis.add_geometry(pcd)
+    vis.get_render_option().point_size = 1.0
+    vis.get_render_option().background_color = np.array([0.5, 0.5, 0.5])
+    vis.run()
+    vis.destroy_window()
 
 
 class ScriptRobot(DroidRobot):
@@ -71,6 +103,11 @@ class ScriptRobot(DroidRobot):
                 "shape": (cam_cfg.height, cam_cfg.width, cam_cfg.channels),
                 "names": ["height", "width", "channels"],
                 "info": f"{cam_cfg.color_mode.upper()} color image",
+            },
+            "observation.images.cam_wrist.depth": {
+                "shape": (cam_cfg.height, cam_cfg.width, 1),
+                "names": ["height", "width", "channels"],
+                "info": "FoundationStereo depth from wrist ZED Mini in uint16 millimeters",
             }
         }
 
@@ -576,6 +613,23 @@ class ScriptRobot(DroidRobot):
         before_fread_t = time.perf_counter()
         pre_action_eef_pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float32).copy()
         pre_action_eef_internal_forces = self._get_eef_internal_forces()
+        pre_action_wrist_images = None
+        pre_action_wrist_depth = None
+        if record_data and "cam_wrist" in self.cameras:
+            pre_action_wrist_images = read_zed_stereo_rgb(self.cameras["cam_wrist"])
+            pre_action_wrist_depth = compute_foundation_stereo_depth(
+                pre_action_wrist_images,
+                self.cameras["cam_wrist"],
+            )
+            # if not getattr(self, "_debug_first_wrist_point_cloud_done", False):
+            #     k, _ = get_zed_intrinsics_and_baseline(self.cameras["cam_wrist"])
+            #     _visualize_depth_point_cloud_once(
+            #         pre_action_wrist_depth,
+            #         pre_action_wrist_images["left"],
+            #         k,
+            #     )
+            #     self._debug_first_wrist_point_cloud_done = True
+                # import pdb; pdb.set_trace()
         self.logs["read_follower_dt_s"] = time.perf_counter() - before_fread_t
 
         current_rot_for_action = torch.as_tensor(
@@ -604,6 +658,8 @@ class ScriptRobot(DroidRobot):
 
         images = {}
         for name in self.cameras:
+            if name == "cam_wrist" and pre_action_wrist_images is not None:
+                continue
             before_camread_t = time.perf_counter()
             images[name] = self._camera_output_to_tensors(self.cameras[name].async_read())
             self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
@@ -614,6 +670,10 @@ class ScriptRobot(DroidRobot):
         obs_dict["observation.eef_pose"] = pre_action_eef_pose
         action_dict["action"] = action9d
         for name in ["cam_wrist"]:
-            image = images[name]["color"] if isinstance(images[name], dict) else images[name]
+            if pre_action_wrist_images is not None:
+                image = torch.from_numpy(pre_action_wrist_images["left"])
+                obs_dict[f"observation.images.{name}.depth"] = depth_meters_to_uint16_mm(pre_action_wrist_depth)
+            else:
+                image = images[name]["color"] if isinstance(images[name], dict) else images[name]
             obs_dict[f"observation.images.{name}"] = image
         return obs_dict, action_dict
