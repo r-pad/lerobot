@@ -20,7 +20,7 @@ from lerobot.common.robot_devices.control_utils import (
 from lerobot.common.robot_devices.robots.configs import ScriptRobotConfig
 from lerobot.common.robot_devices.robots.droid import DroidRobot
 from lerobot.common.robot_devices.robots.robot_ik_controller import RobotIKController
-
+from lerobot.common.utils.pointcloud_rgbd import render_top_down_custom
 
 WRIST_CAM_TO_GRIPPER = np.array(
     [
@@ -102,6 +102,7 @@ class ScriptRobot(DroidRobot):
         self._last_joint_target = None
         self._last_joint_target_reached = True
         self._teleop_hold_z = None
+        self.force_buffer = None
 
     @property
     def camera_features(self) -> dict:
@@ -554,7 +555,6 @@ class ScriptRobot(DroidRobot):
             action = tmp
             action[2] = -0.0004
 
-        action[2] = 0.0
         return action
 
     def _interpolate_rotation_matrix(
@@ -668,7 +668,7 @@ class ScriptRobot(DroidRobot):
         q_step = cls._axis_angle_to_quat(axis, step_angle)
         return q_step, angle
 
-    def _scripted_action(self, insert_meta_data: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    def _scripted_action(self, insert_meta_data: dict, pre_action_eef_internal_forces: float) -> tuple[torch.Tensor, torch.Tensor]:
         current_pose = self._robot_ik_controller.eef_pose
         current_rot = current_pose[:3, :3]
         current_pos = current_pose[:3, 3]
@@ -683,9 +683,12 @@ class ScriptRobot(DroidRobot):
         # insert_action = self._wrist_camera_vector_to_world(insert_action_cam_wrist, wrist_extrinsics)
         target_pos = current_pos.copy()
         target_pos[:2] = target_pos[:2] + insert_action[:2] * 5
-        target_pos[2] = self._teleop_hold_z + 0.0005 # This is for compensating gravity
-        target_pos[2] += insert_action[2]
-        target_rot = current_rot.copy()
+        # target_pos[2] += insert_action[2]
+        if pre_action_eef_internal_forces > 0.5:
+            insert_action[2] = -0.0001
+        target_pos[2] = target_pos[2] + 0.0005 + insert_action[2]
+        # target_rot = aligned_rot.copy()
+        target_rot, _, _, _ = self._interpolate_rotation_matrix(current_rot, aligned_rot)
         return target_pos, target_rot, insert_action
         
 
@@ -697,10 +700,17 @@ class ScriptRobot(DroidRobot):
         before_fread_t = time.perf_counter()
         pre_action_eef_pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float32).copy()
         pre_action_wrist_extrinsics = self._wrist_camera_extrinsics(pre_action_eef_pose)
-        pre_action_eef_internal_forces = self._get_eef_internal_forces(
-            pre_action_eef_pose,
-            pre_action_wrist_extrinsics,
-        )
+        current_forces = self._get_eef_internal_forces(
+                pre_action_eef_pose,
+                pre_action_wrist_extrinsics,
+            )
+        if self.force_buffer is not None:
+            pre_action_eef_internal_forces = current_forces - self.force_buffer
+            print("Delta Force: ", pre_action_eef_internal_forces)
+        else:
+            pre_action_eef_internal_forces = torch.zeros(3, dtype=torch.float32)
+            print("Delta Force: ", pre_action_eef_internal_forces)
+        self.force_buffer = current_forces
         pre_action_wrist_images = None
         pre_action_wrist_depth = None
         if record_data and "cam_wrist" in self.cameras:
@@ -709,22 +719,14 @@ class ScriptRobot(DroidRobot):
                 pre_action_wrist_images,
                 self.cameras["cam_wrist"],
             )
-            # if not getattr(self, "_debug_first_wrist_point_cloud_done", False):
-            #     k, _ = get_zed_intrinsics_and_baseline(self.cameras["cam_wrist"])
-            #     _visualize_depth_point_cloud_once(
-            #         pre_action_wrist_depth,
-            #         pre_action_wrist_images["left"],
-            #         k,
-            #     )
-            #     self._debug_first_wrist_point_cloud_done = True
-                # import pdb; pdb.set_trace()
+        
         self.logs["read_follower_dt_s"] = time.perf_counter() - before_fread_t
 
         current_rot_for_action = torch.as_tensor(
             pre_action_eef_pose[:3, :3],
             dtype=torch.float32,
         )
-        target_pos, target_rot, insert_action = self._scripted_action(insert_meta_data)
+        target_pos, target_rot, insert_action = self._scripted_action(insert_meta_data,pre_action_eef_internal_forces[2])
         target_rot_for_action = torch.as_tensor(target_rot, dtype=torch.float32)
         action_pos = torch.as_tensor(
             self._world_vector_to_isaacgym_wrist_camera(insert_action, pre_action_wrist_extrinsics),

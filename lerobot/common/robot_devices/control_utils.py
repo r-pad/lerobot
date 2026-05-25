@@ -973,14 +973,14 @@ def run_scripted_grasp_sequence(robot):
         "Initial wrist point cloud in world frame",
     )
     # return record
-    skip_plug_photo = True
+    skip_plug_photo = False
     if not skip_plug_photo:
         print("Initial Pose Achieved")
         time.sleep(3)
         target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
         target_pos = np.array([0.135, -0.354, 0.35], dtype=np.float64)
         # Translate to take photo
-        total_photo_steps = 25
+        total_photo_steps = 5
         for i in range(total_photo_steps):
             current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
             current_pos = robot._robot_ik_controller.eef_pose[:3,3]
@@ -1001,7 +1001,6 @@ def run_scripted_grasp_sequence(robot):
         target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
         target_pos = np.array([0.135, -0.354, 0.15], dtype=np.float64)
         # Translate to take photo
-        total_photo_steps = 25
         for i in range(total_photo_steps):
             current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
             current_pos = robot._robot_ik_controller.eef_pose[:3,3]
@@ -1019,6 +1018,16 @@ def run_scripted_grasp_sequence(robot):
                     wait_times=100,
                     joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                 )
+        # Fine adjustment to ensure we are back to the initial pose
+        for _ in range(5):
+            robot._robot_ik_controller.control(
+                    target_pos=target_pos,
+                    target_rot=target_rot,
+                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                    wait_times=100,
+                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+                )
+
         # Taking Photo
         print("Taking auxiliary ZED stereo photo...")
         auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
@@ -1031,7 +1040,6 @@ def run_scripted_grasp_sequence(robot):
             f"camera={auxiliary_camera_name} rgb={robot._last_auxiliary_left_rgb.shape} "
             f"depth={robot._last_auxiliary_depth.shape}"
         )
-        total_photo_steps = 25
         # Lift the gripper up
         target_pos = np.array([0.135, -0.354, 0.35], dtype=np.float64)
         for i in range(total_photo_steps):
@@ -1070,6 +1078,16 @@ def run_scripted_grasp_sequence(robot):
                     wait_times=100,
                     joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                 )
+        # Fine adjustment to ensure we are back to the initial pose
+        for _ in range(5):
+            robot._robot_ik_controller.control(
+                    target_pos=init_pos,
+                    target_rot=init_rot,
+                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                    wait_times=100,
+                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+                )
+
     record["init_socket_pcd"] = robot._initial_wrist_points_world_colored
     init_socket_pcd = np.asarray(record["init_socket_pcd"], dtype=np.float32)
     init_points = init_socket_pcd[:, :3].copy()
@@ -1107,7 +1125,6 @@ def run_scripted_grasp_sequence(robot):
     Image.fromarray(rgb_crop_np).save(f"{output_dir}/initial_socket_rgb_crop.png")
     Image.fromarray(depth_normalized).save(f"{output_dir}/initial_socket_depth.png")
     Image.fromarray(depth_crop_normalized).save(f"{output_dir}/initial_socket_depth_crop.png")
-    import pdb;pdb.set_trace()
     return record
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
