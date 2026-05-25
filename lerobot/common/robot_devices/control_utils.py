@@ -663,10 +663,88 @@ def command_gripper(robot, action, label, ticks=5, sleep_s=0.2):
         time.sleep(sleep_s)
 
 
+WRIST_CAM_TO_GRIPPER = np.array(
+    [
+        [-0.00768086, -0.94557934, -0.32530096, 0.07294499],
+        [0.99995759, -0.00891583, 0.00230583, -0.03177615],
+        [-0.00508067, -0.32526946, 0.94560772, -0.08727812],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float64,
+)
+
+
+def visualize_world_and_wrist_camera_frames(robot) -> None:
+    """Show world and wrist-camera frames in an interactive Open3D window."""
+    import open3d as o3d
+
+    eef_pose = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64).reshape(4, 4)
+    if hasattr(robot, "_wrist_camera_extrinsics"):
+        world_from_cam = np.asarray(robot._wrist_camera_extrinsics(eef_pose), dtype=np.float64).reshape(4, 4)
+    else:
+        world_from_cam = eef_pose @ WRIST_CAM_TO_GRIPPER
+
+    print("[script] Opening interactive frame visualizer. Close the window to continue.")
+    print("[script] Open3D axis colors: +X = red, +Y = green, +Z = blue.")
+    print("[script] Large frame at origin is world; smaller frame/frustum is cam_wrist.")
+    print("[script] T_world_cam_wrist:\n", np.array2string(world_from_cam, precision=6, suppress_small=True))
+    print(
+        "[script] cam_wrist axes in world frame: "
+        f"x={np.round(world_from_cam[:3, 0], 6).tolist()} "
+        f"y={np.round(world_from_cam[:3, 1], 6).tolist()} "
+        f"z={np.round(world_from_cam[:3, 2], 6).tolist()}"
+    )
+
+    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.12, origin=[0.0, 0.0, 0.0])
+    camera_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.07, origin=[0.0, 0.0, 0.0])
+    camera_frame.transform(world_from_cam)
+
+    frustum_cam = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [-0.04, -0.03, 0.08],
+            [0.04, -0.03, 0.08],
+            [0.04, 0.03, 0.08],
+            [-0.04, 0.03, 0.08],
+        ],
+        dtype=np.float64,
+    )
+    frustum_world = transform_points(frustum_cam.astype(np.float32), world_from_cam).astype(np.float64)
+    frustum = o3d.geometry.LineSet(
+        points=o3d.utility.Vector3dVector(frustum_world),
+        lines=o3d.utility.Vector2iVector(
+            np.array(
+                [
+                    [0, 1],
+                    [0, 2],
+                    [0, 3],
+                    [0, 4],
+                    [1, 2],
+                    [2, 3],
+                    [3, 4],
+                    [4, 1],
+                ],
+                dtype=np.int32,
+            )
+        ),
+    )
+    frustum.colors = o3d.utility.Vector3dVector(np.tile(np.array([[1.0, 0.85, 0.0]]), (8, 1)))
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="World frame and cam_wrist frame")
+    vis.add_geometry(world_frame)
+    vis.add_geometry(camera_frame)
+    vis.add_geometry(frustum)
+    vis.get_render_option().background_color = np.array([0.05, 0.05, 0.05])
+    vis.run()
+    vis.destroy_window()
+
+
 
 
 def run_scripted_grasp_sequence(robot):
-    
+    # visualize_world_and_wrist_camera_frames(robot)
+    # exit(0)
     # return
     home_joints = np.array(
         [-0.05045543, -0.07240624, -0.03830516, -2.48442205, -0.05757582, 2.33608194, 0.73499261],
@@ -756,52 +834,54 @@ def run_scripted_grasp_sequence(robot):
     aligned_quat_xyzw = R.from_matrix(aligned_rot).as_quat()
     ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
     target_rot = ctrl_tgt_quat_xyzw.as_matrix()
-    for i in range(50):
-        current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-        current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-        # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-        next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
-        next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-            current_rot,
-            target_rot,
-            max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
-        )
-        robot._robot_ik_controller.control(
-                target_pos=next_tgt_pos,
-                target_rot=next_tgt_rot,
-                grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                wait_times=100,
-                joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+    skip_initialization = True
+    if not skip_initialization:
+        for i in range(50):
+            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+            next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
+            next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+                current_rot,
+                target_rot,
+                max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
             )
-    print("[script] Rendering initial wrist point cloud in world frame...")
-    wrist_camera = robot.cameras["cam_wrist"]
-    wrist_images = read_zed_stereo_rgb(wrist_camera)
-    wrist_depth = compute_foundation_stereo_depth(wrist_images, wrist_camera)
-    wrist_k, _ = get_zed_intrinsics_and_baseline(wrist_camera)
-    wrist_points_cam, wrist_colors = depth_rgb_to_camera_point_cloud(
-        wrist_depth,
-        wrist_images["left"],
-        wrist_k,
-        stride=2,
-        max_depth_m=0.5,
-    )
-    cam_to_gripper = np.array(
-        [
-            [-0.00768086, -0.94557934, -0.32530096, 0.07294499],
-            [0.99995759, -0.00891583, 0.00230583, -0.03177615],
-            [-0.00508067, -0.32526946, 0.94560772, -0.08727812],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-        dtype=np.float64,
-    )
-    world_from_gripper = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64)
-    world_from_cam = world_from_gripper @ cam_to_gripper
-    wrist_points_world = transform_points(wrist_points_cam, world_from_cam)
-    world_z_threshold = 0.06
-    keep = wrist_points_world[:, 2] <= world_z_threshold
-    wrist_points_world = wrist_points_world[keep]
-    wrist_colors = wrist_colors[keep]
-    robot._initial_wrist_points_world = wrist_points_world.astype(np.float32)
+            robot._robot_ik_controller.control(
+                    target_pos=next_tgt_pos,
+                    target_rot=next_tgt_rot,
+                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                    wait_times=100,
+                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+                )
+        print("[script] Rendering initial wrist point cloud in world frame...")
+        wrist_camera = robot.cameras["cam_wrist"]
+        wrist_images = read_zed_stereo_rgb(wrist_camera)
+        wrist_depth = compute_foundation_stereo_depth(wrist_images, wrist_camera)
+        wrist_k, _ = get_zed_intrinsics_and_baseline(wrist_camera)
+        wrist_points_cam, wrist_colors = depth_rgb_to_camera_point_cloud(
+            wrist_depth,
+            wrist_images["left"],
+            wrist_k,
+            stride=2,
+            max_depth_m=0.5,
+        )
+        cam_to_gripper = np.array(
+            [
+                [-0.00768086, -0.94557934, -0.32530096, 0.07294499],
+                [0.99995759, -0.00891583, 0.00230583, -0.03177615],
+                [-0.00508067, -0.32526946, 0.94560772, -0.08727812],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        world_from_gripper = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64)
+        world_from_cam = world_from_gripper @ cam_to_gripper
+        wrist_points_world = transform_points(wrist_points_cam, world_from_cam)
+        world_z_threshold = 0.06
+        keep = wrist_points_world[:, 2] <= world_z_threshold
+        wrist_points_world = wrist_points_world[keep]
+        wrist_colors = wrist_colors[keep]
+        robot._initial_wrist_points_world = wrist_points_world.astype(np.float32)
     # visualize_open3d_point_cloud(
     #     wrist_points_world,
     #     wrist_colors,
@@ -813,7 +893,7 @@ def run_scripted_grasp_sequence(robot):
     print("Initial Pose Achieved")
     time.sleep(3)
     target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-    target_pos = np.array([0.165, -0.3895, 0.35], dtype=np.float64)
+    target_pos = np.array([0.135, -0.354, 0.35], dtype=np.float64)
     # Translate to take photo
     total_photo_steps = 25
     for i in range(total_photo_steps):
@@ -834,7 +914,7 @@ def run_scripted_grasp_sequence(robot):
                 joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
             )
     target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-    target_pos = np.array([0.135, -0.3895, 0.15], dtype=np.float64)
+    target_pos = np.array([0.135, -0.354, 0.15], dtype=np.float64)
     # Translate to take photo
     total_photo_steps = 25
     for i in range(total_photo_steps):
@@ -884,8 +964,6 @@ def run_scripted_grasp_sequence(robot):
                 wait_times=100,
                 joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
             )
-    target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-    target_pos = np.array([0.135, -0.3895, 0.15], dtype=np.float64)
     target_pos = init_pos
     target_rot = init_rot
     for i in range(total_photo_steps):

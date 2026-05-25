@@ -142,8 +142,9 @@ class ScriptRobot(DroidRobot):
             },
             "observation.eef_internal_forces": {
                 "dtype": "float32",
-                "shape": (6,),
-                "names": ["fx", "fy", "fz", "tx", "ty", "tz"],
+                "shape": (3,),
+                "names": ["isaacgym_cam_wrist_fx", "isaacgym_cam_wrist_fy", "isaacgym_cam_wrist_fz"],
+                "info": "Linear EEF internal force mapped into the wrist camera frame with IsaacGym x/z axis convention",
             },
             "observation.eef_pose": {
                 "dtype": "float32",
@@ -168,6 +169,28 @@ class ScriptRobot(DroidRobot):
     def _wrist_camera_extrinsics(self, eef_pose: np.ndarray) -> np.ndarray:
         world_from_gripper = np.asarray(eef_pose, dtype=np.float32).reshape(4, 4)
         return (world_from_gripper @ WRIST_CAM_TO_GRIPPER).astype(np.float32)
+
+    def _world_vector_to_wrist_camera(
+        self,
+        vector_world: np.ndarray,
+        wrist_extrinsics: np.ndarray,
+    ) -> np.ndarray:
+        world_from_cam = np.asarray(wrist_extrinsics, dtype=np.float32).reshape(4, 4)
+        vector_cam = world_from_cam[:3, :3].T @ np.asarray(vector_world, dtype=np.float32).reshape(3)
+        return vector_cam.astype(np.float32)
+
+    def _wrist_camera_vector_to_isaacgym(self, vector_cam_wrist: np.ndarray) -> np.ndarray:
+        vector_isaacgym = np.asarray(vector_cam_wrist, dtype=np.float32).reshape(3).copy()
+        vector_isaacgym[[0, 2]] *= -1.0
+        return vector_isaacgym
+
+    def _world_vector_to_isaacgym_wrist_camera(
+        self,
+        vector_world: np.ndarray,
+        wrist_extrinsics: np.ndarray,
+    ) -> np.ndarray:
+        vector_cam_wrist = self._world_vector_to_wrist_camera(vector_world, wrist_extrinsics)
+        return self._wrist_camera_vector_to_isaacgym(vector_cam_wrist)
 
     def _find_robotiq_port_without_gello(self) -> str:
         import minimalmodbus as mm
@@ -205,18 +228,37 @@ class ScriptRobot(DroidRobot):
         print("Activating Robotiq gripper (will fully open/close during activation)...")
         self.robotiq_gripper.activate()
         print("Robotiq gripper activated.")
-    def _get_eef_internal_forces(self) -> torch.Tensor:
+    def _get_eef_internal_forces(
+        self,
+        eef_pose: np.ndarray,
+        wrist_extrinsics: np.ndarray,
+    ) -> torch.Tensor:
         if self.robot_interface.state_buffer_size == 0:
-            return torch.zeros(6, dtype=torch.float32)
+            return torch.zeros(3, dtype=torch.float32)
 
         state = self.robot_interface._state_buffer[-1]
-        for attr in ("K_F_ext_hat_K", "O_F_ext_hat_K"):
-            if hasattr(state, attr):
-                wrench = np.asarray(getattr(state, attr), dtype=np.float32).reshape(-1)
-                if wrench.size >= 6:
-                    return torch.from_numpy(wrench[:6].copy())
+        if hasattr(state, "O_F_ext_hat_K"):
+            wrench = np.asarray(state.O_F_ext_hat_K, dtype=np.float32).reshape(-1)
+            if wrench.size >= 3:
+                force_world = wrench[:3]
+                force_isaacgym_cam_wrist = self._world_vector_to_isaacgym_wrist_camera(
+                    force_world,
+                    wrist_extrinsics,
+                )
+                return torch.from_numpy(force_isaacgym_cam_wrist)
 
-        return torch.zeros(6, dtype=torch.float32)
+        if hasattr(state, "K_F_ext_hat_K"):
+            wrench = np.asarray(state.K_F_ext_hat_K, dtype=np.float32).reshape(-1)
+            if wrench.size >= 3:
+                world_from_k = np.asarray(eef_pose, dtype=np.float32).reshape(4, 4)[:3, :3]
+                force_world = world_from_k @ wrench[:3]
+                force_isaacgym_cam_wrist = self._world_vector_to_isaacgym_wrist_camera(
+                    force_world,
+                    wrist_extrinsics,
+                )
+                return torch.from_numpy(force_isaacgym_cam_wrist)
+
+        return torch.zeros(3, dtype=torch.float32)
 
     def connect(self):
         if self.is_connected:
@@ -630,6 +672,7 @@ class ScriptRobot(DroidRobot):
         target_pos = current_pos.copy()
         target_pos[:2] = target_pos[:2] + insert_action[:2] * 5
         target_pos[2] = self._teleop_hold_z + 0.0005 # This is for compensating gravity
+        target_pos[2] += insert_action[2]
         target_rot, _, _, _ = self._interpolate_rotation_matrix(current_rot, aligned_rot)
         return target_pos, target_rot, insert_action
         
@@ -642,7 +685,10 @@ class ScriptRobot(DroidRobot):
         before_fread_t = time.perf_counter()
         pre_action_eef_pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float32).copy()
         pre_action_wrist_extrinsics = self._wrist_camera_extrinsics(pre_action_eef_pose)
-        pre_action_eef_internal_forces = self._get_eef_internal_forces()
+        pre_action_eef_internal_forces = self._get_eef_internal_forces(
+            pre_action_eef_pose,
+            pre_action_wrist_extrinsics,
+        )
         pre_action_wrist_images = None
         pre_action_wrist_depth = None
         if record_data and "cam_wrist" in self.cameras:
@@ -668,7 +714,10 @@ class ScriptRobot(DroidRobot):
         )
         target_pos, target_rot, insert_action = self._scripted_action(insert_meta_data)
         target_rot_for_action = torch.as_tensor(target_rot, dtype=torch.float32)
-        action_pos = torch.as_tensor(insert_action, dtype=torch.float32)
+        action_pos = torch.as_tensor(
+            self._world_vector_to_isaacgym_wrist_camera(insert_action, pre_action_wrist_extrinsics),
+            dtype=torch.float32,
+        )
         relative_rot = target_rot_for_action @ current_rot_for_action.T
         relative_rot6d = transforms.matrix_to_rotation_6d(relative_rot[None]).squeeze(0)
         action9d = torch.cat([action_pos, relative_rot6d], dim=-1)
