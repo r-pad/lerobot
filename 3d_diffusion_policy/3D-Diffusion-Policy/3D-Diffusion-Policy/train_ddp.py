@@ -69,7 +69,8 @@ class TrainDP3Workspace:
         if cfg.load_policy_path is not None:
             # payload = torch.load(cfg.load_policy_path.open('rb'), pickle_module=dill, map_location='cpu')
             # self.model.load_state_dict(payload['state_dicts']['model'])
-            self.load_policy(cfg.load_policy_path)
+            if os.path.exists(cfg.load_policy_path):
+                self.load_policy(cfg.load_policy_path)
             
         self.model.train()
 

@@ -40,12 +40,16 @@ def detect_aruco_markers(ir_frame, debug=False):
     # gray = cv2.convertScaleAbs(ir_frame)
     
     # Load the predefined dictionary
-    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_ARUCO_ORIGINAL)
-    parameters =  cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(dictionary, parameters)
-    
-    # Detect markers
-    corners, ids, rejected = detector.detectMarkers(gray)   # top-left, top-right, bottom-right, and bottom-left corners
+    # dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_ARUCO_ORIGINAL)
+    # parameters =  cv2.aruco.DetectorParameters()
+    # detector = cv2.aruco.ArucoDetector(dictionary, parameters)
+    # # Detect markers
+    # corners, ids, rejected = detector.detectMarkers(gray)   # top-left, top-right, bottom-right, and bottom-left corners
+
+
+    aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_ARUCO_ORIGINAL)
+    parameters = cv2.aruco.DetectorParameters_create()
+    corners, ids, rejected = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
 
     # Visualize markers
     vis_image = cv2.aruco.drawDetectedMarkers(gray.copy(), corners, ids)
