@@ -834,7 +834,7 @@ def run_scripted_grasp_sequence(robot):
     aligned_quat_xyzw = R.from_matrix(aligned_rot).as_quat()
     ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
     target_rot = ctrl_tgt_quat_xyzw.as_matrix()
-    skip_initialization = True
+    skip_initialization = False
     if not skip_initialization:
         for i in range(50):
             current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
@@ -947,6 +947,8 @@ def run_scripted_grasp_sequence(robot):
         f"depth={robot._last_auxiliary_depth.shape}"
     )
     total_photo_steps = 25
+    # Lift the gripper up
+    target_pos = np.array([0.135, -0.354, 0.35], dtype=np.float64)
     for i in range(total_photo_steps):
         current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
         current_pos = robot._robot_ik_controller.eef_pose[:3,3]

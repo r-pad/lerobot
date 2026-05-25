@@ -179,6 +179,15 @@ class ScriptRobot(DroidRobot):
         vector_cam = world_from_cam[:3, :3].T @ np.asarray(vector_world, dtype=np.float32).reshape(3)
         return vector_cam.astype(np.float32)
 
+    def _wrist_camera_vector_to_world(
+        self,
+        vector_cam_wrist: np.ndarray,
+        wrist_extrinsics: np.ndarray,
+    ) -> np.ndarray:
+        world_from_cam = np.asarray(wrist_extrinsics, dtype=np.float32).reshape(4, 4)
+        vector_world = world_from_cam[:3, :3] @ np.asarray(vector_cam_wrist, dtype=np.float32).reshape(3)
+        return vector_world.astype(np.float32)
+
     def _wrist_camera_vector_to_isaacgym(self, vector_cam_wrist: np.ndarray) -> np.ndarray:
         vector_isaacgym = np.asarray(vector_cam_wrist, dtype=np.float32).reshape(3).copy()
         vector_isaacgym[[0, 2]] *= -1.0
@@ -669,11 +678,14 @@ class ScriptRobot(DroidRobot):
         aligned_rot = insert_meta_data["aligned_rot"]
         delta_pos = aligned_pos - current_pos
         insert_action = self.compute_insert_action(torch.as_tensor(delta_pos, dtype=torch.float32)).numpy()
+        # wrist_extrinsics = self._wrist_camera_extrinsics(np.asarray(current_pose, dtype=np.float32))
+        # insert_action_cam_wrist = np.array([0., -0.005, 0.0], dtype=np.float32)
+        # insert_action = self._wrist_camera_vector_to_world(insert_action_cam_wrist, wrist_extrinsics)
         target_pos = current_pos.copy()
         target_pos[:2] = target_pos[:2] + insert_action[:2] * 5
         target_pos[2] = self._teleop_hold_z + 0.0005 # This is for compensating gravity
         target_pos[2] += insert_action[2]
-        target_rot, _, _, _ = self._interpolate_rotation_matrix(current_rot, aligned_rot)
+        target_rot = current_rot.copy()
         return target_pos, target_rot, insert_action
         
 
