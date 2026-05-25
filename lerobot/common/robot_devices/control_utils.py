@@ -1090,18 +1090,21 @@ def run_scripted_grasp_sequence(robot):
     rgb_crop, depth_crop = crop_rgb_depth_foreground_center(
         rgb_img,
         depth_img,
-        crop_h=480,
-        crop_w=640,
+        crop_h=640,
+        crop_w=480,
     )
     output_dir = "/home/yinongh/automate/lerobot/outputs"
     os.makedirs(output_dir, exist_ok=True)
     rgb_np = (np.clip(rgb_img, 0.0, 1.0) * 255).astype(np.uint8)
+    
+    rgb_crop = np.rot90(rgb_crop, k=1)
+    depth_crop = np.rot90(depth_crop, k=1)
     rgb_crop_np = (np.clip(rgb_crop, 0.0, 1.0) * 255).astype(np.uint8)
-    Image.fromarray(rgb_np).save(f"{output_dir}/initial_socket_rgb.png")
-    Image.fromarray(rgb_crop_np).save(f"{output_dir}/initial_socket_rgb_crop.png")
-
     depth_normalized = (depth_img / max(float(depth_img.max()), 1e-8) * 255).astype(np.uint8)
     depth_crop_normalized = (depth_crop / max(float(depth_crop.max()), 1e-8) * 255).astype(np.uint8)
+    
+    Image.fromarray(rgb_np).save(f"{output_dir}/initial_socket_rgb.png")
+    Image.fromarray(rgb_crop_np).save(f"{output_dir}/initial_socket_rgb_crop.png")
     Image.fromarray(depth_normalized).save(f"{output_dir}/initial_socket_depth.png")
     Image.fromarray(depth_crop_normalized).save(f"{output_dir}/initial_socket_depth_crop.png")
     import pdb;pdb.set_trace()
