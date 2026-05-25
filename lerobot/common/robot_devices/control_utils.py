@@ -39,7 +39,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
-from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
+from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer, ALOHA_REST_STATE
 from lerobot.scripts.yufei_policy_utils import compute_pcd, get_gripper_4_points_from_sriram_data, \
     get_4_points_from_gripper_pos_orient, infer_multitask_high_level_model, low_level_policy_infer, \
     get_aloha_future_eef_poses_from_delta_actions, get_aloha_future_eef_poses_from_pi05_delta_actions, \
@@ -302,7 +302,12 @@ def control_loop(
                 #### our policy uses this
                 action = torch.tensor([90.0000, 192.8320, 193.1836, 176.3965, 176.5723,   6.1523,  19.3359,
                     -3.5156,  -4.2650,  90.9668, 153.8965, 154.5117, 109.5996, 109.9512,
-                    -4.6582,  94.9219,  -3.4277,  80]).float()                
+                    -4.6582,  94.9219,  -3.4277,  80]).float()    
+
+                ### collect calibration data
+                # action = torch.tensor([91.3184,  193.0957,  193.4473,  157.2363,  157.4121,    5.9766,
+                #     38.4961,   -9.4043,   46.1887,   87.5391,  134.3848,  134.2969,
+                #     141.7676,  141.8555, -211.0254,   18.6328,  159.5215,    8.6773]).float()            
 
                 ### default reset pose
         #         action = torch.tensor([ 92.1094, 192.6562, 192.7441, 150.5566, 150.7324,   1.0547,  37.6172,
@@ -314,13 +319,7 @@ def control_loop(
         #   4.8340,  75.5898,  92.0215, 198.5449, 198.9844, 174.0234, 174.2871,
         #  -7.0312,  22.2363,   5.9766,  99.0733])
 
-        
-        #         # for i in range(5):
-
-                    # time.sleep(0.5)
                 robot.send_action(action.squeeze(0))
-                # robot.send_action(debug_action.squeeze(0))
-                # pass
                 
 
             if policy is not None and type(policy) != dict:
@@ -431,6 +430,7 @@ def control_loop(
 
                 if len(action_queue) == 0:
                     start_infer = time.time()
+                    use_6d_orientation = False
                     openpi_obs = lerobot_observation_to_openpi_dict(
                         observation,
                         prompt=policy["prompt"],
@@ -439,6 +439,7 @@ def control_loop(
                             "base_image_key", "observation.images.cam_azure_kinect_front.color"
                         ),
                         wrist_image_key=policy.get("wrist_image_key", "observation.images.cam_wrist"),
+                        use_6d_orientation=use_6d_orientation,
                     )
                     response = client.infer(openpi_obs)
                     # import pdb; pdb.set_trace()
@@ -456,36 +457,52 @@ def control_loop(
                     replan_steps = int(policy.get("replan_steps", 7))
                     chunk = action_chunk[:replan_steps]
 
-                    right_eef_pose = observation["observation.right_eef_pose"]
-                    _p, _r6, _gw, eef_pos_robot_base, eef_rot_matrix_robot_base, _r6b, eef_gripper_width_franka = (
-                        get_gripper_4_points_from_sriram_data(right_eef_pose)
-                    )
-                    aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths, _rb_traj = (
-                        get_aloha_future_eef_poses_from_pi05_delta_actions(
-                            chunk,
-                            eef_pos_robot_base,
-                            eef_rot_matrix_robot_base,
-                            eef_gripper_width_franka,
-                            gripper_delta_scale=float(policy.get("gripper_delta_scale", 1.0)),
+                    ### use 6d orientation
+                    # import pdb; pdb.set_trace()
+                    if use_6d_orientation:
+                        right_eef_pose = observation["observation.right_eef_pose"]
+                        _p, _r6, _gw, eef_pos_robot_base, eef_rot_matrix_robot_base, _r6b, eef_gripper_width_franka = (
+                            get_gripper_4_points_from_sriram_data(right_eef_pose)
                         )
-                    )
-                    aloha_joint_actions = []
-                    all_aloha_eef_poses = []
-                    for pos, orient_6d, gripper_width in zip(
-                        aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths
-                    ):
-                        eef_pose = [*orient_6d, *pos, gripper_width]
-                        all_aloha_eef_poses.append(torch.tensor(eef_pose).float())
+                        aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths, _rb_traj = (
+                            get_aloha_future_eef_poses_from_pi05_delta_actions(
+                                chunk,
+                                eef_pos_robot_base,
+                                eef_rot_matrix_robot_base,
+                                eef_gripper_width_franka,
+                                gripper_delta_scale=float(policy.get("gripper_delta_scale", 1.0)),
+                            )
+                        )
+                        aloha_joint_actions = []
+                        all_aloha_eef_poses = []
+                        for pos, orient_6d, gripper_width in zip(
+                            aloha_world_eef_pos, aloha_world_eef_orient_6d, aloha_gripper_widths
+                        ):
+                            eef_pose = [*orient_6d, *pos, gripper_width]
+                            all_aloha_eef_poses.append(torch.tensor(eef_pose).float())
 
-                    state = observation["observation.state"]
-                    initialization_state = state
-                    for pose in all_aloha_eef_poses:
-                        solved_joint = robot_adapter.transform_action(pose, initialization_state)
-                        aloha_joint_actions.append(solved_joint)
-                        initialization_state = solved_joint
+                        state = observation["observation.state"]
+                        initialization_state = state
+                        for pose in all_aloha_eef_poses:
+                            solved_joint = robot_adapter.transform_action(pose, initialization_state)
+                            aloha_joint_actions.append(solved_joint)
+                            initialization_state = solved_joint
+                        
+                        # import pdb; pdb.set_trace()
+                        for aja in aloha_joint_actions:
+                            action_queue.append(aja)
+                    else:
+                        base_joints = observation["observation.state"]
 
-                    for aja in aloha_joint_actions:
-                        action_queue.append(aja)
+                        for act in chunk:
+                            # import pdb; pdb.set_trace()   
+                            new_joints = torch.zeros(18).float()
+                            # new_joints[:9] = base_joints[:9]
+                            new_joints[:9] = ALOHA_REST_STATE.flatten().float()[:9]
+                            new_joints[9:17] = base_joints[9:17] + torch.from_numpy(act[:8]).float()
+                            new_joints[17] = act[8]
+                            action_queue.append(new_joints)
+                            base_joints = new_joints
 
                     cprint(f"openpi infer+ik time: {time.time() - start_infer:.3f}s", "blue")
 
@@ -528,11 +545,18 @@ def control_loop(
                     all_cam_color_images = None
                     action = None
                     if policy.get("mode", "fine-tuning") == 'fine-tuning':
-                        depth_keys = ["observation.images.cam_azure_kinect_front.depth", "observation.images.cam_azure_kinect_back.depth"]
+                        # depth_keys = ["observation.images.cam_azure_kinect_front.depth", "observation.images.cam_azure_kinect_back.depth"]
+                        depth_keys = ["observation.images.cam_azure_kinect_front.transformed_depth", "observation.images.cam_azure_kinect_back.transformed_depth"]
                         # import pdb; pdb.set_trace()
                         all_cam_depth_images = []
                         for depth_key in depth_keys:
                             depth = Image.fromarray(observation[depth_key].numpy()[:, :, 0])
+                            
+                            # depth = np.asarray(depth)
+                            # depth_transformed = Image.fromarray(observation["observation.images.cam_azure_kinect_front.transformed_depth"].numpy()[:, :, 0])
+                            # depth_transformed = np.asarray(depth_transformed)
+                            # import pdb; pdb.set_trace() 
+
                             if policy['high_level_args']['general'].get("use_rgb", False) or policy['high_level_args']['general'].get("use_dino", False):         
                                 depth = np.asarray(depth_preprocess(depth))
                             else:
@@ -563,7 +587,7 @@ def control_loop(
 
                     
                     elif policy.get("mode", "fine-tuning") == 'zero-shot':
-                        depth_keys = ["observation.images.cam_azure_kinect_front.depth", "observation.images.cam_azure_kinect_back.depth"]
+                        depth_keys = ["observation.images.cam_azure_kinect_front.transformed_depth", "observation.images.cam_azure_kinect_back.transformed_depth"]
                         # import pdb; pdb.set_trace()
                         all_cam_depth_images = []
                         for depth_key in depth_keys:
@@ -689,6 +713,7 @@ def control_loop(
                         
 
                         ### 3d plot the scene pcd
+                        # if True:
                         if False:
                             fig = plt.figure(figsize=(10, 10))
 
@@ -723,10 +748,10 @@ def control_loop(
                             # ax2.plot(aloha_world_eef_pos[:,0], aloha_world_eef_pos[:,1], aloha_world_eef_pos[:,2], color='blue', linewidth=4)
                             ### plot the coordinate frame of the current eef
 
-                            debug_queue[-1].update({
-                                "commanded_aloha_world_eef_pos": aloha_world_eef_pos,
-                                }
-                            )
+                            # debug_queue[-1].update({
+                            #     "commanded_aloha_world_eef_pos": aloha_world_eef_pos,
+                            #     }
+                            # )
 
                             # for idx in range(4):
                             #     aloha_eef_pos_current = aloha_world_eef_pos[idx]

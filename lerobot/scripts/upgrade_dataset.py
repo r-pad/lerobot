@@ -11,7 +11,7 @@ from tqdm import tqdm
 import numpy as np
 from lerobot.common.utils.aloha_utils import render_aloha_gripper_pcd, retarget_aloha_gripper_pcd
 from lerobot.common.policies.high_level.classify_utils import TASK_SPEC
-from PIL import Image
+from PIL import Image, ImageDraw
 from typing import List, Dict
 import argparse
 import os
@@ -21,7 +21,8 @@ import json
 from typing import Optional
 import av
 from pathlib import Path
-
+import matplotlib.pyplot as plt
+from termcolor import cprint
 
 def load_calibrations(calibration_config_path: str) -> Dict[str, Dict[str, np.ndarray]]:
     """
@@ -72,35 +73,138 @@ def read_depth_video(video_path):
     return frames
 
 def extract_events_with_gripper_pos(
-    joint_states, close_thresh=15, open_thresh=25
+    joint_states,
+    close_thresh: float = 15,
+    open_thresh: float = 25,
+    close_thresholds: list[float] | None = None,
+    open_thresholds: list[float] | None = None,
 ):
     """
-    Extract all gripper open/close events dynamically.
-    Each time the gripper closes and then opens constitutes one goal.
-    The last frame is also considered a goal.
-    Returns list of goal frame indices.
+    Extract gripper open/close event frame indices as goals.
+
+    Each detected transition (close or open) appends a goal index. The last frame
+    is always included as a final goal.
+
+    Thresholds can be a single (close, open) pair or a list of pairs applied
+    sequentially: the first transition uses pair 0, the second uses pair 1, etc.
+    This supports different gripper widths when grasping different objects
+    (e.g. mug vs plate vs reset).
     """
     gripper_pos = joint_states[:, 17]
     goal_indices = []
 
-    # Track gripper state changes
-    is_closed = False
+    if close_thresholds is not None or open_thresholds is not None:
+        if close_thresholds is None or open_thresholds is None:
+            raise ValueError("close_thresholds and open_thresholds must both be provided.")
+        if len(close_thresholds) != len(open_thresholds):
+            raise ValueError(
+                f"close_thresholds ({len(close_thresholds)}) and open_thresholds "
+                f"({len(open_thresholds)}) must have the same length."
+            )
+        threshold_pairs = list(zip(close_thresholds, open_thresholds))
+    else:
+        threshold_pairs = [(close_thresh, open_thresh)]
 
+    is_closed = False
     for i in range(len(gripper_pos)):
-        # Gripper closes (transition from open to closed)
-        if not is_closed and gripper_pos[i] < close_thresh:
+        pair_idx = min(len(goal_indices), len(threshold_pairs) - 1)
+        close_t, open_t = threshold_pairs[pair_idx]
+
+        if not is_closed and gripper_pos[i] < close_t:
             is_closed = True
             goal_indices.append(i)
-        # Gripper opens (transition from closed to open)
-        elif is_closed and gripper_pos[i] > open_thresh:
+        elif is_closed and gripper_pos[i] > open_t:
             is_closed = False
             goal_indices.append(i)
 
-    # Always add the last frame as a goal
     if len(goal_indices) == 0 or goal_indices[-1] != len(gripper_pos) - 1:
         goal_indices.append(len(gripper_pos) - 1)
 
     return goal_indices
+
+
+def _visualize_goal_rgb_images(
+    target_dataset,
+    goal_indices: list[int],
+    camera_names: list[str],
+    episode_idx: int,
+    gripper_pos: Optional[np.ndarray] = None,
+) -> None:
+    """Save goal RGB frames under {repo_id}_goal_images/ and show an interactive matplotlib window."""
+    rgb_keys = []
+    for cam_name in camera_names:
+        key = f"observation.images.{cam_name}.color"
+        if key in target_dataset.episode_buffer and len(target_dataset.episode_buffer[key]) > 0:
+            rgb_keys.append((cam_name, key))
+    wrist_key = "observation.images.cam_wrist"
+    if wrist_key in target_dataset.episode_buffer and len(target_dataset.episode_buffer[wrist_key]) > 0:
+        rgb_keys.append(("cam_wrist", wrist_key))
+    if not rgb_keys:
+        print(f"No RGB images in episode buffer for episode {episode_idx}, skipping visualization.")
+        return
+
+    safe_repo_id = target_dataset.repo_id.replace("/", "_")
+    output_dir = Path(f"/data/yufei/lerobot/data/{safe_repo_id}_goal_images") / f"episode_{episode_idx:06d}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    mosaic_rows = []
+
+    for goal_i, goal_idx in enumerate(goal_indices):
+        if goal_idx >= len(target_dataset.episode_buffer[rgb_keys[0][1]]):
+            continue
+
+        row_images = []
+        for cam_label, key in rgb_keys:
+            img = Image.open(target_dataset.episode_buffer[key][goal_idx]).convert("RGB")
+            draw = ImageDraw.Draw(img)
+            label = f"goal {goal_i} @ frame {goal_idx} | {cam_label}"
+            if gripper_pos is not None and goal_idx < len(gripper_pos):
+                label += f" | gripper={gripper_pos[goal_idx]:.1f}"
+            draw.rectangle((0, 0, min(img.width, 900), 30), fill=(0, 0, 0))
+            draw.text((4, 6), label, fill=(255, 255, 255))
+            row_images.append(img)
+            img.save(output_dir / f"goal{goal_i:02d}_frame{goal_idx:06d}_{cam_label}.png")
+
+        row_width = sum(im.width for im in row_images)
+        row_height = max(im.height for im in row_images)
+        row_canvas = Image.new("RGB", (row_width, row_height))
+        x_offset = 0
+        for im in row_images:
+            row_canvas.paste(im, (x_offset, 0))
+            x_offset += im.width
+        mosaic_rows.append(row_canvas)
+
+    if not mosaic_rows:
+        return
+
+    mosaic_width = max(row.width for row in mosaic_rows)
+    mosaic_height = sum(row.height for row in mosaic_rows)
+    mosaic = Image.new("RGB", (mosaic_width, mosaic_height))
+    y_offset = 0
+    for row in mosaic_rows:
+        mosaic.paste(row, (0, y_offset))
+        y_offset += row.height
+
+    mosaic_path = output_dir / "mosaic.png"
+    mosaic.save(mosaic_path)
+    with open(output_dir / "goal_indices.txt", "w") as f:
+        f.write("\n".join(str(i) for i in goal_indices))
+
+    title = f"Episode {episode_idx} | goals: {goal_indices}"
+    if gripper_pos is not None:
+        gripper_vals = [f"{gripper_pos[i]:.1f}" for i in goal_indices if i < len(gripper_pos)]
+        title += f"\ngripper @ goals: {gripper_vals}"
+
+    fig, ax = plt.subplots(figsize=(min(16, mosaic_width / 80), min(10, mosaic_height / 80)))
+    ax.imshow(mosaic)
+    ax.set_title(title, fontsize=10)
+    ax.axis("off")
+    plt.tight_layout()
+    fig.savefig(output_dir / "mosaic_labeled.png", dpi=150, bbox_inches="tight")
+    print(f"Goal RGB visualization saved to {output_dir}")
+    print("Close the matplotlib window to continue to the next episode.")
+    # plt.show(block=True)
+    # plt.close(fig)
+
 
 def prep_eef_pose(eef_pos, eef_rot, eef_artic):
     REAL_GRIPPER_MIN, REAL_GRIPPER_MAX = 0., 99.
@@ -298,8 +402,9 @@ def _process_frame_data(original_frame, source_dataset, expanded_features, sourc
 
 
 def _process_episode_goals(target_dataset, episode_length, new_features, humanize,
-                          episode_extras, phantomize, calibrations, width, height):
+                          episode_extras, phantomize, calibrations, width, height, episode_idx: int):
     """Process goal projections, event indices, and subgoals for an episode."""
+    cprint(f"Processing episode {episode_idx} with {len(target_dataset.episode_buffer['observation.state'])} frames", "green")
     if humanize or phantomize:
         # Use events from JSON for human data
         goal_indices = episode_extras['episode_events']['event_idxs']
@@ -312,10 +417,29 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
         elif phantomize:
             joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
     else:
+        cprint(f"Extracting goal indices for episode {episode_idx}", "green")
         joint_states = np.concatenate([target_dataset.episode_buffer['observation.state']])
-        close_thresh, open_thresh = 25, 30
-        goal_indices = extract_events_with_gripper_pos(
-            joint_states, close_thresh=close_thresh, open_thresh=open_thresh)
+        if len(args.close_threshold) == 1 and len(args.open_threshold) == 1:
+            goal_indices = extract_events_with_gripper_pos(
+                joint_states,
+                close_thresh=args.close_threshold[0],
+                open_thresh=args.open_threshold[0],
+            )
+        else:
+            goal_indices = extract_events_with_gripper_pos(
+                joint_states,
+                close_thresholds=args.close_threshold,
+                open_thresholds=args.open_threshold,
+            )
+
+    if args.visualize_goal_indices:
+        cprint(f"Visualizing goal indices for episode {episode_idx}", "green")
+        gripper_pos = None
+        if not humanize and not phantomize:
+            gripper_pos = joint_states[:, 17]
+        _visualize_goal_rgb_images(
+            target_dataset, goal_indices, list(calibrations.keys()), episode_idx, gripper_pos
+        )
 
     camera_names = list(calibrations.keys())
 
@@ -408,6 +532,7 @@ def upgrade_dataset(
 
     # Get image dimensions from first camera
     first_cam = camera_names[0]
+    # import pdb; pdb.set_trace()
     height, width, _ = source_dataset.features[f"observation.images.{first_cam}.color"]["shape"]
 
     # 2. Create expanded feature schema
@@ -471,7 +596,7 @@ def upgrade_dataset(
         # Process episode-level goals and events
         _process_episode_goals(
             target_dataset, episode_length, new_features, humanize,
-            episode_extras, phantomize, calibrations, width, height
+            episode_extras, phantomize, calibrations, width, height, episode_idx
         )
 
         # Save episode
@@ -507,7 +632,7 @@ if __name__ == "__main__":
                         help="Source dataset repository ID")
     parser.add_argument("--target_repo_id", type=str, default="sriramsk/fold_onesie_20250831_subsampled_heatmapGoal",
                         help="Target dataset repository ID")
-    parser.add_argument("--calibration_config", type=str, default="aloha_calibration/calibration_single.json",
+    parser.add_argument("--calibration_config", type=str, default="aloha_calibration/calibration_multiview.json",
                         help="Path to calibration JSON config file")
     parser.add_argument("--discard_episodes", type=int, nargs='*', default=[],
                         help="List of episode indices to discard")
@@ -524,6 +649,27 @@ if __name__ == "__main__":
                         help="Push upgraded dataset to HF Hub.")
     parser.add_argument("--remove_features", type=str, nargs='*', default=[],
                         help="Names of features to be removed")
+    parser.add_argument(
+        "--open_threshold",
+        type=float,
+        nargs="+",
+        default=[65],
+        help="Open gripper threshold(s). Pass one value for all goals, or one per goal "
+        "(e.g. 65 70 65 for 3 sequential close/open cycles).",
+    )
+    parser.add_argument(
+        "--close_threshold",
+        type=float,
+        nargs="+",
+        default=[52],
+        help="Close gripper threshold(s). Must match length of --open_threshold when multiple "
+        "values are given (e.g. 52 45 52 for mug grasp, plate grasp, reset).",
+    )
+    parser.add_argument(
+        "--visualize_goal_indices",
+        action="store_true",
+        help="Show interactive RGB view at goal indices and save copies to a temp directory",
+    )
     args = parser.parse_args()
 
     # Load calibrations

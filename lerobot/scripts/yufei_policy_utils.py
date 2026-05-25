@@ -415,17 +415,30 @@ def _load_camera_extrinsics(extrinsics_path):
 default_intrinsics = []
 default_extrinsics = []
 scaled_intrinsics = []
+# cameras = {
+#   "cam_azure_kinect_front": {
+#     "intrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000259921812.txt",
+#     # "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_v1_1020.txt"
+#     # "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_1208.txt"
+#     "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_20260121.txt"
+#   },
+#   "cam_azure_kinect_back": {
+#     "intrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000003493812.txt",
+#     "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_back_v1_1020.txt"
+#   }
+# }
+
+### after 0521 the front and back get got swapped.
 cameras = {
-  "cam_azure_kinect_front": {
-    "intrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000259921812.txt",
-    # "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_v1_1020.txt"
-    # "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_1208.txt"
-    "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_20260121.txt"
-  },
-  "cam_azure_kinect_back": {
-    "intrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000003493812.txt",
-    "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_back_v1_1020.txt"
-  }
+    "cam_azure_kinect_front": {
+        "intrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000003493812.txt",
+        "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_back_v1_1020.txt"
+    },
+    "cam_azure_kinect_back": {
+        "intrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/intrinsics_000259921812.txt",
+        # "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_v1_1020.txt"
+        "extrinsics": "/data/yufei/lerobot/lerobot/scripts/aloha_calibration/T_world_from_camera_front_20260121.txt"
+    },
 }
 
 
@@ -940,6 +953,7 @@ def compute_pcd(all_cam_depth_images=None, all_pcds=None, all_intrinsics=None, a
         all_dino_features = all_dino_features[depth_masks]
     end = time.time()
     
+    beg = time.time()
     all_pcd_in_world = np.concatenate(all_pcd_in_world, axis=0)  # (num_cams * num_points, 3)
     all_pcd_in_table_center = np.concatenate(all_pcd_in_table_center, axis=0)
 
@@ -970,7 +984,9 @@ def compute_pcd(all_cam_depth_images=None, all_pcds=None, all_intrinsics=None, a
 
     filter_idx_1 = all_pcd_in_world[:, 1] < 0.4
     filter_idx_2 = all_pcd_in_world[:, 1] > -0.4
-    filter_idx_3 = all_pcd_in_world[:, 2] > -0.02
+    filter_idx_3 = all_pcd_in_world[:, 2] > 0.01 ### pap three
+    # filter_idx_3 = all_pcd_in_world[:, 2] > -0.02 ### onesie
+    # filter_idx_3 = all_pcd_in_world[:, 2] > 0.01 ### hammer
     
     filter_idx = np.logical_and(filter_idx_1, filter_idx_2)
     filter_idx = np.logical_and(filter_idx, filter_idx_3)
@@ -988,6 +1004,8 @@ def compute_pcd(all_cam_depth_images=None, all_pcds=None, all_intrinsics=None, a
         all_rgb_flattend = all_rgb_flattend[filter_idx]
     if use_dino and all_cam_rgb_images is not None:
         all_dino_features = all_dino_features[filter_idx]
+    end = time.time()
+    cprint(f"filter pcd time: {end - beg} seconds", "blue")
     
     beg = time.time()
     all_pcd_in_world, fps_idx = fpsample_pcd(all_pcd_in_world, num_points)

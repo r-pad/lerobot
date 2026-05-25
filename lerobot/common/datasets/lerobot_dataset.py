@@ -22,6 +22,24 @@ import glob
 
 import datasets
 import numpy as np
+
+
+def _patch_torchcodec_audio_decoder_for_datasets() -> None:
+    """datasets>=4 imports AudioDecoder when torchcodec is loaded; torchcodec 0.2.1 lacks it."""
+    try:
+        import torchcodec.decoders as tc_decoders
+    except ImportError:
+        return
+    if hasattr(tc_decoders, "AudioDecoder"):
+        return
+
+    class AudioDecoder:  # noqa: N801
+        pass
+
+    tc_decoders.AudioDecoder = AudioDecoder
+
+
+_patch_torchcodec_audio_decoder_for_datasets()
 import packaging.version
 import PIL.Image
 import torch

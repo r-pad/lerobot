@@ -102,6 +102,7 @@ def lerobot_observation_to_openpi_dict(
     resize_size: int,
     base_image_key: str,
     wrist_image_key: str,
+    use_6d_orientation: bool,
 ) -> dict:
     """Build pi05-style observation dict (see openpi-mimicgen/examples/mimicgen/main.py)."""
     from lerobot.scripts.yufei_policy_utils import get_gripper_4_points_from_sriram_data
@@ -109,24 +110,29 @@ def lerobot_observation_to_openpi_dict(
     if "observation.right_eef_pose" not in observation:
         raise KeyError("openpi_websocket expects observation.right_eef_pose (set robot.use_eef=True).")
 
-    right_eef = observation["observation.right_eef_pose"]
-    _eef_pos, _eef_rot_6d, _gw, eef_pos_robot_base, eef_rot_matrix_robot_base, _r6d_rb, eef_gripper_width_franka = (
-        get_gripper_4_points_from_sriram_data(right_eef)
-    )
+    if use_6d_orientation:
+        right_eef = observation["observation.right_eef_pose"]
+        _eef_pos, _eef_rot_6d, _gw, eef_pos_robot_base, eef_rot_matrix_robot_base, _r6d_rb, eef_gripper_width_franka = (
+            get_gripper_4_points_from_sriram_data(right_eef)
+        )
 
-    # rotvec = ScipyRotation.from_matrix(eef_rot_matrix_robot_base).as_rotvec()
-    # norm = np.linalg.norm(rotvec)
-    # axis = rotvec / norm
-    # neg_axis = -axis
-    # neg_rotation = 2 * np.pi - norm
-    # neg_rotvec = neg_axis * neg_rotation
-    
-    gripper_qpos = np.array([eef_gripper_width_franka, -eef_gripper_width_franka], dtype=np.float32).reshape(2)
-    # state = np.concatenate([eef_pos_robot_base.astype(np.float32), rotvec.astype(np.float32), gripper_qpos])
-    # state = np.concatenate([eef_pos_robot_base.astype(np.float32), neg_rotvec.astype(np.float32), gripper_qpos])
+        # rotvec = ScipyRotation.from_matrix(eef_rot_matrix_robot_base).as_rotvec()
+        # norm = np.linalg.norm(rotvec)
+        # axis = rotvec / norm
+        # neg_axis = -axis
+        # neg_rotation = 2 * np.pi - norm
+        # neg_rotvec = neg_axis * neg_rotation
+        
+        # gripper_qpos = np.array([eef_gripper_width_franka, -eef_gripper_width_franka], dtype=np.float32).reshape(2)
+        # state = np.concatenate([eef_pos_robot_base.astype(np.float32), rotvec.astype(np.float32), gripper_qpos])
+        # state = np.concatenate([eef_pos_robot_base.astype(np.float32), neg_rotvec.astype(np.float32), gripper_qpos])
 
-    gripper_qpos = eef_gripper_width_franka.astype(np.float32)
-    state = np.concatenate([eef_pos_robot_base.astype(np.float32), _r6d_rb.astype(np.float32), gripper_qpos])
+        gripper_qpos = eef_gripper_width_franka.astype(np.float32)
+        state = np.concatenate([eef_pos_robot_base.astype(np.float32), _r6d_rb.astype(np.float32), gripper_qpos])
+    else:
+        # import pdb; pdb.set_trace()
+        state = observation["observation.state"][9:].cpu().numpy().astype(np.float32)
+        # import pdb; pdb.set_trace()
 
     base_rgb = _lerobot_image_to_uint8_hwc(observation[base_image_key])
     wrist_rgb = _lerobot_image_to_uint8_hwc(observation[wrist_image_key])
