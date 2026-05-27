@@ -1019,7 +1019,8 @@ def run_scripted_grasp_sequence(robot):
                 break
         else:
             print(f"[script] Home joint target not fully reached, max_error={joint_error:.6f}")
-        time.sleep(3)
+        print("Placing Plug into the socket, press enter to continue...")
+        input()
         target_quat = np.array(robot.config.target_quat, dtype=np.float64)
         target_pos = np.array(robot.config.approach_pos, dtype=np.float64)
         target_rot = transforms.quaternion_to_matrix(
@@ -1103,9 +1104,9 @@ def run_scripted_grasp_sequence(robot):
         target_pos[2] += 0.03
         target_pos[1] += np.random.uniform(-0.01, 0.01)
         target_pos[0] += np.random.uniform(-0.01, 0.01)
-        # yaw_noise = np.random.uniform(-np.pi / 2, np.pi / 2)
+        yaw_noise = np.random.uniform(-np.pi / 2, np.pi / 2)
         # yaw_noise = np.pi/2
-        yaw_noise = 0
+        # yaw_noise = 0
         yaw_quat_xyzw = np.array(
             [0.0, 0.0, np.sin(yaw_noise * 0.5), np.cos(yaw_noise * 0.5)],
             dtype=np.float64,
@@ -1212,11 +1213,11 @@ def run_scripted_grasp_sequence(robot):
             print(f"[script] Saved colored initial wrist point cloud to {colored_pcd_path}")
         except Exception as exc:
             print(f"[script] Failed to save colored initial wrist point cloud: {exc}")
-        visualize_open3d_point_cloud(
-            wrist_points_world,
-            wrist_colors,
-            "Initial wrist point cloud in world frame",
-        )
+        # visualize_open3d_point_cloud(
+        #     wrist_points_world,
+        #     wrist_colors,
+        #     "Initial wrist point cloud in world frame",
+        # )
         record["init_socket_pcd"] = robot._initial_wrist_points_world_colored
         init_socket_pcd = np.asarray(record["init_socket_pcd"], dtype=np.float32)
         init_points = init_socket_pcd[:, :3].copy()
@@ -1253,10 +1254,10 @@ def run_scripted_grasp_sequence(robot):
         # depth_normalized = (depth_img / max(float(depth_img.max()), 1e-8) * 255).astype(np.uint8)
         # depth_crop_normalized = (depth_crop / max(float(depth_crop.max()), 1e-8) * 255).astype(np.uint8)
         init_socket_depth = normalize_depth_for_shape(init_socket_depth)
-        save_rgb(init_socket_rgb, "initial_socket_rgb")
-        save_depth_vis(init_socket_depth, "initial_socket_depth")
-        print("Inspect the initial socket RGB and depth captures, then press Enter to continue...")
-        input()
+        # save_rgb(init_socket_rgb, "initial_socket_rgb")
+        # save_depth_vis(init_socket_depth, "initial_socket_depth")
+        # print("Inspect the initial socket RGB and depth captures, then press Enter to continue...")
+        # input()
     skip_plug_photo = False
     if not skip_plug_photo:
         print("Initial Pose Achieved")
@@ -1286,7 +1287,7 @@ def run_scripted_grasp_sequence(robot):
                 )
         # Taking Photo
         print("Taking auxiliary ZED stereo photo...")
-    if 1:
+    if not skip_plug_photo:
         auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
         auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
         robot._last_auxiliary_stereo_rgb = auxiliary_images
@@ -1300,11 +1301,11 @@ def run_scripted_grasp_sequence(robot):
             stride=4,
             max_depth_m=float(getattr(robot.config, "script_auxiliary_point_cloud_max_depth_m", 0.5)),
         )
-        visualize_open3d_point_cloud(
-            auxiliary_points_cam,
-            auxiliary_colors,
-            f"Auxiliary {auxiliary_camera_name} point cloud in camera frame",
-        )
+        # visualize_open3d_point_cloud(
+        #     auxiliary_points_cam,
+        #     auxiliary_colors,
+        #     f"Auxiliary {auxiliary_camera_name} point cloud in camera frame",
+        # )
         # points = torch.concatenate([torch.from_numpy(auxiliary_points_cam), torch.from_numpy(auxiliary_colors / 255.0)], dim=1)
         # torch.save(points,"debug_pcd.pth")
         points = auxiliary_points_cam  # shape: (N, 3)
@@ -1346,8 +1347,8 @@ def run_scripted_grasp_sequence(robot):
         init_plug_depth = np.flipud(init_plug_depth).copy()
         save_rgb(init_plug_rgb, "processed_auxiliary_rgb")
         save_depth_vis(init_plug_depth, "processed_auxiliary_depth")
-        print("Inspect the processed auxiliary RGB and depth captures, then press Enter to continue...")
-        input()
+        # print("Inspect the processed auxiliary RGB and depth captures, then press Enter to continue...")
+        # input()
         target_pos = init_pos
         target_rot = init_rot
         for i in range(total_photo_steps):
@@ -1376,10 +1377,30 @@ def run_scripted_grasp_sequence(robot):
                     wait_times=100,
                     joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                 )
+        record["init_socket_depth_img"] = init_socket_depth
+        record["init_socket_rgb_img"] = init_socket_rgb
+        record["init_plug_rgb_img"] = init_plug_rgb
+        record["init_plug_depth_img"] = init_plug_depth
 
+    # Random Offset from 0.003 ~ 0.005 in x & y direction
+    # Random yaw rotation ranging from 5~90 degrees.
+    x_offset = np.random.uniform(0.003, 0.005)
+    y_offset = np.random.uniform(0.003, 0.005)
+    yaw_rotation = np.random.uniform(5, 90)
+    # use the offset to disturb the aligned_pos and aligned_rot, create disturbed_pos and disturbed_rot
+    disturbed_pos = record["aligned_pos"].copy()
+    disturbed_pos[0] += x_offset
+    disturbed_pos[1] += y_offset
+    yaw_rad = np.deg2rad(yaw_rotation)  
+    yaw_quat = R.from_euler('z', yaw_rad).as_quat()  # in xyzw format
+    aligned_quat = R.from_matrix(record["aligned_rot"]).as_quat()
+    disturbed_quat = R.from_quat(yaw_quat) * R.from_quat(aligned_quat)
+    disturbed_rot = disturbed_quat.as_matrix()
+    record["disturbed_pos"] = disturbed_pos
+    record["disturbed_rot"] = disturbed_rot
 
     record["init_EEF_pose"] = robot._robot_ik_controller.eef_pose
-    record["init_socket_depth_img"] = normalize_depth_for_shape(depth_crop)
+
     return record
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
@@ -1692,8 +1713,17 @@ def control_loop(
             robot._scripted_grasp_sequence_done = True
             robot._scripted_insert_meta_data = run_scripted_grasp_sequence(robot)
         insert_meta_data = getattr(robot, "_scripted_insert_meta_data", None)
-
-        observation, action = robot.teleop_step(record_data=True, insert_meta_data=insert_meta_data)
+        episode_index = None
+        frame_index = None
+        if dataset is not None:
+            if dataset.episode_buffer is None:
+                episode_index = dataset.meta.total_episodes
+                frame_index = 0
+            else:
+                episode_index = dataset.episode_buffer["episode_index"]
+                frame_index = dataset.episode_buffer["size"]
+        print("Episode Index, Frame Index: ", episode_index, frame_index)
+        observation, action = robot.teleop_step(record_data=True, insert_meta_data=insert_meta_data, episode_index=episode_index, frame_index=frame_index)
         attach_auxiliary_observation_to_frame(observation, robot, dataset)
 
         if policy is not None and getattr(policy, "_current_vis_frame", None) is not None:
