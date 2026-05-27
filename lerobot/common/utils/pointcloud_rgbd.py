@@ -367,6 +367,162 @@ def render_top_down_custom(
 
     return rgb_img, depth_img
 
+def render_bottom_up_custom(
+    points,
+    colors,
+    center_x=0.1,
+    center_y=0.1,
+    H=480,
+    W=640,
+    fov_deg=60,
+    camera_height_offset=0.02,
+    brightness_scale=1.0,
+    point_radius=2,
+    background_color=(0.0, 0.0, 0.0),
+):
+    """
+    Render a point cloud from a bottom-up camera using point splatting.
+
+    Camera convention:
+    - camera looks toward world +Z
+    - image up is world +X
+    - image right is world +Y
+    """
+    device = points.device
+    points = points.float()
+    colors = colors.float()
+    if colors.max() > 1.0:
+        colors = colors / 255.0
+
+    colors = torch.clamp(colors * brightness_scale, 0.0, 1.0)
+    bottom_z = points[:, 2].min()
+
+    camera_pos = torch.tensor(
+        [center_x, center_y, bottom_z - camera_height_offset],
+        device=device,
+        dtype=torch.float32,
+    )
+    camera_target = torch.tensor(
+        [center_x, center_y, bottom_z],
+        device=device,
+        dtype=torch.float32,
+    )
+
+    def look_at(eye, target, up):
+        forward = target - eye
+        forward = forward / torch.norm(forward)
+
+        right = torch.cross(forward, up, dim=0)
+        right = right / torch.norm(right)
+
+        up_cam = torch.cross(right, forward, dim=0)
+        up_cam = up_cam / torch.norm(up_cam)
+
+        view = torch.eye(4, device=device, dtype=torch.float32)
+        view[0, :3] = right
+        view[1, :3] = up_cam
+        view[2, :3] = -forward
+        view[0, 3] = -torch.dot(right, eye)
+        view[1, 3] = -torch.dot(up_cam, eye)
+        view[2, 3] = torch.dot(forward, eye)
+        return view
+
+    world_up = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=torch.float32)
+    view_mat = look_at(camera_pos, camera_target, world_up)
+
+    aspect = W / H
+    fov_rad = torch.tensor(fov_deg * np.pi / 180.0, device=device, dtype=torch.float32)
+    f = 1.0 / torch.tan(fov_rad / 2.0)
+    near = 0.001
+    far = float(camera_height_offset + 0.1)
+
+    proj_mat = torch.zeros((4, 4), device=device, dtype=torch.float32)
+    proj_mat[0, 0] = f / aspect
+    proj_mat[1, 1] = f
+    proj_mat[2, 2] = (far + near) / (near - far)
+    proj_mat[2, 3] = (2 * far * near) / (near - far)
+    proj_mat[3, 2] = -1.0
+
+    ones = torch.ones((points.shape[0], 1), device=device, dtype=torch.float32)
+    points_h = torch.cat([points, ones], dim=1)
+
+    points_view = points_h @ view_mat.T
+    points_clip = points_view @ proj_mat.T
+
+    valid = points_view[:, 2] < 0
+    if not valid.any():
+        print("No points in front of camera.")
+        return None, None
+
+    points_view = points_view[valid]
+    points_clip = points_clip[valid]
+    colors = colors[valid]
+
+    w = points_clip[:, 3]
+    eps = 1e-8
+    ndc = points_clip[:, :3] / (w[:, None] + eps)
+
+    u = (ndc[:, 0] + 1.0) * 0.5 * W
+    v = (1.0 - (ndc[:, 1] + 1.0) * 0.5) * H
+    z = -points_view[:, 2]
+
+    in_bounds = (
+        (u >= 0) & (u < W) &
+        (v >= 0) & (v < H) &
+        (z > near) & (z < far)
+    )
+
+    u = u[in_bounds]
+    v = v[in_bounds]
+    z = z[in_bounds]
+    colors = colors[in_bounds]
+
+    if len(u) == 0:
+        print("No points projected into the image.")
+        return None, None
+
+    order = torch.argsort(z)
+    u = u[order]
+    v = v[order]
+    z = z[order]
+    colors = colors[order]
+
+    bg = torch.tensor(background_color, device=device, dtype=torch.float32)
+    rgb_img = bg.view(1, 1, 3).repeat(H, W, 1).clone()
+    depth_img = torch.full((H, W), far, device=device, dtype=torch.float32)
+
+    for i in range(len(u)):
+        ui = int(round(u[i].item()))
+        vi = int(round(v[i].item()))
+        zi = z[i]
+        ci = colors[i]
+
+        u0 = max(0, ui - point_radius)
+        u1 = min(W - 1, ui + point_radius)
+        v0 = max(0, vi - point_radius)
+        v1 = min(H - 1, vi + point_radius)
+
+        for vv in range(v0, v1 + 1):
+            for uu in range(u0, u1 + 1):
+                if (uu - ui) ** 2 + (vv - vi) ** 2 > point_radius ** 2:
+                    continue
+
+                if zi < depth_img[vv, uu]:
+                    depth_img[vv, uu] = zi
+                    rgb_img[vv, uu] = ci
+
+    filled = (depth_img < far).sum().item()
+
+    if filled > 0:
+        rendered_colors = rgb_img[depth_img < far]
+        print(
+            f"Rendered mean RGB: "
+            f"({rendered_colors[:,0].mean():.3f}, "
+            f"{rendered_colors[:,1].mean():.3f}, "
+            f"{rendered_colors[:,2].mean():.3f})"
+        )
+
+    return rgb_img, depth_img
 
 if __name__ == "__main__":
 
@@ -378,11 +534,11 @@ if __name__ == "__main__":
 
     # Create cylinder
     points, colors , _, _= create_socket_with_structured_points()
-    data=torch.load("./pointcloud.pth")
-    points= data["points"].cpu()
-    colors= data["colors"].cpu()
-    points = data["points"].cpu().float()
-    colors = data["colors"].cpu().float()
+    # data=torch.load("./pointcloud.pth")
+    # points= data["points"].cpu()
+    # colors= data["colors"].cpu()
+    # points = data["points"].cpu().float()
+    # colors = data["colors"].cpu().float()
 
     if colors.max() > 1.0:
         colors = colors / 255.0
@@ -405,21 +561,53 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # Render
-    rgb_img, depth_img = render_top_down_custom(points, colors, H=480, W=960, camera_height_offset=0.08, fov_deg=30, brightness_scale=2, point_radius=5)
+    # rgb_img, depth_img = render_top_down_custom(points, colors, H=480, W=960, camera_height_offset=0.08, fov_deg=30, brightness_scale=1, point_radius=5)
+
+    # if rgb_img is not None:
+    #     # Convert to numpy and save
+    #     rgb_np = (rgb_img.cpu().numpy() * 255).astype(np.uint8)
+        
+    #     # Save RGB image
+    #     Image.fromarray(rgb_np).save("cylinder_top_down.png")
+    #     print("\n✓ Saved: cylinder_top_down.png")
+        
+    #     # Also save depth visualization
+    #     depth_np = depth_img.cpu().numpy()
+    #     depth_normalized = (depth_np / depth_np.max() * 255).astype(np.uint8)
+    #     Image.fromarray(depth_normalized).save("cylinder_top_down_depth.png")
+    #     print("✓ Saved: cylinder_top_down_depth.png")
+        
+    #     # Print some debug info
+    #     print("\nDebug Info:")
+    #     print(f"  Image size: {rgb_np.shape}")
+    #     print(f"  Non-black pixels: {(rgb_np.sum(axis=2) > 0).sum()}")
+        
+    #     # Check colors at specific pixels (center, edges)
+    #     center_u, center_v = 320, 240
+    #     print(f"\n  Color at center (u={center_u}, v={center_v}): {rgb_np[center_v, center_u]}")
+        
+    #     # Expected: Center x≈1, y≈0 should have red≈0.5, blue≈0.5
+    #     print("  Expected center: red~128, blue~128 (since x=1→red=0.5, y=0→blue=0.5)")
+        
+    # else:
+    #     print("Failed to render!")
+
+    # # Render
+    rgb_img, depth_img = render_bottom_up_custom(points, colors, H=480, W=960, camera_height_offset=0.08, fov_deg=30, brightness_scale=1, point_radius=5)
 
     if rgb_img is not None:
         # Convert to numpy and save
         rgb_np = (rgb_img.cpu().numpy() * 255).astype(np.uint8)
         
         # Save RGB image
-        Image.fromarray(rgb_np).save("cylinder_top_down.png")
-        print("\n✓ Saved: cylinder_top_down.png")
+        Image.fromarray(rgb_np).save("cylinder_bottom_up.png")
+        print("\n✓ Saved: cylinder_bottom_up.png")
         
         # Also save depth visualization
         depth_np = depth_img.cpu().numpy()
         depth_normalized = (depth_np / depth_np.max() * 255).astype(np.uint8)
-        Image.fromarray(depth_normalized).save("cylinder_top_down_depth.png")
-        print("✓ Saved: cylinder_top_down_depth.png")
+        Image.fromarray(depth_normalized).save("cylinder_bottom_up_depth.png")
+        print("✓ Saved: cylinder_bottom_up_depth.png")
         
         # Print some debug info
         print("\nDebug Info:")

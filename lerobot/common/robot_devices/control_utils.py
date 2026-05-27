@@ -40,7 +40,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
-from lerobot.common.utils.pointcloud_rgbd import render_top_down_custom
+from lerobot.common.utils.pointcloud_rgbd import render_top_down_custom, render_bottom_up_custom
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
 from PIL import Image
 import sys
@@ -608,8 +608,6 @@ def transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
         return points
     points_h = np.concatenate([points, np.ones((points.shape[0], 1), dtype=points.dtype)], axis=1)
     return (np.asarray(transform, dtype=np.float64) @ points_h.T).T[:, :3].astype(np.float32)
-
-
 def crop_rgb_depth_foreground_center(
     rgb: np.ndarray,
     depth: np.ndarray,
@@ -617,36 +615,103 @@ def crop_rgb_depth_foreground_center(
     crop_h: int = 480,
     crop_w: int = 640,
     margin: int = 20,
+    center_x: float | None = None,
+    center_y: float | None = None,
+    trim_quantile: float = 0.02,
+    debug: bool = False,
+    debug_path: str = "debug_crop.png",
 ):
     rgb = np.asarray(rgb)
     depth = np.asarray(depth)
     h, w = depth.shape[:2]
 
     bg = np.nanmax(depth)
-
-    # foreground = rendered points, excluding background/far plane
     valid = np.isfinite(depth) & (depth > 0) & (depth < bg - 1e-6)
 
-    if not np.any(valid):
-        center_y, center_x = h / 2, w / 2
-    else:
+    if np.any(valid):
         ys, xs = np.where(valid)
 
-        y_min, y_max = ys.min(), ys.max()
-        x_min, x_max = xs.min(), xs.max()
+        y_min, y_max = np.quantile(ys, [trim_quantile, 1 - trim_quantile])
+        x_min, x_max = np.quantile(xs, [trim_quantile, 1 - trim_quantile])
 
-        # center of full visible object, not closest points
-        center_y = 0.5 * (y_min + y_max)
-        center_x = 0.5 * (x_min + x_max)
+        bbox = (x_min, y_min, x_max, y_max)
 
-    y0 = int(round(center_y - crop_h / 2))
-    x0 = int(round(center_x - crop_w / 2))
+        crop_center_y = 0.5 * (y_min + y_max)
+        crop_center_x = 0.5 * (x_min + x_max)
+    else:
+        bbox = None
+        crop_center_y, crop_center_x = h / 2, w / 2
+
+    y0 = int(round(crop_center_y - crop_h / 2))
+    x0 = int(round(crop_center_x - crop_w / 2))
 
     y0 = max(0, min(y0, h - crop_h))
     x0 = max(0, min(x0, w - crop_w))
 
     y1 = y0 + crop_h
     x1 = x0 + crop_w
+
+    if debug:
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.imshow(rgb)
+
+        ax.add_patch(
+            patches.Rectangle(
+                (x0, y0),
+                crop_w,
+                crop_h,
+                linewidth=2,
+                edgecolor="lime",
+                facecolor="none",
+                label="crop",
+            )
+        )
+
+        if bbox is not None:
+            bx0, by0, bx1, by1 = bbox
+            ax.add_patch(
+                patches.Rectangle(
+                    (bx0, by0),
+                    bx1 - bx0,
+                    by1 - by0,
+                    linewidth=2,
+                    edgecolor="yellow",
+                    facecolor="none",
+                    label="foreground bbox",
+                )
+            )
+
+        ax.scatter(
+            [crop_center_x],
+            [crop_center_y],
+            c="cyan",
+            s=60,
+            marker="+",
+            label="crop center",
+        )
+
+        if center_x is not None and center_y is not None:
+            ax.scatter(
+                [center_x],
+                [center_y],
+                c="red",
+                s=60,
+                marker="x",
+                label="aligned center",
+            )
+
+        ax.set_title(
+            f"crop_center=({crop_center_x:.1f}, {crop_center_y:.1f}), "
+            f"crop=({x0}:{x1}, {y0}:{y1})"
+        )
+        ax.legend()
+        ax.axis("off")
+
+        fig.savefig(debug_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
 
     return rgb[y0:y1, x0:x1], depth[y0:y1, x0:x1]
 
@@ -781,204 +846,373 @@ def visualize_world_and_wrist_camera_frames(robot) -> None:
     vis.run()
     vis.destroy_window()
 
+def center_zoom_rgb(rgb_image, scale=3.5):
+    import numpy as np
+    from PIL import Image
+
+    rgb = np.asarray(rgb_image)
+
+    h, w = rgb.shape[:2]
+    crop_h = int(round(h / scale))
+    crop_w = int(round(w / scale))
+
+    cy, cx = h // 2, w // 2
+    y0 = max(0, cy - crop_h // 2)
+    x0 = max(0, cx - crop_w // 2)
+    y1 = y0 + crop_h
+    x1 = x0 + crop_w
+
+    cropped = rgb[y0:y1, x0:x1]
+
+    pil = Image.fromarray(cropped)
+    pil = pil.resize((w, h), Image.BILINEAR)
+
+    return np.asarray(pil)
 
 
+def normalize_depth_for_shape(depth, invalid_fill=0.0):
+    """
+    Normalize one depth image independently to [0, 1],
+    keeping only relative shape information.
+
+    Works for:
+    - positive depth maps
+    - negative IsaacGym-style depth maps
+    - maps containing inf / -inf / nan
+    """
+    depth = depth.astype(np.float32)
+
+    # valid pixels: finite only
+    valid = np.isfinite(depth)
+
+    # if nothing valid, return zeros
+    if valid.sum() == 0:
+        return np.full_like(depth, invalid_fill, dtype=np.float32)
+
+    d = depth.copy()
+
+    # normalize using only valid region
+    d_valid = d[valid]
+    d_min = d_valid.min()
+    d_max = d_valid.max()
+
+    # avoid divide-by-zero if all valid depths are identical
+    if d_max - d_min < 1e-8:
+        out = np.full_like(d, invalid_fill, dtype=np.float32)
+        out[valid] = 1.0
+        return out
+
+    out = np.full_like(d, invalid_fill, dtype=np.float32)
+    out[valid] = (d[valid] - d_min) / (d_max - d_min)
+
+    return out.astype(np.float32)
+
+def center_crop_rgb(rgb_image, crop_h=480, crop_w=640):
+    import numpy as np
+
+    rgb = np.asarray(rgb_image)
+    h, w = rgb.shape[:2]
+
+    cy, cx = h // 2, w // 2
+
+    y0 = cy - crop_h // 2
+    x0 = cx - crop_w // 2
+    y1 = y0 + crop_h
+    x1 = x0 + crop_w
+
+    return rgb[y0:y1, x0:x1]
+
+def closest_vertical_yaw_rot(cur_rot, vertical_rot):
+    A = vertical_rot.T @ cur_rot
+
+    yaw = np.arctan2(
+        A[1, 0] - A[0, 1],
+        A[0, 0] + A[1, 1],
+    )
+
+    c, s = np.cos(yaw), np.sin(yaw)
+    yaw_rot = np.array([
+        [c, -s, 0],
+        [s,  c, 0],
+        [0,  0, 1],
+    ])
+
+    return vertical_rot @ yaw_rot, yaw
 
 def run_scripted_grasp_sequence(robot):
     # visualize_world_and_wrist_camera_frames(robot)
     # exit(0)
     # return
     record = {}
-    home_joints = np.array(
-        [-0.05045543, -0.07240624, -0.03830516, -2.48442205, -0.05757582, 2.33608194, 0.73499261],
-        dtype=np.float64,
-    )
-    print(f"[script] Resetting Franka to hard-coded home joints: {np.round(home_joints, 6).tolist()}")
-    gripper_action = getattr(robot, "_last_gripper_action", robot.config.gripper_open_action)
-    home_action = home_joints.tolist() + [gripper_action]
-    max_home_steps = int(getattr(robot.config, "script_joint_wait_times", 100))
-    home_tolerance = float(getattr(robot.config, "script_joint_convergence_tolerance", 1e-3))
-    for step_idx in range(max_home_steps):
-        robot.robot_interface.control(
-            controller_type=robot.config.deoxys_controller_type,
-            action=home_action,
-            controller_cfg=robot.controller_cfg,
-        )
-        joint_error = float(np.max(np.abs(np.asarray(robot.robot_interface.last_q) - home_joints)))
-        if joint_error < home_tolerance:
-            print(f"[script] Home joint target reached in {step_idx + 1} steps, max_error={joint_error:.6f}")
-            break
-    else:
-        print(f"[script] Home joint target not fully reached, max_error={joint_error:.6f}")
-
-    target_quat = np.array(robot.config.target_quat, dtype=np.float64)
-    target_pos = np.array(robot.config.approach_pos, dtype=np.float64)
-    target_rot = transforms.quaternion_to_matrix(
-            torch.tensor([target_quat[3], target_quat[0], target_quat[1], target_quat[2]], dtype=torch.float64)
-        ).numpy()
-    robot._robot_ik_controller.control(
-            target_pos=target_pos,
-            target_rot=target_rot,
-            grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-            # wait_times=int(getattr(robot.config, "script_joint_wait_times", 50)),
-            wait_times=100,
-            joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-        )
-    z_plane = robot._robot_ik_controller.eef_pose[2,3]
-    while True:
-        key = input("w/a/s/d to adjust XY, Enter to finish: ").strip().lower()
-
-        if key in ("", "enter"):
-            break
-        target_pos = robot._robot_ik_controller.eef_pose[:3,3]
-        if key == "a":
-            target_pos[1] -= 0.001   # y -
-        elif key == "d":
-            target_pos[1] += 0.001   # y +
-        elif key == "w":
-            target_pos[0] -= 0.001   # x -
-        elif key == "s":
-            target_pos[0] += 0.001   # x +
-        else:
-            continue
-        target_pos[2] = z_plane
-        robot._robot_ik_controller.control(
-            target_pos=target_pos,
-            target_rot=target_rot,
-            grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-            wait_times=100,
-            joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-        )
-    command_gripper(robot,action = 1.0, label="close")
-    # slow_close_gripper(robot)
-    print("Press Enter when the gripper is at the insertion pose to record it...")
-    input()
-    aligned_pose = robot._robot_ik_controller.eef_pose
-    aligned_pos = aligned_pose[:3,3]
-    aligned_rot = aligned_pose[:3,:3]
-    print("aligned_pose:\n", aligned_pose)
-    print("aligned_pos:\n", aligned_pos)
-    print("aligned_rot:\n", aligned_rot)
-    record = {
-        "aligned_pose": aligned_pose,
-        "aligned_pos": aligned_pos,
-        "aligned_rot": aligned_rot,
-    }
-    # Lift Up the Gripper
-    target_pos = aligned_pos.copy()
-    target_pos[2] += 0.02
-    target_pos[1] += np.random.uniform(-0.01, 0.01)
-    target_pos[0] += np.random.uniform(-0.01, 0.01)
-    yaw_noise = np.random.uniform(-np.pi / 2, np.pi / 2)
-    yaw_noise = 0
-    yaw_quat_xyzw = np.array(
-        [0.0, 0.0, np.sin(yaw_noise * 0.5), np.cos(yaw_noise * 0.5)],
-        dtype=np.float64,
-    )
-    aligned_quat_xyzw = R.from_matrix(aligned_rot).as_quat()
-    ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
-    target_rot = ctrl_tgt_quat_xyzw.as_matrix()
-    skip_initialization = False
-    if not skip_initialization:
-        for i in range(50):
-            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-            next_tgt_pos = (target_pos - current_pos) / (50-i) + current_pos
-            next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-                current_rot,
-                target_rot,
-                max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
-            )
-            robot._robot_ik_controller.control(
-                    target_pos=next_tgt_pos,
-                    target_rot=next_tgt_rot,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
-    init_pos = robot._robot_ik_controller.eef_pose[:3,3]
-    init_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-    print("[script] Rendering initial wrist point cloud in world frame...")
-    target_pos = init_pos.copy()
-    target_pos[2] += 0.04 # Lift the gripper by 4cm to ensure the wrist camera has a clear view of the scene for the initial point cloud capture
-    print("Lifting up the gripper")
-    for i in range(10):
-            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-            next_tgt_pos = (target_pos - current_pos) / (10-i) + current_pos
-            next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-                current_rot,
-                target_rot,
-                max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
-            )
-            robot._robot_ik_controller.control(
-                    target_pos=next_tgt_pos,
-                    target_rot=next_tgt_rot,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
-    wrist_camera = robot.cameras["cam_wrist"]
-    wrist_images = read_zed_stereo_rgb(wrist_camera)
-    wrist_depth = compute_foundation_stereo_depth(wrist_images, wrist_camera)
-    wrist_k, _ = get_zed_intrinsics_and_baseline(wrist_camera)
-    wrist_points_cam, wrist_colors = depth_rgb_to_camera_point_cloud(
-            wrist_depth,
-            wrist_images["left"],
-            wrist_k,
-            stride=2,
-            max_depth_m=0.5,
-        )
-
-    cam_to_gripper = np.array(
-            [
-                [-0.00768086, -0.94557934, -0.32530096, 0.07294499],
-                [0.99995759, -0.00891583, 0.00230583, -0.03177615],
-                [-0.00508067, -0.32526946, 0.94560772, -0.08727812],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
+    skip_grasping = True
+    if not skip_grasping:
+        home_joints = np.array(
+            [-0.05045543, -0.07240624, -0.03830516, -2.48442205, -0.05757582, 2.33608194, 0.73499261],
             dtype=np.float64,
         )
-    world_from_gripper = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64)
-    world_from_cam = world_from_gripper @ cam_to_gripper
-    wrist_points_world = transform_points(wrist_points_cam, world_from_cam)
-    world_z_low_threshold = 0.025
-    world_z_threshold = 0.06
-    keep = (wrist_points_world[:, 2] >= world_z_low_threshold) & (wrist_points_world[:, 2]<= world_z_threshold)
+        print(f"[script] Resetting Franka to hard-coded home joints: {np.round(home_joints, 6).tolist()}")
+        gripper_action = getattr(robot, "_last_gripper_action", robot.config.gripper_open_action)
+        home_action = home_joints.tolist() + [gripper_action]
+        max_home_steps = int(getattr(robot.config, "script_joint_wait_times", 100))
+        home_tolerance = float(getattr(robot.config, "script_joint_convergence_tolerance", 1e-3))
+        for step_idx in range(max_home_steps):
+            robot.robot_interface.control(
+                controller_type=robot.config.deoxys_controller_type,
+                action=home_action,
+                controller_cfg=robot.controller_cfg,
+            )
+            joint_error = float(np.max(np.abs(np.asarray(robot.robot_interface.last_q) - home_joints)))
+            if joint_error < home_tolerance:
+                print(f"[script] Home joint target reached in {step_idx + 1} steps, max_error={joint_error:.6f}")
+                break
+        else:
+            print(f"[script] Home joint target not fully reached, max_error={joint_error:.6f}")
 
-    wrist_points_world = wrist_points_world[keep]
-    wrist_colors = wrist_colors[keep]
-    robot._initial_wrist_points_world = wrist_points_world.astype(np.float32)
-    robot._initial_wrist_points_world_colored = np.concatenate(
-        [wrist_points_world.astype(np.float32), wrist_colors.astype(np.float32)],
-        axis=1,
-    )
-    colored_pcd_path = os.path.expanduser("~/automate/lerobot/outputs/initial_wrist_points_world_colored.ply")
-    os.makedirs(os.path.dirname(colored_pcd_path), exist_ok=True)
-    try:
-        import open3d as o3d
+        target_quat = np.array(robot.config.target_quat, dtype=np.float64)
+        target_pos = np.array(robot.config.approach_pos, dtype=np.float64)
+        target_rot = transforms.quaternion_to_matrix(
+                torch.tensor([target_quat[3], target_quat[0], target_quat[1], target_quat[2]], dtype=torch.float64)
+            ).numpy()
+        vertical_rot = target_rot.copy()
+        robot._robot_ik_controller.control(
+                target_pos=target_pos,
+                target_rot=target_rot,
+                grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                # wait_times=int(getattr(robot.config, "script_joint_wait_times", 50)),
+                wait_times=100,
+                joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+            )
+        z_plane = robot._robot_ik_controller.eef_pose[2,3]
+        while True:
+            key = input("w/a/s/d to adjust XY, Enter to finish: ").strip().lower()
 
-        colored_pcd = o3d.geometry.PointCloud()
-        colored_pcd.points = o3d.utility.Vector3dVector(wrist_points_world.astype(np.float64))
-        colored_pcd.colors = o3d.utility.Vector3dVector(wrist_colors.astype(np.float64) / 255.0)
-        o3d.io.write_point_cloud(colored_pcd_path, colored_pcd)
-        print(f"[script] Saved colored initial wrist point cloud to {colored_pcd_path}")
-    except Exception as exc:
-        print(f"[script] Failed to save colored initial wrist point cloud: {exc}")
-    visualize_open3d_point_cloud(
-        wrist_points_world,
-        wrist_colors,
-        "Initial wrist point cloud in world frame",
-    )
-    # return record
+            if key in ("", "enter"):
+                break
+            target_pos = robot._robot_ik_controller.eef_pose[:3,3]
+            if key == "a":
+                target_pos[1] -= 0.001   # y -
+            elif key == "d":
+                target_pos[1] += 0.001   # y +
+            elif key == "w":
+                target_pos[0] -= 0.001   # x -
+            elif key == "s":
+                target_pos[0] += 0.001   # x +
+            else:
+                continue
+            target_pos[2] = z_plane
+            robot._robot_ik_controller.control(
+                target_pos=target_pos,
+                target_rot=target_rot,
+                grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                wait_times=100,
+                joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+            )
+        
+        command_gripper(robot,action = 1.0, label="close")
+        # slow_close_gripper(robot)
+        print("Press Enter when the gripper is at the insertion pose to record it...")
+        print("Press 'r' to reorient to target_rot, Enter to record insertion pose...")
+
+        while True:
+            key = input().strip().lower()
+
+            if key == "r":
+                cur_pose = robot._robot_ik_controller.eef_pose
+                cur_pos = cur_pose[:3, 3]
+                cur_rot = cur_pose[:3, :3]
+
+                target_rot, yaw = closest_vertical_yaw_rot(cur_rot, vertical_rot)
+                import pdb;pdb.set_trace()
+
+                robot._robot_ik_controller.control(
+                    target_pos=target_rot,
+                    target_rot=cur_pos,
+                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                    wait_times=10,
+                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+                )
+
+                print(f"Reoriented vertical. yaw={yaw:.3f} rad. Press 'r' again or Enter to record.")
+
+            elif key == "":
+                break
+        aligned_pose = robot._robot_ik_controller.eef_pose
+        aligned_pos = aligned_pose[:3,3]
+        aligned_rot = aligned_pose[:3,:3]
+        # print("aligned_pose:\n", aligned_pose)
+        # print("aligned_pos:\n", aligned_pos)
+        # print("aligned_rot:\n", aligned_rot)
+        record = {
+            "aligned_pose": aligned_pose,
+            "aligned_pos": aligned_pos,
+            "aligned_rot": aligned_rot,
+        }
+        # # Lift Up the Gripper
+        target_pos = aligned_pos.copy()
+        target_pos[2] += 0.03
+        target_pos[1] += np.random.uniform(-0.01, 0.01)
+        target_pos[0] += np.random.uniform(-0.01, 0.01)
+        # yaw_noise = np.random.uniform(-np.pi / 2, np.pi / 2)
+        yaw_noise = np.pi/2
+        yaw_quat_xyzw = np.array(
+            [0.0, 0.0, np.sin(yaw_noise * 0.5), np.cos(yaw_noise * 0.5)],
+            dtype=np.float64,
+        )
+        aligned_quat_xyzw = R.from_matrix(aligned_rot).as_quat()
+        ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
+        target_rot = ctrl_tgt_quat_xyzw.as_matrix()
+        
+    skip_initialization = True
+    if not skip_initialization:
+        total_init_steps = 100
+        for i in range(total_init_steps):
+            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+            if i < 50:
+                next_tgt_pos = current_pos.copy()
+                next_tgt_pos[2] += 0.001
+                next_tgt_rot = current_rot.copy()
+            else:
+                next_tgt_pos = (target_pos - current_pos) / (total_init_steps-i) + current_pos
+                next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+                    current_rot,
+                    target_rot,
+                    max_angle_step_deg=2.0,
+                )
+            robot._robot_ik_controller.control(
+                    target_pos=next_tgt_pos,
+                    target_rot=next_tgt_rot,
+                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                    wait_times=100,
+                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+                )
+        init_pos = robot._robot_ik_controller.eef_pose[:3,3]
+        init_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+        print("[script] Rendering initial wrist point cloud in world frame...")
+        target_pos = init_pos.copy()
+        target_pos[2] += 0.04 # Lift the gripper by 4cm to ensure the wrist camera has a clear view of the scene for the initial point cloud capture
+        print("Lifting up the gripper")
+        for i in range(10):
+                current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+                current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+                # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+                next_tgt_pos = (target_pos - current_pos) / (10-i) + current_pos
+                next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+                    current_rot,
+                    target_rot,
+                    max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+                )
+                robot._robot_ik_controller.control(
+                        target_pos=next_tgt_pos,
+                        target_rot=next_tgt_rot,
+                        grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                        wait_times=100,
+                        joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+                    )
+        wrist_camera = robot.cameras["cam_wrist"]
+        wrist_images = read_zed_stereo_rgb(wrist_camera)
+        wrist_depth = compute_foundation_stereo_depth(wrist_images, wrist_camera)
+        wrist_k, _ = get_zed_intrinsics_and_baseline(wrist_camera)
+        wrist_points_cam, wrist_colors = depth_rgb_to_camera_point_cloud(
+                wrist_depth,
+                wrist_images["left"],
+                wrist_k,
+                stride=2,
+                max_depth_m=0.5,
+            )
+
+        cam_to_gripper = np.array(
+                [
+                    [-0.00768086, -0.94557934, -0.32530096, 0.07294499],
+                    [0.99995759, -0.00891583, 0.00230583, -0.03177615],
+                    [-0.00508067, -0.32526946, 0.94560772, -0.08727812],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                dtype=np.float64,
+            )
+        world_from_gripper = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64)
+        world_from_cam = world_from_gripper @ cam_to_gripper
+        wrist_points_world = transform_points(wrist_points_cam, world_from_cam)
+        # world_z_low_threshold = 0.0
+        # world_z_threshold = 0.09
+        world_z_low_threshold = 0.025
+        world_z_threshold = 0.06
+
+        keep = (wrist_points_world[:, 2] >= world_z_low_threshold) & (wrist_points_world[:, 2]<= world_z_threshold)
+
+        wrist_points_world = wrist_points_world[keep]
+        wrist_colors = wrist_colors[keep]
+        robot._initial_wrist_points_world = wrist_points_world.astype(np.float32)
+        robot._initial_wrist_points_world_colored = np.concatenate(
+            [wrist_points_world.astype(np.float32), wrist_colors.astype(np.float32)],
+            axis=1,
+        )
+        colored_pcd_path = os.path.expanduser("~/automate/lerobot/outputs/initial_wrist_points_world_colored.ply")
+        os.makedirs(os.path.dirname(colored_pcd_path), exist_ok=True)
+        try:
+            import open3d as o3d
+
+            colored_pcd = o3d.geometry.PointCloud()
+            colored_pcd.points = o3d.utility.Vector3dVector(wrist_points_world.astype(np.float64))
+            colored_pcd.colors = o3d.utility.Vector3dVector(wrist_colors.astype(np.float64) / 255.0)
+            o3d.io.write_point_cloud(colored_pcd_path, colored_pcd)
+            print(f"[script] Saved colored initial wrist point cloud to {colored_pcd_path}")
+        except Exception as exc:
+            print(f"[script] Failed to save colored initial wrist point cloud: {exc}")
+        visualize_open3d_point_cloud(
+            wrist_points_world,
+            wrist_colors,
+            "Initial wrist point cloud in world frame",
+        )
+        record["init_socket_pcd"] = robot._initial_wrist_points_world_colored
+        init_socket_pcd = np.asarray(record["init_socket_pcd"], dtype=np.float32)
+        init_points = init_socket_pcd[:, :3].copy()
+        init_colors = init_socket_pcd[:, 3:].copy()
+        rgb_init, depth_init = render_top_down_custom(
+            torch.as_tensor(init_points, dtype=torch.float32),
+            torch.as_tensor(init_colors[:, :3], dtype=torch.float32),
+            center_x=record["aligned_pos"][0],
+            center_y=record["aligned_pos"][1],
+            H=720,
+            W=1280,
+            camera_height_offset=0.02,
+            fov_deg=68.66,
+            point_radius=5,
+        )
+        rgb_img = rgb_init.clone().detach().cpu().numpy()
+        depth_img = depth_init.clone().detach().cpu().numpy()
+        rgb_crop, depth_crop = crop_rgb_depth_foreground_center(
+            rgb_img,
+            depth_img,
+            center_x=record["aligned_pos"][0],
+            center_y=record["aligned_pos"][1],
+            crop_h=640,
+            crop_w=480,
+            debug = True,
+            debug_path="/home/yinongh/automate/lerobot/outputs/debug_initial_crop.png",
+        )
+        output_dir = "/home/yinongh/automate/lerobot/outputs"
+        os.makedirs(output_dir, exist_ok=True)
+        rgb_np = (np.clip(rgb_img, 0.0, 1.0) * 255).astype(np.uint8)
+        rgb_crop = np.rot90(rgb_crop, k=1)
+        depth_crop = np.rot90(depth_crop, k=1)
+        rgb_crop_np = (np.clip(rgb_crop, 0.0, 1.0) * 255).astype(np.uint8)
+        depth_normalized = (depth_img / max(float(depth_img.max()), 1e-8) * 255).astype(np.uint8)
+        depth_crop_normalized = (depth_crop / max(float(depth_crop.max()), 1e-8) * 255).astype(np.uint8)
+        
+        Image.fromarray(rgb_np).save(f"{output_dir}/initial_socket_rgb.png")
+        Image.fromarray(rgb_crop_np).save(f"{output_dir}/initial_socket_rgb_crop.png")
+        Image.fromarray(depth_normalized).save(f"{output_dir}/initial_socket_depth.png")
+        Image.fromarray(depth_crop_normalized).save(f"{output_dir}/initial_socket_depth_crop.png")
+        print("Inspect the initial socket RGB and depth captures, then press Enter to continue...")
+        input()
     skip_plug_photo = False
     if not skip_plug_photo:
         print("Initial Pose Achieved")
         time.sleep(3)
         target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-        target_pos = np.array([0.135, -0.354, 0.35], dtype=np.float64)
+        target_pos = np.array([0.485, -0.22, 0.25], dtype=np.float64)
         # Translate to take photo
         total_photo_steps = 5
         for i in range(total_photo_steps):
@@ -998,67 +1232,81 @@ def run_scripted_grasp_sequence(robot):
                     wait_times=100,
                     joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                 )
-        target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-        target_pos = np.array([0.135, -0.354, 0.15], dtype=np.float64)
-        # Translate to take photo
-        for i in range(total_photo_steps):
-            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-            next_tgt_pos = (target_pos - current_pos) / (total_photo_steps-i) + current_pos
-            next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-                current_rot,
-                target_rot,
-                max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
-            )
-            robot._robot_ik_controller.control(
-                    target_pos=next_tgt_pos,
-                    target_rot=next_tgt_rot,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
-        # Fine adjustment to ensure we are back to the initial pose
-        for _ in range(5):
-            robot._robot_ik_controller.control(
-                    target_pos=target_pos,
-                    target_rot=target_rot,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
-
         # Taking Photo
         print("Taking auxiliary ZED stereo photo...")
+    if 1:
         auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
         auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
         robot._last_auxiliary_stereo_rgb = auxiliary_images
         robot._last_auxiliary_left_rgb = auxiliary_images["left"]
         robot._last_auxiliary_depth = compute_foundation_stereo_depth(auxiliary_images, auxiliary_camera)
-        print(
-            f"[script] Captured auxiliary depth and left RGB for dataset: "
-            f"camera={auxiliary_camera_name} rgb={robot._last_auxiliary_left_rgb.shape} "
-            f"depth={robot._last_auxiliary_depth.shape}"
+        auxiliary_k, _ = get_zed_intrinsics_and_baseline(auxiliary_camera)
+        auxiliary_points_cam, auxiliary_colors = depth_rgb_to_camera_point_cloud(
+            robot._last_auxiliary_depth,
+            robot._last_auxiliary_left_rgb,
+            auxiliary_k,
+            stride=4,
+            max_depth_m=float(getattr(robot.config, "script_auxiliary_point_cloud_max_depth_m", 0.5)),
         )
-        # Lift the gripper up
-        target_pos = np.array([0.135, -0.354, 0.35], dtype=np.float64)
-        for i in range(total_photo_steps):
-            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-            next_tgt_pos = (target_pos - current_pos) / (total_photo_steps-i) + current_pos
-            next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-                current_rot,
-                target_rot,
-                max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+        visualize_open3d_point_cloud(
+            auxiliary_points_cam,
+            auxiliary_colors,
+            f"Auxiliary {auxiliary_camera_name} point cloud in camera frame",
+        )
+        rgb_img, depth_img = render_bottom_up_custom(
+            torch.from_numpy(auxiliary_points_cam),
+            torch.from_numpy(auxiliary_colors / 255.0),
+            center_x=0.025,
+            center_y=0.074,
+            H=480,
+            W=640,
+            camera_height_offset=0.08,
+            fov_deg=30,
+            brightness_scale=1,
+            point_radius=5
+        )
+        def save_rgb(rgb_image, img_name):
+            import matplotlib.pyplot as plt
+            plt.imsave(f"/home/yinongh/automate/lerobot/outputs/{img_name}.png", rgb_image)
+        def save_depth_vis(depth_image, img_name):
+            import numpy as np
+            import matplotlib.pyplot as plt
+
+            depth = np.asarray(depth_image)
+
+            valid = np.isfinite(depth) & (depth > 0)
+            if np.any(valid):
+                vmin = np.percentile(depth[valid], 1)
+                vmax = np.percentile(depth[valid], 99)
+                depth_vis = np.clip((depth - vmin) / max(vmax - vmin, 1e-8), 0, 1)
+            else:
+                depth_vis = np.zeros_like(depth, dtype=np.float32)
+            plt.imsave(
+                f"/home/yinongh/automate/lerobot/outputs/{img_name}.png",
+                depth_vis,
+                cmap="viridis",
             )
-            robot._robot_ik_controller.control(
-                    target_pos=next_tgt_pos,
-                    target_rot=next_tgt_rot,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
+        save_rgb(rgb_img, "processed_auxiliary_rgb.png")
+        save_depth_vis(depth_img, "processed_auxiliary_depth.png")
+        # zoomed_rgb = center_zoom_rgb(robot._last_auxiliary_left_rgb, scale=3.5)
+        # cropped_rgb = center_crop_rgb(
+        #     zoomed_rgb,
+        #     crop_h=480,
+        #     crop_w=640,
+        # )
+        # flipped_rgb = cropped_rgb[::-1, :, :].copy()
+        # save_rgb(flipped_rgb, "processed_auxiliary_left_rgb")
+        # zoomed_depth = center_zoom_rgb(robot._last_auxiliary_depth, scale=3.5)
+        # cropped_depth = center_crop_rgb(zoomed_depth, crop_h=480, crop_w=640)
+        # flipped_depth = cropped_depth[::-1, :].copy()
+        # init_plug_depth = normalize_depth_for_shape(flipped_depth)
+        # save_depth_vis(init_plug_depth, "processed_auxiliary_depth")
+        # print(
+        #     f"[script] Captured auxiliary depth and left RGB for dataset: "
+        #     f"camera={auxiliary_camera_name} rgb={robot._last_auxiliary_left_rgb.shape} "
+        #     f"depth={robot._last_auxiliary_depth.shape}"
+        # )
+        exit(0)
         target_pos = init_pos
         target_rot = init_rot
         for i in range(total_photo_steps):
@@ -1088,43 +1336,9 @@ def run_scripted_grasp_sequence(robot):
                     joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                 )
 
-    record["init_socket_pcd"] = robot._initial_wrist_points_world_colored
-    init_socket_pcd = np.asarray(record["init_socket_pcd"], dtype=np.float32)
-    init_points = init_socket_pcd[:, :3].copy()
-    init_colors = init_socket_pcd[:, 3:].copy()
-    rgb_init, depth_init = render_top_down_custom(
-        torch.as_tensor(init_points, dtype=torch.float32),
-        torch.as_tensor(init_colors[:, :3], dtype=torch.float32),
-        center_x=record["aligned_pos"][0],
-        center_y=record["aligned_pos"][1],
-        H=720,
-        W=1280,
-        camera_height_offset=0.02,
-        fov_deg=68.66,
-        point_radius=5,
-    )
-    rgb_img = rgb_init.clone().detach().cpu().numpy()
-    depth_img = depth_init.clone().detach().cpu().numpy()
-    rgb_crop, depth_crop = crop_rgb_depth_foreground_center(
-        rgb_img,
-        depth_img,
-        crop_h=640,
-        crop_w=480,
-    )
-    output_dir = "/home/yinongh/automate/lerobot/outputs"
-    os.makedirs(output_dir, exist_ok=True)
-    rgb_np = (np.clip(rgb_img, 0.0, 1.0) * 255).astype(np.uint8)
-    
-    rgb_crop = np.rot90(rgb_crop, k=1)
-    depth_crop = np.rot90(depth_crop, k=1)
-    rgb_crop_np = (np.clip(rgb_crop, 0.0, 1.0) * 255).astype(np.uint8)
-    depth_normalized = (depth_img / max(float(depth_img.max()), 1e-8) * 255).astype(np.uint8)
-    depth_crop_normalized = (depth_crop / max(float(depth_crop.max()), 1e-8) * 255).astype(np.uint8)
-    
-    Image.fromarray(rgb_np).save(f"{output_dir}/initial_socket_rgb.png")
-    Image.fromarray(rgb_crop_np).save(f"{output_dir}/initial_socket_rgb_crop.png")
-    Image.fromarray(depth_normalized).save(f"{output_dir}/initial_socket_depth.png")
-    Image.fromarray(depth_crop_normalized).save(f"{output_dir}/initial_socket_depth_crop.png")
+
+    record["init_EEF_pose"] = robot._robot_ik_controller.eef_pose
+    record["init_socket_depth_img"] = normalize_depth_for_shape(depth_crop)
     return record
 
 def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, fps=None):
