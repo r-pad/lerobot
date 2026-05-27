@@ -601,6 +601,36 @@ def depth_rgb_to_camera_point_cloud(
     colors = rgb[valid].astype(np.uint8)
     return points, colors
 
+def depth_rgb_to_auxiliary_camera_point_cloud(
+    depth: np.ndarray,
+    rgb: np.ndarray,
+    k: np.ndarray,
+    *,
+    stride: int = 2,
+    max_depth_m: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Unproject a depth image and RGB image into a camera-frame point cloud."""
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.ndim == 3:
+        depth = np.squeeze(depth, axis=-1)
+    h, w = depth.shape
+
+    yy, xx = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
+    stride = max(1, int(stride))
+    dense_stride = max(1, stride // 2)
+    far_sample = (yy % stride == 0) & (xx % stride == 0)
+    dense_sample = (yy % dense_stride == 0) & (xx % dense_stride == 0)
+    sample = np.where(depth < 0.25, True, np.where(depth < 0.3, dense_sample, far_sample))
+    valid = np.isfinite(depth) & (depth > 0) & (depth <= max_depth_m) & sample
+    if not np.any(valid):
+        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.uint8)
+
+    z = depth[valid]
+    x = (xx[valid].astype(np.float32) - float(k[0, 2])) * z / float(k[0, 0])
+    y = (yy[valid].astype(np.float32) - float(k[1, 2])) * z / float(k[1, 1])
+    points = np.stack([x, y, z], axis=-1).astype(np.float32)
+    colors = rgb[valid].astype(np.uint8)
+    return points, colors
 
 def transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
     """Apply a 4x4 homogeneous transform to Nx3 points."""
@@ -939,12 +969,34 @@ def closest_vertical_yaw_rot(cur_rot, vertical_rot):
 
     return vertical_rot @ yaw_rot, yaw
 
+def save_rgb(rgb_image, img_name):
+            import matplotlib.pyplot as plt
+            plt.imsave(f"/home/yinongh/automate/lerobot/outputs/{img_name}.png", rgb_image)
+def save_depth_vis(depth_image, img_name):
+            import numpy as np
+            import matplotlib.pyplot as plt
+
+            depth = np.asarray(depth_image)
+
+            valid = np.isfinite(depth) & (depth > 0)
+            if np.any(valid):
+                vmin = np.percentile(depth[valid], 1)
+                vmax = np.percentile(depth[valid], 99)
+                depth_vis = np.clip((depth - vmin) / max(vmax - vmin, 1e-8), 0, 1)
+            else:
+                depth_vis = np.zeros_like(depth, dtype=np.float32)
+            plt.imsave(
+                f"/home/yinongh/automate/lerobot/outputs/{img_name}.png",
+                depth_vis,
+                cmap="viridis",
+            )
+
 def run_scripted_grasp_sequence(robot):
     # visualize_world_and_wrist_camera_frames(robot)
     # exit(0)
     # return
     record = {}
-    skip_grasping = True
+    skip_grasping = False
     if not skip_grasping:
         home_joints = np.array(
             [-0.05045543, -0.07240624, -0.03830516, -2.48442205, -0.05757582, 2.33608194, 0.73499261],
@@ -967,7 +1019,7 @@ def run_scripted_grasp_sequence(robot):
                 break
         else:
             print(f"[script] Home joint target not fully reached, max_error={joint_error:.6f}")
-
+        time.sleep(3)
         target_quat = np.array(robot.config.target_quat, dtype=np.float64)
         target_pos = np.array(robot.config.approach_pos, dtype=np.float64)
         target_rot = transforms.quaternion_to_matrix(
@@ -1022,7 +1074,6 @@ def run_scripted_grasp_sequence(robot):
                 cur_rot = cur_pose[:3, :3]
 
                 target_rot, yaw = closest_vertical_yaw_rot(cur_rot, vertical_rot)
-                import pdb;pdb.set_trace()
 
                 robot._robot_ik_controller.control(
                     target_pos=target_rot,
@@ -1053,7 +1104,8 @@ def run_scripted_grasp_sequence(robot):
         target_pos[1] += np.random.uniform(-0.01, 0.01)
         target_pos[0] += np.random.uniform(-0.01, 0.01)
         # yaw_noise = np.random.uniform(-np.pi / 2, np.pi / 2)
-        yaw_noise = np.pi/2
+        # yaw_noise = np.pi/2
+        yaw_noise = 0
         yaw_quat_xyzw = np.array(
             [0.0, 0.0, np.sin(yaw_noise * 0.5), np.cos(yaw_noise * 0.5)],
             dtype=np.float64,
@@ -1062,7 +1114,7 @@ def run_scripted_grasp_sequence(robot):
         ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
         target_rot = ctrl_tgt_quat_xyzw.as_matrix()
         
-    skip_initialization = True
+    skip_initialization = False
     if not skip_initialization:
         total_init_steps = 100
         for i in range(total_init_steps):
@@ -1182,29 +1234,27 @@ def run_scripted_grasp_sequence(robot):
         )
         rgb_img = rgb_init.clone().detach().cpu().numpy()
         depth_img = depth_init.clone().detach().cpu().numpy()
-        rgb_crop, depth_crop = crop_rgb_depth_foreground_center(
+        init_socket_rgb, init_socket_depth = crop_rgb_depth_foreground_center(
             rgb_img,
             depth_img,
             center_x=record["aligned_pos"][0],
             center_y=record["aligned_pos"][1],
-            crop_h=640,
-            crop_w=480,
-            debug = True,
+            crop_h=480,
+            crop_w=640,
+            debug=True,
             debug_path="/home/yinongh/automate/lerobot/outputs/debug_initial_crop.png",
         )
         output_dir = "/home/yinongh/automate/lerobot/outputs"
         os.makedirs(output_dir, exist_ok=True)
-        rgb_np = (np.clip(rgb_img, 0.0, 1.0) * 255).astype(np.uint8)
-        rgb_crop = np.rot90(rgb_crop, k=1)
-        depth_crop = np.rot90(depth_crop, k=1)
-        rgb_crop_np = (np.clip(rgb_crop, 0.0, 1.0) * 255).astype(np.uint8)
-        depth_normalized = (depth_img / max(float(depth_img.max()), 1e-8) * 255).astype(np.uint8)
-        depth_crop_normalized = (depth_crop / max(float(depth_crop.max()), 1e-8) * 255).astype(np.uint8)
-        
-        Image.fromarray(rgb_np).save(f"{output_dir}/initial_socket_rgb.png")
-        Image.fromarray(rgb_crop_np).save(f"{output_dir}/initial_socket_rgb_crop.png")
-        Image.fromarray(depth_normalized).save(f"{output_dir}/initial_socket_depth.png")
-        Image.fromarray(depth_crop_normalized).save(f"{output_dir}/initial_socket_depth_crop.png")
+        # rgb_np = (np.clip(rgb_img, 0.0, 1.0) * 255).astype(np.uint8)
+        # rgb_crop = np.rot90(rgb_crop, k=1)
+        # depth_crop = np.rot90(depth_crop, k=1)
+        # rgb_crop_np = (np.clip(rgb_crop, 0.0, 1.0) * 255).astype(np.uint8)
+        # depth_normalized = (depth_img / max(float(depth_img.max()), 1e-8) * 255).astype(np.uint8)
+        # depth_crop_normalized = (depth_crop / max(float(depth_crop.max()), 1e-8) * 255).astype(np.uint8)
+        init_socket_depth = normalize_depth_for_shape(init_socket_depth)
+        save_rgb(init_socket_rgb, "initial_socket_rgb")
+        save_depth_vis(init_socket_depth, "initial_socket_depth")
         print("Inspect the initial socket RGB and depth captures, then press Enter to continue...")
         input()
     skip_plug_photo = False
@@ -1212,7 +1262,9 @@ def run_scripted_grasp_sequence(robot):
         print("Initial Pose Achieved")
         time.sleep(3)
         target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-        target_pos = np.array([0.485, -0.22, 0.25], dtype=np.float64)
+        # target_pos = np.array([0.485, -0.22, 0.25], dtype=np.float64)
+        target_pos = np.array([0.485, -0.25, 0.22], dtype=np.float64)
+
         # Translate to take photo
         total_photo_steps = 5
         for i in range(total_photo_steps):
@@ -1241,7 +1293,7 @@ def run_scripted_grasp_sequence(robot):
         robot._last_auxiliary_left_rgb = auxiliary_images["left"]
         robot._last_auxiliary_depth = compute_foundation_stereo_depth(auxiliary_images, auxiliary_camera)
         auxiliary_k, _ = get_zed_intrinsics_and_baseline(auxiliary_camera)
-        auxiliary_points_cam, auxiliary_colors = depth_rgb_to_camera_point_cloud(
+        auxiliary_points_cam, auxiliary_colors = depth_rgb_to_auxiliary_camera_point_cloud(
             robot._last_auxiliary_depth,
             robot._last_auxiliary_left_rgb,
             auxiliary_k,
@@ -1253,60 +1305,49 @@ def run_scripted_grasp_sequence(robot):
             auxiliary_colors,
             f"Auxiliary {auxiliary_camera_name} point cloud in camera frame",
         )
+        # points = torch.concatenate([torch.from_numpy(auxiliary_points_cam), torch.from_numpy(auxiliary_colors / 255.0)], dim=1)
+        # torch.save(points,"debug_pcd.pth")
+        points = auxiliary_points_cam  # shape: (N, 3)
+
+        # Use lowest surface points as plug estimate
+        z = points[:, 2]
+        z_min = z.min()
+
+        # Tune this thickness if needed
+        lowest_band = z < z_min + 0.01   # 1 cm above lowest point
+
+        plug_xy_center = points[lowest_band, :2].mean(axis=0)
+
+        center_x = float(plug_xy_center[0])
+        center_y = float(plug_xy_center[1])
+        print("CENTER_X, CENTER_Y: ", center_x, center_y)
         rgb_img, depth_img = render_bottom_up_custom(
             torch.from_numpy(auxiliary_points_cam),
             torch.from_numpy(auxiliary_colors / 255.0),
-            center_x=0.025,
-            center_y=0.074,
-            H=480,
-            W=640,
-            camera_height_offset=0.08,
-            fov_deg=30,
+            center_x=center_x,
+            center_y=center_y,
+            H=720,
+            W=1280,
+            camera_height_offset=0.02,
+            fov_deg=68.66,
             brightness_scale=1,
             point_radius=5
         )
-        def save_rgb(rgb_image, img_name):
-            import matplotlib.pyplot as plt
-            plt.imsave(f"/home/yinongh/automate/lerobot/outputs/{img_name}.png", rgb_image)
-        def save_depth_vis(depth_image, img_name):
-            import numpy as np
-            import matplotlib.pyplot as plt
+        crop_h, crop_w = 480, 640
+        H, W = rgb_img.shape[:2]
 
-            depth = np.asarray(depth_image)
+        top = (H - crop_h) // 2      # 120
+        left = (W - crop_w) // 2     # 320
 
-            valid = np.isfinite(depth) & (depth > 0)
-            if np.any(valid):
-                vmin = np.percentile(depth[valid], 1)
-                vmax = np.percentile(depth[valid], 99)
-                depth_vis = np.clip((depth - vmin) / max(vmax - vmin, 1e-8), 0, 1)
-            else:
-                depth_vis = np.zeros_like(depth, dtype=np.float32)
-            plt.imsave(
-                f"/home/yinongh/automate/lerobot/outputs/{img_name}.png",
-                depth_vis,
-                cmap="viridis",
-            )
-        save_rgb(rgb_img, "processed_auxiliary_rgb.png")
-        save_depth_vis(depth_img, "processed_auxiliary_depth.png")
-        # zoomed_rgb = center_zoom_rgb(robot._last_auxiliary_left_rgb, scale=3.5)
-        # cropped_rgb = center_crop_rgb(
-        #     zoomed_rgb,
-        #     crop_h=480,
-        #     crop_w=640,
-        # )
-        # flipped_rgb = cropped_rgb[::-1, :, :].copy()
-        # save_rgb(flipped_rgb, "processed_auxiliary_left_rgb")
-        # zoomed_depth = center_zoom_rgb(robot._last_auxiliary_depth, scale=3.5)
-        # cropped_depth = center_crop_rgb(zoomed_depth, crop_h=480, crop_w=640)
-        # flipped_depth = cropped_depth[::-1, :].copy()
-        # init_plug_depth = normalize_depth_for_shape(flipped_depth)
-        # save_depth_vis(init_plug_depth, "processed_auxiliary_depth")
-        # print(
-        #     f"[script] Captured auxiliary depth and left RGB for dataset: "
-        #     f"camera={auxiliary_camera_name} rgb={robot._last_auxiliary_left_rgb.shape} "
-        #     f"depth={robot._last_auxiliary_depth.shape}"
-        # )
-        exit(0)
+        init_plug_rgb = rgb_img[top:top + crop_h, left:left + crop_w].numpy().copy()
+        init_plug_depth = depth_img[top:top + crop_h, left:left + crop_w].numpy().copy()
+        init_plug_depth = normalize_depth_for_shape(init_plug_depth)
+        init_plug_rgb = np.flipud(init_plug_rgb).copy()
+        init_plug_depth = np.flipud(init_plug_depth).copy()
+        save_rgb(init_plug_rgb, "processed_auxiliary_rgb")
+        save_depth_vis(init_plug_depth, "processed_auxiliary_depth")
+        print("Inspect the processed auxiliary RGB and depth captures, then press Enter to continue...")
+        input()
         target_pos = init_pos
         target_rot = init_rot
         for i in range(total_photo_steps):

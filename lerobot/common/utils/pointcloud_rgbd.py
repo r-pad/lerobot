@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import os
 from PIL import Image
 
 import plotly.graph_objects as go
@@ -74,6 +75,38 @@ def visualize_pointcloud_plotly(points, colors, max_points=50000, save_path="poi
     print(f"Saved point cloud visualization to {save_path}")
     
     return fig
+
+
+def visualize_colored_pcd_pth(
+    pth_path="/home/yinongh/automate/lerobot/debug_pcd.pth",
+    save_path="/home/yinongh/automate/lerobot/debug_pcd_plotly.html",
+    max_points=200000,
+):
+    """
+    Load an Nx6 colored point cloud tensor from .pth and save an interactive Plotly HTML.
+
+    The tensor layout is expected to be [x, y, z, r, g, b].
+    """
+    pcd = torch.load(pth_path, map_location="cpu")
+    if isinstance(pcd, dict):
+        pcd = pcd.get("points", pcd.get("pcd", pcd.get("arr_0")))
+    if pcd is None:
+        raise ValueError(f"No point cloud tensor found in {pth_path}")
+    if torch.is_tensor(pcd):
+        pcd = pcd.detach().cpu()
+    else:
+        pcd = torch.as_tensor(pcd)
+    if pcd.ndim != 2 or pcd.shape[1] < 6:
+        raise ValueError(f"Expected an Nx6 point cloud, got shape {tuple(pcd.shape)}")
+
+    points = pcd[:, :3]
+    colors = pcd[:, 3:6]
+    print(f"Loaded {pth_path}: {tuple(pcd.shape)}")
+    print(f"XYZ min: {points.min(dim=0).values.numpy()}")
+    print(f"XYZ max: {points.max(dim=0).values.numpy()}")
+    print(f"RGB min: {colors.min(dim=0).values.numpy()}")
+    print(f"RGB max: {colors.max(dim=0).values.numpy()}")
+    return visualize_pointcloud_plotly(points, colors, max_points=max_points, save_path=save_path)
 
 def create_structured_cylinder(center_x=0.1, center_y=0.1, radius=0.02, height=0.04, 
                                 num_points_circumference=200, num_points_height=50):
@@ -526,6 +559,14 @@ def render_bottom_up_custom(
 
 if __name__ == "__main__":
 
+
+    debug_pcd_path = "/home/yinongh/automate/lerobot/debug_pcd.pth"
+    if os.path.exists(debug_pcd_path):
+        visualize_colored_pcd_pth(
+            debug_pcd_path,
+            "/home/yinongh/automate/lerobot/debug_pcd_plotly.html",
+        )
+        raise SystemExit(0)
 
     # Run the experiment
     print("=" * 60)
