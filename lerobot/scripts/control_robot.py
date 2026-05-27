@@ -283,6 +283,23 @@ def record(
         else:
             extra_features = {}
 
+        auxiliary_camera = robot.cameras.get("cam_auxiliary")
+        if auxiliary_camera is not None:
+            aux_height = auxiliary_camera.height
+            aux_width = auxiliary_camera.width
+            aux_dtype = "video" if cfg.video else "image"
+            extra_features["observation.images.cam_auxiliary.left"] = {
+                "dtype": aux_dtype,
+                "shape": (aux_height, aux_width, 3),
+                "names": ["height", "width", "channels"],
+                "info": "One-shot auxiliary ZED left RGB captured during scripted setup",
+            }
+            extra_features["observation.images.cam_auxiliary.depth"] = {
+                "dtype": aux_dtype,
+                "shape": (aux_height, aux_width, 1),
+                "names": ["height", "width", "channels"],
+                "info": "One-shot auxiliary FoundationStereo depth in uint16 millimeters",
+            }
         # Generic per-policy visualization channel. A policy that wants to record a
         # per-step visualization frame into the dataset declares two fields on its
         # config:
@@ -338,13 +355,17 @@ def record(
         if recorded_episodes >= cfg.num_episodes:
             break
 
-        if has_method(robot, "open_gripper") and robot.robot_type != "script":
-            robot.open_gripper()
+        # if has_method(robot, "open_gripper") and robot.robot_type != "script":
+        #     robot.open_gripper()
 
         # Give time to position GELLO at the desired start pose before each episode
         if cfg.reset_time_s > 0 and policy is not None:
             log_say("Position GELLO at start pose", cfg.play_sounds)
             robot.run_calibration()
+
+        if robot.robot_type == "script":
+            robot._scripted_grasp_sequence_done = False
+            robot._scripted_insert_meta_data = None
 
         log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
         record_episode(
