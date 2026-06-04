@@ -66,6 +66,31 @@ Key flags:
 - `--robot.use_eef=true` — runs forward kinematics and stores computed EEF pose
 - Left/right arrow keys: finish / reset current episode
 
+## Multi-view Recording
+
+For multi-camera setups, add a second (and third) Azure Kinect with hardware sync. One camera is the `master`, the rest are `subordinate` with a small `subordinate_delay_off_master_usec`:
+
+```bash
+python lerobot/scripts/control_robot.py --robot.type=aloha --control.type=record \
+    --control.single_task="Fold the onesie." \
+    --control.repo_id=<your_hf_user>/fold_onesie_multiview \
+    --control.num_episodes=50 \
+    --robot.cameras='{"cam_azure_kinect_back": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "intelrealsense", "serial_number": "218622271027", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' \
+    --robot.use_eef=true --control.push_to_hub=true \
+    --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 \
+    --control.num_image_writer_processes=4 --control.display_data=false \
+    --robot.max_relative_target=null
+```
+
+(Use `--control.type=teleoperate` with the same `--robot.cameras` to just preview.)
+
+Things to keep in mind when setting up multi-view:
+- Check which camera is physically wired as master/subordinate and set `wired_sync_mode` accordingly.
+- Use 10 Gb USB 3.0 ports and spread the cameras across different USB controllers — outside ports can share an internal controller, so check `lsusb -t`.
+- If teleop crashes, check each camera separately and unplug/replug/reboot as needed; none of these drivers are especially reliable.
+- Maintain a consistent start and end pose (gripper in holster, handle vertical and touching base, gripper open).
+- Human demos are recorded at `--control.fps=15` (see [ghost.md](ghost.md)).
+
 ## Visualize and Replay
 
 Visualize:
@@ -131,56 +156,9 @@ data = mujoco.MjData(model)
 viewer = mujoco.viewer.launch(model, data)
 ```
 
-## Preparing Human Demonstrations (Detailed)
+## Preparing Human Demonstrations
 
-After collecting human demos:
-
-1. **Hand pose estimation** with [WiLoR](https://github.com/sriramsk1999/wilor):
-   ```bash
-   python demo_lerobot_detectron2.py \
-       --input_folder "/home/sriram/.cache/huggingface/lerobot/<repo_id>/videos/chunk-000/" \
-       --output_folder "/data/sriram/lerobot_extradata/<repo_id>/wilor_hand_pose"
-   ```
-
-2. **Annotate events** (manually) using `lerobot/scripts/annotate_events.py`
-
-3. **Upgrade dataset** — either humanize or phantomize:
-
-   **Humanize** (keep human in video):
-   ```bash
-   python upgrade_dataset.py \
-       --source_repo_id <source_id> \
-       --target_repo_id <target_id> \
-       --humanize \
-       --new_features goal_gripper_proj gripper_pcds next_event_idx
-   ```
-
-   **Phantomize** (retarget human to robot):
-
-   a. Generate masks with [GSAM-2](https://github.com/sriramsk1999/Grounded-SAM-2):
-   ```bash
-   python gsam2_lerobot.py <repo_id> <cam_name>
-   ```
-
-   b. Inpaint with [E2FGVI](https://github.com/MCG-NKU/E2FGVI) using the GSAM-2 masks
-
-   c. Generate Phantom videos from lfd3d:
-   ```bash
-   python run_phantom_lerobot.py \
-       --calib_json <calibration_json> \
-       --lerobot-extradata-path /data/sriram/lerobot_extradata/<repo_id>
-   ```
-
-   d. Create the phantomized dataset:
-   ```bash
-   python upgrade_dataset.py \
-       --source_repo_id <source_id> \
-       --target_repo_id <target_id> \
-       --phantomize \
-       --path_to_extradata /data/sriram/lerobot_extradata/ \
-       --new_features goal_gripper_proj gripper_pcds next_event_idx \
-       --extrinsics_txt <path_to_extrinsics>
-   ```
+Human demos are collected at 15 fps and processed (hand pose estimation → event annotation → humanize/phantomize) into training data. The full step-by-step pipeline lives in [ghost.md](ghost.md).
 
 ## Calibration Playbook
 

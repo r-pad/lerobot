@@ -1,7 +1,7 @@
 """
 HACK: COPIED OVER/simplified FROM
 
-https://github.com/r-pad/lfd3d/blob/main/src/lfd3d/models/articubot.py
+https://github.com/r-pad/ghost/blob/main/src/ghost/models/articubot.py
 
 Which in turn was copied from the articubot repo -> model_invariant.py
 """
@@ -877,7 +877,7 @@ if __name__ == "__main__":
 
     # Initialize WandB API and download artifact
     artifact_dir = "wandb"
-    checkpoint_reference = f"r-pad/lfd3d/best_rmse_model-{args.run_id}:best"
+    checkpoint_reference = f"r-pad/ghost/best_rmse_model-{args.run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
     ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)

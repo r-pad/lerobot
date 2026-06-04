@@ -22,7 +22,7 @@ import pytorch3d.transforms as transforms
 
 def generate_heatmap_images(index, gripper_pcds, subgoal_indices, K, world_to_cam, img_shape, GRIPPER_IDX):
     """
-    gripper pointclouds are in world frame (check r-pad/lfd3d)
+    gripper pointclouds are in world frame (check r-pad/ghost)
     Compute heatmaps with the gripper positions at the end of each subgoal.
 
     Create a video of heatmaps corresponding to the goal heatmap for each frame in the rgb video.
@@ -187,8 +187,8 @@ def gen_droid_dataset(
         scale_factor: Scaling factor
     """
     droid_raw_dir = f"{droid_path}/droid_raw"  # raw videos, depth and metadata
-    gripper_pcd_dir = f"{droid_path}/droid_gripper_pcd"  # gripper pcd rendered from Mujoco - see r-pad/lfd3d
-    event_dir = f"{droid_path}/droid_gemini_events"  # Subgoals and videos - see r-pad/lfd3d
+    gripper_pcd_dir = f"{droid_path}/droid_gripper_pcd"  # gripper pcd rendered from Mujoco - see r-pad/ghost
+    event_dir = f"{droid_path}/droid_gemini_events"  # Subgoals and videos - see r-pad/ghost
     # indexes of selected gripper points -> handpicked
     GRIPPER_IDX = np.array([356, 232, 16])
 

@@ -1,7 +1,7 @@
 """
 DINO-based heatmap prediction network for goal-conditioned policies.
 
-Copied from lfd3d to avoid circular dependency.
+Copied from ghost to avoid circular dependency.
 """
 
 import torch

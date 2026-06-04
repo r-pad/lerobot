@@ -107,7 +107,7 @@ class HighLevelConfig:
     model_type: str = "articubot"  # "articubot", "dino_heatmap", or "dino_3dgp"
     run_id: Optional[str] = None
     entity: str = "r-pad"
-    project: str = "lfd3d"
+    project: str = "ghost"
     checkpoint_type: str = "rmse"
     max_depth: float = 1.5
     num_points: int = 8192
@@ -593,9 +593,9 @@ class HighLevelWrapper:
 def initialize_articubot_model(run_id, use_text_embedding, use_dual_head, in_channels, device):
     """Initialize Articubot PointNet2 model from wandb artifact"""
     # Initialize WandB API and download artifact
-    # Follows naming convention in lfd3d
+    # Follows naming convention in ghost
     artifact_dir = "wandb"
-    checkpoint_reference = f"r-pad/lfd3d/best_rmse_model-{run_id}:best"
+    checkpoint_reference = f"r-pad/ghost/best_rmse_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
     ckpt_file = artifact.get_path("model.ckpt").download(root=artifact_dir)

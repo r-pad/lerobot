@@ -129,6 +129,23 @@ On startup, the robot will:
 5. Run calibration (move Franka to match GELLO pose)
 6. Begin teleoperation (arm via GELLO, hand via Manus glove)
 
+## Recording Episodes
+
+Record with two fixed Azure Kinects (hardware-synced master/subordinate):
+
+```bash
+python lerobot/scripts/control_robot.py --robot.type=franka_leap --control.type=record \
+    --control.single_task="Grasp the mug." \
+    --control.repo_id=<your_hf_user>/grasp_mug_franka_leap \
+    --control.num_episodes=10 \
+    --robot.cameras='{"cam_azure_kinect_front": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_side": {"type": "azurekinect", "device_id": 2, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}}' \
+    --robot.use_eef=true --control.push_to_hub=false \
+    --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 \
+    --control.num_image_writer_processes=4 --control.display_data=true
+```
+
+See [training.md](training.md) for training and evaluation commands.
+
 ## State and Action Space
 
 | Component | DOF | Details |

@@ -174,7 +174,7 @@ class DP3Config(PreTrainedConfig):
     hl_model_type: str = "dino_3dgp"  # "articubot", "dino_heatmap", or "dino_3dgp"
     hl_run_id: str | None = "5s0w1tg7"
     hl_entity: str = "r-pad"
-    hl_project: str = "lfd3d"
+    hl_project: str = "ghost"
     hl_checkpoint_type: str = "rmse"
     hl_max_depth: float = 1.5
     hl_num_points: int = 8192

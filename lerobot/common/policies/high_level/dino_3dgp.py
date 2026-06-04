@@ -1,7 +1,7 @@
 """
 DINOv3-based 3D Goal Prediction Network for goal-conditioned policies.
 
-Copied from lfd3d/models/dino_3dgp.py for inference-only use.
+Copied from ghost/models/dino_3dgp.py for inference-only use.
 This model predicts 3D goal points using:
 - DINOv3 image features
 - 3D positional encoding from depth

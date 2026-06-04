@@ -86,3 +86,24 @@ On startup, the robot will:
 3. Auto-detect and activate the Robotiq gripper
 4. Run calibration (move Franka to match GELLO pose)
 5. Begin teleoperation
+
+## Recording Episodes
+
+Record with two fixed Azure Kinects (hardware-synced master/subordinate) and the wrist-mounted ZED:
+
+```bash
+python lerobot/scripts/control_robot.py --robot.type=droid --control.type=record \
+    --control.single_task="Move the red mug." \
+    --control.repo_id=<your_hf_user>/move_red_mug_droid \
+    --control.num_episodes=20 \
+    --robot.cameras='{"cam_azure_kinect_left": {"type": "azurekinect", "device_id": 1, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "master"}, "cam_azure_kinect_front": {"type": "azurekinect", "device_id": 0, "fps": 30, "width": 1280, "height": 720, "use_transformed_depth": true, "wired_sync_mode": "subordinate", "subordinate_delay_off_master_usec": 200}, "cam_wrist": {"type": "zed", "serial_number": "10296178", "fps": 30, "width": 1280, "height": 720, "use_depth": false}}' \
+    --robot.use_eef=true --control.push_to_hub=true \
+    --control.fps=30 --control.reset_time_s=5 --control.warmup_time_s=3 \
+    --control.num_image_writer_processes=4 --control.display_data=true
+```
+
+Pass the same `--robot.cameras` to `--control.type=teleoperate` to preview the camera streams.
+
+## Training & Evaluation
+
+Train and roll out as usual, but set `--policy.robot_type=droid`. See [training.md](training.md) for the full set of training/eval commands.
