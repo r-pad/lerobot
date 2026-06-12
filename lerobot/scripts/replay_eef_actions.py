@@ -105,7 +105,9 @@ def polaris_to_lerobot_eef(action_np: np.ndarray, undo_z_rotation_deg: float = 0
         rot6d = p3d.matrix_to_rotation_6d((R_z @ R_pred).unsqueeze(0)).squeeze(0)
 
     gripper_lerobot = 1.0 - gripper
+    # gripper_lerobot = gripper
     return torch.cat([rot6d, trans, gripper_lerobot])
+    # return torch.cat([trans, rot6d , gripper_lerobot])
 
 
 def _build_dataset(repo_id: str, fps: float, robot: DroidRobot, task: str):

@@ -69,9 +69,29 @@ def transform_eef(eef: torch.Tensor, gripper_bin_override: torch.Tensor | None =
     return torch.cat([trans, rot6d_new, gripper_bin])  # [trans(3), rot6d(6), gripper_bin(1)]
 
 
-def transform_eef_dataset(source_repo_id: str, target_repo_id: str, target_fps: int | None = None):
+def _open_target_for_resume(target_repo_id: str) -> LeRobotDataset:
+    """Re-open an existing local target dataset so we can append more episodes to it."""
+    obj = LeRobotDataset.__new__(LeRobotDataset)
+    obj.meta = LeRobotDatasetMetadata(target_repo_id)
+    obj.repo_id = obj.meta.repo_id
+    obj.root = obj.meta.root
+    obj.revision = None
+    obj.tolerance_s = 1e-4
+    obj.image_writer = None
+    obj.episodes = None
+    obj.image_transforms = None
+    obj.delta_timestamps = None
+    obj.delta_indices = None
+    obj.episode_data_index = None
+    obj.video_backend = "pyav"
+    obj.hf_dataset = obj.create_hf_dataset()
+    obj.episode_buffer = obj.create_episode_buffer()
+    return obj
+
+
+def transform_eef_dataset(source_repo_id: str, target_repo_id: str, target_fps: int | None = None, resume: bool = False):
     print(f"Loading source dataset: {source_repo_id}")
-    source_dataset = LeRobotDataset(source_repo_id, tolerance_s=0.0004)
+    source_dataset = LeRobotDataset(source_repo_id, tolerance_s=0.034)
     source_meta    = LeRobotDatasetMetadata(source_repo_id)
 
     source_fps = source_dataset.fps
@@ -84,60 +104,78 @@ def transform_eef_dataset(source_repo_id: str, target_repo_id: str, target_fps: 
         target_fps = source_fps
         subsample_factor = 1
 
-    target_dataset = LeRobotDataset.create(
-        repo_id=target_repo_id,
-        fps=target_fps,
-        features=source_dataset.features,
-    )
+    if resume:
+        target_dataset = _open_target_for_resume(target_repo_id)
+        start_episode = target_dataset.meta.total_episodes
+        print(f"Resuming from episode {start_episode} (already have {target_dataset.meta.total_frames} frames)")
+    else:
+        target_dataset = LeRobotDataset.create(
+            repo_id=target_repo_id,
+            fps=target_fps,
+            features=source_dataset.features,
+        )
+        start_episode = 0
 
-    for episode_idx in range(source_meta.info["total_episodes"]):
+    skipped_episodes = []
+    for episode_idx in range(start_episode, source_meta.info["total_episodes"]):
         print(f"Processing episode {episode_idx}")
         start = source_dataset.episode_data_index["from"][episode_idx].item()
         end   = source_dataset.episode_data_index["to"][episode_idx].item()
 
-        for idx in tqdm(range(start, end, subsample_factor), desc=f"Episode {episode_idx}"):
-            frame = source_dataset[idx]
+        try:
+            for idx in tqdm(range(start, end, subsample_factor), desc=f"Episode {episode_idx}"):
+                frame = source_dataset[idx]
 
-            frame_data = {
-                k: v for k, v in frame.items()
-                if k not in AUTO_FIELDS and k in source_dataset.features
-            }
-            frame_data["task"] = source_meta.tasks[frame["task_index"].item()]
+                frame_data = {
+                    k: v for k, v in frame.items()
+                    if k not in AUTO_FIELDS and k in source_dataset.features
+                }
+                frame_data["task"] = source_meta.tasks[frame["task_index"].item()]
 
-            # Transform EEF pose fields. Source the binary gripper bit from the ACTION
-            # (commanded intent), then reuse it for the OBSERVATION so the observation
-            # gripper isn't fooled by a partially-closed jaw on a thick object.
-            action_key = "action.right_eef_pose"
-            obs_key    = "observation.right_eef_pose"
-            gripper_bin_from_action = None
-            if action_key in frame_data:
-                gripper_bin_from_action = binarize_gripper(frame_data[action_key].float()[9:10])
-                frame_data[action_key] = transform_eef(frame_data[action_key].float(), gripper_bin_from_action)
-            if obs_key in frame_data:
-                frame_data[obs_key] = transform_eef(frame_data[obs_key].float(), gripper_bin_from_action)
-            # Any other EEF keys (none today) keep the legacy width-based binarization.
-            for key in EEF_KEYS:
-                if key in (action_key, obs_key):
-                    continue
-                if key in frame_data:
-                    frame_data[key] = transform_eef(frame_data[key].float())
+                # Transform EEF pose fields. Source the binary gripper bit from the ACTION
+                # (commanded intent), then reuse it for the OBSERVATION so the observation
+                # gripper isn't fooled by a partially-closed jaw on a thick object.
+                action_key = "action.right_eef_pose"
+                obs_key    = "observation.right_eef_pose"
+                gripper_bin_from_action = None
+                if action_key in frame_data:
+                    gripper_bin_from_action = binarize_gripper(frame_data[action_key].float()[9:10])
+                    frame_data[action_key] = transform_eef(frame_data[action_key].float(), gripper_bin_from_action)
+                if obs_key in frame_data:
+                    frame_data[obs_key] = transform_eef(frame_data[obs_key].float(), gripper_bin_from_action)
+                # Any other EEF keys (none today) keep the legacy width-based binarization.
+                for key in EEF_KEYS:
+                    if key in (action_key, obs_key):
+                        continue
+                    if key in frame_data:
+                        frame_data[key] = transform_eef(frame_data[key].float())
 
-            # Decode images back to uint8 HWC (as expected by add_frame)
-            for key in list(frame_data.keys()):
-                if key.startswith("observation.images.cam_azure_kinect"):
-                    if key.endswith(".color") or key.endswith(".goal_gripper_proj"):
-                        frame_data[key] = (frame_data[key].permute(1, 2, 0) * 255).to(torch.uint8)
-                    elif key.endswith(".transformed_depth"):
-                        frame_data[key] = (frame_data[key].permute(1, 2, 0) * 1000).to(torch.uint16)
+                # Decode images back to uint8 HWC (as expected by add_frame)
+                for key in list(frame_data.keys()):
+                    if key.startswith("observation.images.cam_azure_kinect"):
+                        if key.endswith(".color") or key.endswith(".goal_gripper_proj"):
+                            frame_data[key] = (frame_data[key].permute(1, 2, 0) * 255).to(torch.uint8)
+                        elif key.endswith(".transformed_depth"):
+                            frame_data[key] = (frame_data[key].permute(1, 2, 0) * 1000).to(torch.uint16)
 
-            if "observation.images.cam_wrist" in frame_data:
-                frame_data["observation.images.cam_wrist"] = (
-                    frame_data["observation.images.cam_wrist"].permute(1, 2, 0) * 255
-                ).to(torch.uint8)
+                if "observation.images.cam_wrist" in frame_data:
+                    frame_data["observation.images.cam_wrist"] = (
+                        frame_data["observation.images.cam_wrist"].permute(1, 2, 0) * 255
+                    ).to(torch.uint8)
 
-            target_dataset.add_frame(frame_data)
+                target_dataset.add_frame(frame_data)
+        except (AssertionError, RuntimeError) as e:
+            # Source episode is corrupt (parquet/video length mismatch, tolerance violation,
+            # torchcodec OOB, ...). Drop whatever we accumulated and skip the whole episode.
+            print(f"[skip] Episode {episode_idx} dropped: {type(e).__name__}: {e}")
+            target_dataset.episode_buffer = target_dataset.create_episode_buffer()
+            skipped_episodes.append(episode_idx)
+            continue
 
         target_dataset.save_episode()
+
+    if skipped_episodes:
+        print(f"Skipped {len(skipped_episodes)} corrupt episode(s): {skipped_episodes}")
 
     print(f"Done. Target dataset has {len(target_dataset)} frames at {target_dataset.fps} fps.")
     return target_dataset
@@ -149,9 +187,10 @@ if __name__ == "__main__":
     parser.add_argument("--target", type=str, required=True, help="Target dataset repo ID")
     parser.add_argument("--target_fps", type=int, default=None, help="Subsample to this fps (default: keep source fps)")
     parser.add_argument("--push_to_hub", action="store_true", help="Push target dataset to HuggingFace Hub")
+    parser.add_argument("--resume", action="store_true", help="Resume from last saved episode in target dataset")
     args = parser.parse_args()
 
-    dataset = transform_eef_dataset(args.source, args.target, args.target_fps)
+    dataset = transform_eef_dataset(args.source, args.target, args.target_fps, resume=args.resume)
 
     if args.push_to_hub:
         dataset.push_to_hub(repo_id=args.target)

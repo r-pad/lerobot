@@ -691,7 +691,7 @@ class AzureKinectCamera:
             self.thread.start()
 
         num_tries = 0
-        max_tries = self.fps * 2
+        max_tries = self.fps * 10
         while num_tries < max_tries:
             ready = True
             result = {}

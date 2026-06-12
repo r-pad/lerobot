@@ -14,4 +14,8 @@ from lerobot.common.policies.polaris_policy.ghost.ghost_client import (
     GhostConfig,
     GhostClient,
 )
+from lerobot.common.policies.polaris_policy.xskill.xskill_client import (
+    XSkillConfig,
+    XSkillClient,
+)
 

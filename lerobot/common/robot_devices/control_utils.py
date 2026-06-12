@@ -17,7 +17,9 @@
 ########################################################################################
 
 
+import json
 import logging
+import os
 import time
 import traceback
 from contextlib import nullcontext
@@ -30,6 +32,199 @@ import torch
 from deepdiff import DeepDiff
 from termcolor import colored
 import pytorch3d.transforms as transforms
+
+# Default location of the per-camera calibration JSON used to transform the
+# Kinect point cloud into the robot/base frame for rerun visualization.
+# Convention from polaris/utils_/data_utils.py: extrinsic is cam-to-base (4x4).
+_DEFAULT_CAM_CALIB_PATH = os.environ.get(
+    "LEROBOT_CAM_CALIB_JSON",
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+        "polaris", "PolaRiS-Hub", "put_red_cup_no_curtain", "cam_calibration.json",
+    ),
+)
+
+
+@cache
+def _load_cam_calibration(path: str) -> dict | None:
+    """Load camera calibration JSON. Returns None on any failure (visualization
+    falls back to camera-frame point cloud)."""
+    try:
+        with open(path, "r") as f:
+            calib = json.load(f)
+        return {
+            cam_key: np.asarray(cam_data["extrinsic"], dtype=np.float32)
+            for cam_key, cam_data in calib.items()
+            if "extrinsic" in cam_data
+        }
+    except Exception as e:
+        print(f"[rerun viz] could not load camera calibration {path}: {e}")
+        return None
+
+
+def _eef_pose_to_axes(eef_pose: torch.Tensor, axis_len: float = 0.1):
+    """Convert an EEF pose tensor [rot6d(6), pos(3), gripper(1)] to (origins, vectors)
+    suitable for rr.Arrows3D. Returns three arrows (X red, Y green, Z blue)."""
+    rot = transforms.rotation_6d_to_matrix(eef_pose[:6]).cpu().numpy()
+    pos = eef_pose[6:9].cpu().numpy()
+    axes = rot @ (np.eye(3) * axis_len)
+    return [pos] * 3, axes
+
+
+def _log_eef_arrows(path: str, eef_pose: torch.Tensor, colors=None, axis_len: float = 0.1):
+    if colors is None:
+        colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255]]  # X=R, Y=G, Z=B
+    origins, vectors = _eef_pose_to_axes(eef_pose, axis_len=axis_len)
+    rr.log(path, rr.Arrows3D(origins=origins, vectors=vectors, colors=colors))
+
+
+_PCD_DEBUG_PRINTED = {"once": False, "missing_key": False, "missing_calib": False}
+
+
+def _log_kinect_pointcloud(observation: dict, cam_key: str, calib_cam_key: str,
+                           subsample_stride: int = 4, max_depth_m: float = 3.0,
+                           rerun_path: str = "world/pointcloud_left"):
+    """Log a kinect point cloud (in base frame if calibration available, else camera frame)."""
+    pcd_obs_key = f"observation.images.{cam_key}.point_cloud"
+    if pcd_obs_key not in observation:
+        if not _PCD_DEBUG_PRINTED["missing_key"]:
+            relevant = [k for k in observation if cam_key in k]
+            print(
+                f"[rerun viz] '{pcd_obs_key}' not in observation -- pointcloud will not be logged.\n"
+                f"            Did you set use_depth=true and use_point_cloud=true in --robot.cameras for '{cam_key}'?\n"
+                f"            Keys present for this camera: {relevant}"
+            )
+            _PCD_DEBUG_PRINTED["missing_key"] = True
+        return
+    pcd = observation[pcd_obs_key]
+    if isinstance(pcd, torch.Tensor):
+        pcd = pcd.cpu().numpy()
+    # Kinect SDK (pyk4a.depth_point_cloud) returns int16 in MILLIMETERS.
+    # Convert to float32 meters before any spatial filtering.
+    if pcd.dtype != np.float32:
+        pcd = pcd.astype(np.float32) / 1000.0              # (H_d, W_d, 3) meters at DEPTH resolution
+
+    # Pcd lives at the depth camera's native resolution (e.g. 640x576), which
+    # does NOT match the color camera's resolution (e.g. 1280x720). Prefer
+    # `transformed_color` (color resampled+aligned to depth grid by the SDK).
+    # Fall back to resizing raw color to depth dims for an approximate match.
+    transformed_color_key = f"observation.images.{cam_key}.transformed_color"
+    color_obs_key = f"observation.images.{cam_key}.color"
+    rgb = None
+    if transformed_color_key in observation:
+        rgb = observation[transformed_color_key]
+    elif color_obs_key in observation:
+        rgb = observation[color_obs_key]
+    if isinstance(rgb, torch.Tensor):
+        rgb = rgb.cpu().numpy()
+
+    if rgb is not None and rgb.shape[:2] != pcd.shape[:2]:
+        # Resolution mismatch (most common: color is at color-cam res, pcd is at depth-cam res).
+        # Approximate alignment by resizing color to depth dims using cv2.
+        try:
+            import cv2
+            rgb = cv2.resize(
+                rgb, (pcd.shape[1], pcd.shape[0]), interpolation=cv2.INTER_AREA
+            )
+        except Exception as e:
+            print(f"[rerun viz] color resize failed ({e}); pointcloud will be uncolored.")
+            rgb = None
+
+    # Subsample for performance (apply AFTER resolution match so they stride together)
+    if subsample_stride > 1:
+        pcd = pcd[::subsample_stride, ::subsample_stride, :]
+        if rgb is not None:
+            rgb = rgb[::subsample_stride, ::subsample_stride, :]
+
+    pts = pcd.reshape(-1, 3)
+    rgb_flat = rgb.reshape(-1, 3) if rgb is not None else None
+
+    # Filter invalid / too-far points
+    valid = np.isfinite(pts).all(axis=1) & (np.linalg.norm(pts, axis=1) > 1e-3)
+    valid &= np.linalg.norm(pts, axis=1) < max_depth_m
+    pts = pts[valid]
+    if rgb_flat is not None:
+        rgb_flat = rgb_flat[valid]
+
+    if pts.shape[0] == 0:
+        if not _PCD_DEBUG_PRINTED["once"]:
+            print(f"[rerun viz] pointcloud has 0 valid points after filter "
+                  f"(max_depth_m={max_depth_m}). Check your camera position/scene.")
+            _PCD_DEBUG_PRINTED["once"] = True
+        return
+
+    # Transform camera frame -> base frame using cam-to-base extrinsic
+    calib = _load_cam_calibration(_DEFAULT_CAM_CALIB_PATH)
+    if calib is None or calib_cam_key not in calib:
+        if not _PCD_DEBUG_PRINTED["missing_calib"]:
+            print(
+                f"[rerun viz] no calibration for '{calib_cam_key}' at {_DEFAULT_CAM_CALIB_PATH}. "
+                f"Pointcloud will be logged in CAMERA frame (will not align with EEF arrows). "
+                f"Set LEROBOT_CAM_CALIB_JSON or fix the file to enable cam->base transform."
+            )
+            _PCD_DEBUG_PRINTED["missing_calib"] = True
+    else:
+        E = calib[calib_cam_key]                          # (4, 4) cam-to-base
+        pts = pts @ E[:3, :3].T + E[:3, 3]
+
+    if not _PCD_DEBUG_PRINTED["once"]:
+        print(f"[rerun viz] logging pointcloud '{rerun_path}': {pts.shape[0]} points "
+              f"(stride={subsample_stride}, max_depth_m={max_depth_m}).")
+        _PCD_DEBUG_PRINTED["once"] = True
+
+    if rgb_flat is None:
+        rr.log(rerun_path, rr.Points3D(pts))
+    else:
+        rr.log(rerun_path, rr.Points3D(pts, colors=rgb_flat.astype(np.uint8)))
+
+
+def _preview_pred_action_in_rerun(observation: dict, pred_action_eef: torch.Tensor,
+                                  robot, display_data: bool):
+    """Log the about-to-be-sent action + current state + pcd to rerun BEFORE
+    the action is actually sent. Used by step-pause mode so the user can
+    inspect what the policy is about to command."""
+    if not display_data:
+        return
+    try:
+        if (not is_headless()) or robot.robot_type.startswith("lekiwi"):
+            _log_eef_arrows("world/predicted_eef", pred_action_eef)
+            if "observation.right_eef_pose" in observation:
+                _log_eef_arrows(
+                    "world/current_eef",
+                    observation["observation.right_eef_pose"],
+                    colors=[[150, 80, 80], [80, 150, 80], [80, 80, 150]],
+                )
+            for key in observation:
+                if "image" not in key or key.endswith(".point_cloud"):
+                    continue
+                v = observation[key]
+                if isinstance(v, torch.Tensor):
+                    v = v.numpy()
+                if v.ndim == 3 and v.shape[-1] == 3:
+                    rr.log(key, rr.Image(v), static=True)
+                elif v.ndim == 2:
+                    rr.log(key, rr.DepthImage(v), static=True)
+            _log_kinect_pointcloud(
+                observation,
+                cam_key="cam_azure_kinect_left",
+                calib_cam_key="cam1",
+                subsample_stride=4,
+                rerun_path="world/pointcloud_left",
+            )
+    except Exception as e:
+        print(f"[step-pause] preview log failed: {e}")
+
+
+def _wait_for_step(events: dict) -> bool:
+    """Block until the user signals to advance. Returns True if the user
+    requested continuous mode ('c'), False otherwise. Also returns immediately
+    if events['exit_early'] is set."""
+    events["step_advance"] = False
+    events["step_continue"] = False
+    print("[step-pause] waiting... (space=next, c=continuous, ←=exit)", flush=True)
+    while not events.get("step_advance") and not events.get("exit_early"):
+        time.sleep(0.02)
+    return bool(events.get("step_continue"))
 
 from lerobot.common.datasets.image_writer import safe_stop_image_writer
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -126,6 +321,18 @@ def is_headless():
 
 def predict_action(observation, policy, device, use_amp):
     observation = copy(observation)
+    # Drop visualization-only camera streams (raw depth and point clouds) — the
+    # policy never consumes these and the image-prep loop below would choke on
+    # their shape. `.transformed_depth` is kept here because some policies
+    # (e.g. GhostClient with use_map_anything=False) need the camera-native
+    # depth to reach select_action; image-prep handles its (H, W, 1) uint16
+    # layout correctly via the "image" branch (→ (1, 1, H, W) float metres).
+    for _k in list(observation.keys()):
+        if (
+            _k.endswith(".point_cloud")
+            or _k.endswith(".depth")
+        ):
+            observation.pop(_k)
     with (
         torch.inference_mode(),
         torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
@@ -177,6 +384,9 @@ def init_keyboard_listener():
     # Only import pynput if not in a headless environment
     from pynput import keyboard
 
+    events["step_advance"] = False
+    events["step_continue"] = False
+
     def on_press(key):
         try:
             if key == keyboard.Key.right:
@@ -190,6 +400,12 @@ def init_keyboard_listener():
                 print("Escape key pressed. Stopping data recording...")
                 events["stop_recording"] = True
                 events["exit_early"] = True
+            elif key == keyboard.Key.space:
+                events["step_advance"] = True
+            elif hasattr(key, "char") and key.char == "c":
+                print("'c' pressed. Switching to continuous mode.")
+                events["step_continue"] = True
+                events["step_advance"] = True
         except Exception as e:
             print(f"Error handling key press: {e}")
 
@@ -273,7 +489,7 @@ def compute_goal_prediction(policy, policy_cfg, single_task, observation):
         gripper_projs = policy.high_level.predict_and_project(
             single_task, camera_obs,
             robot_type=policy.config.robot_type,
-            robot_kwargs={"observation.state": observation["observation.state"]}
+            robot_kwargs={"observation.state": observation["observation.state"], "observation.right_eef_pose": observation["observation.right_eef_pose"]}
         )  # Returns dict[str, np.ndarray]
 
         # Store as dict of tensors
@@ -364,6 +580,16 @@ def control_loop(
     if policy is not None:
         policy.reset()
 
+    # Step-pause mode: pause before send_action on each fresh policy prediction.
+    # Enable via LEROBOT_STEP_PAUSE=1. Press space to advance one prediction,
+    # 'c' to switch to continuous, right-arrow to exit episode early.
+    step_pause_enabled = bool(int(os.environ.get("LEROBOT_STEP_PAUSE", "0")))
+    if step_pause_enabled and (is_headless() or events is None or "step_advance" not in events):
+        print("[step-pause] Disabled (headless or keyboard listener not initialized).")
+        step_pause_enabled = False
+    if step_pause_enabled:
+        print("[step-pause] ENABLED. Space=advance one prediction, 'c'=continuous, right-arrow=exit episode.")
+
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
@@ -389,6 +615,20 @@ def control_loop(
                 pred_action, pred_action_eef = predict_action(
                     observation, policy, get_safe_torch_device(policy.config.device), policy.config.use_amp
                 )
+
+                # Pause-before-send on fresh predictions only (AMPLIFY: _actions_done == 1
+                # right after a fresh inference; buffered ticks have it > 1).
+                fresh_prediction = getattr(policy, "_actions_done", 1) == 1
+                if step_pause_enabled and fresh_prediction:
+                    _preview_pred_action_in_rerun(
+                        observation, pred_action_eef, robot, display_data,
+                    )
+                    if _wait_for_step(events):
+                        # User pressed 'c' -> drop out of pause mode for the rest of this episode
+                        step_pause_enabled = False
+                    if events.get("exit_early"):
+                        break
+
                 # Action can eventually be clipped using `max_relative_target`,
                 # so action actually sent is saved in the dataset.
                 action = robot.send_action(pred_action)
@@ -406,8 +646,26 @@ def control_loop(
                 import torch as _torch
                 observation[vis_key] = _torch.from_numpy(policy._current_vis_frame)
 
+        # Generic per-step observation passthrough: a policy can set
+        # `policy._extra_observation = {key: tensor, ...}` inside select_action to
+        # surface synthesized obs (e.g. server-produced depth) back here, since
+        # predict_action shallow-copies observation and its mutations to the inner
+        # dict never reach the dataset-validating frame builder below.
+        extra_obs = getattr(policy, "_extra_observation", None) if policy is not None else None
+        if extra_obs:
+            for _k, _v in extra_obs.items():
+                observation[_k] = _v
+
         if dataset is not None:
-            frame = {**observation, **action, "task": single_task}
+            # Drop visualization-only camera streams (raw depth and point clouds).
+            # These exist because we enabled use_depth/use_point_cloud on the Kinect for
+            # rerun viz, but the dataset feature schema doesn't include them and
+            # validate_frame would reject the frame as having "extra features".
+            persisted_obs = {
+                k: v for k, v in observation.items()
+                if not (k.endswith(".point_cloud") or k.endswith(".depth") or k.endswith(".transformed_depth"))
+            }
+            frame = {**persisted_obs, **action, "task": single_task}
             dataset.add_frame(frame)
 
         # TODO(Steven): This should be more general (for RemoteRobot instead of checking the name, but anyways it will change soon)
@@ -418,20 +676,37 @@ def control_loop(
                         rr.log(f"sent_{k}_{i}", rr.Scalar(vv.numpy()))
 
                 if "action.right_eef_pose" in action:
-                    eef_pose = action['action.right_eef_pose']
-                    eef_rot, eef_trans = transforms.rotation_6d_to_matrix(eef_pose[:6]), eef_pose[6:9]
-                    # Log EEF pose as a 3D coordinate frame
-                    origin = eef_trans.numpy()
-                    axes = eef_rot.numpy() @ (np.eye(3) * 0.1)
-                    rr.log("high_level/eef_frame", rr.Arrows3D(
-                        origins=[origin] * 3,
-                        vectors=axes,
-                        colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
-                    ))
+                    # Predicted (commanded) EEF pose this tick (X=R, Y=G, Z=B)
+                    _log_eef_arrows("world/predicted_eef", action["action.right_eef_pose"])
 
-            image_keys = [key for key in observation if "image" in key]
+            # Current EEF state of the robot (dimmer colors so it's distinguishable from predicted)
+            if "observation.right_eef_pose" in observation:
+                _log_eef_arrows(
+                    "world/current_eef",
+                    observation["observation.right_eef_pose"],
+                    colors=[[150, 80, 80], [80, 150, 80], [80, 80, 150]],
+                )
+
+            image_keys = [key for key in observation if "image" in key and not key.endswith(".point_cloud")]
             for key in image_keys:
-                rr.log(key, rr.Image(observation[key].numpy()), static=True)
+                v = observation[key]
+                if isinstance(v, torch.Tensor):
+                    v = v.numpy()
+                if v.ndim == 3 and v.shape[-1] == 3:
+                    rr.log(key, rr.Image(v), static=True)
+                elif v.ndim == 2:
+                    # depth or other single-channel
+                    rr.log(key, rr.DepthImage(v), static=True)
+
+            # Kinect point cloud transformed into the base frame, if available.
+            # cam_azure_kinect_left = device_id 1 -> "cam1" entry in cam_calibration.json
+            _log_kinect_pointcloud(
+                observation,
+                cam_key="cam_azure_kinect_left",
+                calib_cam_key="cam1",
+                subsample_stride=4,
+                rerun_path="world/pointcloud_left",
+            )
 
             # Add point cloud visualization from high-level model
             if policy is not None and hasattr(policy, 'high_level'):
@@ -529,10 +804,17 @@ def sanity_check_dataset_name(repo_id, policy_cfg):
 def sanity_check_dataset_robot_compatibility(
     dataset: LeRobotDataset, robot: Robot, fps: int, use_videos: bool
 ) -> None:
+    # Only diff the features the robot declares — the dataset may have additional
+    # features (policy viz channels registered mid-recording, goal-conditioning
+    # projections, etc.) that aren't the robot's responsibility, and demanding
+    # exact equality would block any resume after such features were added.
+    robot_features = get_features_from_robot(robot, use_videos)
+    dataset_features_subset = {k: dataset.features[k] for k in robot_features if k in dataset.features}
+
     fields = [
         ("robot_type", dataset.meta.robot_type, robot.robot_type),
         ("fps", dataset.fps, fps),
-        ("features", dataset.features, get_features_from_robot(robot, use_videos)),
+        ("features", dataset_features_subset, robot_features),
     ]
 
     mismatches = []

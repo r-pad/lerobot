@@ -613,6 +613,10 @@ class DroidRobotConfig(RobotConfig):
 
     # save end-effector pose info
     use_eef: bool = True
+
+    # Skip the interactive GELLO home calibration on connect (e.g. during policy inference)
+    skip_gello_calibration: bool = False
+
     mock: bool = False
 
 

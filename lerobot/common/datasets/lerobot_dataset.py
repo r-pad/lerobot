@@ -935,6 +935,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def clear_episode_buffer(self) -> None:
         episode_index = self.episode_buffer["episode_index"]
         if self.image_writer is not None:
+            self.image_writer.wait_until_done()
             for cam_key in self.meta.camera_keys:
                 img_dir = self._get_image_file_path(
                     episode_index=episode_index, image_key=cam_key, frame_index=0
@@ -1023,16 +1024,17 @@ class LeRobotDataset(torch.utils.data.Dataset):
             encoding_tasks.append((img_dir, video_path, self.fps, vcodec, pix_fmt))
 
         # Encode all videos in parallel
-        max_workers = min(len(encoding_tasks), mp.cpu_count())
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            for img_dir, video_path, fps, vcodec, pix_fmt in encoding_tasks:
-                future = executor.submit(encode_video_frames, img_dir, video_path, fps, vcodec, pix_fmt, overwrite=True)
-                futures.append(future)
+        if encoding_tasks:
+            max_workers = min(len(encoding_tasks), mp.cpu_count())
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                for img_dir, video_path, fps, vcodec, pix_fmt in encoding_tasks:
+                    future = executor.submit(encode_video_frames, img_dir, video_path, fps, vcodec, pix_fmt, overwrite=True)
+                    futures.append(future)
 
-            # Wait for all encodings to complete
-            for future in futures:
-                future.result()
+                # Wait for all encodings to complete
+                for future in futures:
+                    future.result()
 
         return video_paths
 

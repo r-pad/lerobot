@@ -242,6 +242,12 @@ class AzureKinectCameraConfig(CameraConfig):
         feature_specs = {}
         base = f"observation.images.{cam_key}"
 
+        # K4A depth-native grid for DepthMode.NFOV_UNBINNED (hard-coded in
+        # azure_kinect.py). transformed_color is color reprojected into this grid.
+        depth_h, depth_w = 576, 640
+        if self.rotation in (90, -90):
+            depth_h, depth_w = depth_w, depth_h
+
         if self.use_depth or self.use_transformed_depth:
             if self.use_transformed_depth:
                 feature_specs[f"{base}.transformed_depth"] = {
@@ -251,22 +257,23 @@ class AzureKinectCameraConfig(CameraConfig):
                 }
             else:
                 feature_specs[f"{base}.depth"] = {
-                    "shape": (self.height, self.width, 1),
+                    "shape": (depth_h, depth_w, 1),
                     "names": ["height", "width", "channels"],
                     "info": "Raw depth image",
                 }
 
+        # Raw color is always emitted by the camera reader, so always register it.
+        feature_specs[f"{base}.color"] = {
+            "shape": (self.height, self.width, self.channels),
+            "names": ["height", "width", "channels"],
+            "info": "Raw color image",
+        }
+
         if self.use_transformed_color:
             feature_specs[f"{base}.transformed_color"] = {
-                "shape": (self.height, self.width, self.channels),
+                "shape": (depth_h, depth_w, self.channels),
                 "names": ["height", "width", "channels"],
-                "info": "Transformed color aligned to depth",
-            }
-        else:
-            feature_specs[f"{base}.color"] = {
-                "shape": (self.height, self.width, self.channels),
-                "names": ["height", "width", "channels"],
-                "info": "Raw color image",
+                "info": "Color reprojected into the depth camera grid",
             }
 
         return feature_specs
