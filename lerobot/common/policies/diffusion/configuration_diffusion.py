@@ -112,6 +112,11 @@ class DiffusionConfig(PreTrainedConfig):
     n_obs_steps: int = 2
     horizon: int = 16
     n_action_steps: int = 8
+    # Start index into the predicted horizon for action execution.
+    # Default (None) uses n_obs_steps-1 (standard behaviour = first n_action_steps).
+    # Set to (horizon - n_action_steps) for last 8, or
+    # ((horizon - n_action_steps) // 2) for middle 8.
+    action_start_idx: int | None = None
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {

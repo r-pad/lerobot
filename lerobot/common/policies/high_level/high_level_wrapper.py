@@ -22,6 +22,9 @@ import json
 from lerobot.scripts.dataset_utils import generate_heatmap_from_points
 
 TARGET_SHAPE = 224
+_FINGER_OPEN   = 0.05
+_FINGER_CLOSED = 0.002
+_TOP_Z_OFFSET  = -0.05 
 rgb_preprocess = transforms.Compose(
     [
         transforms.Resize(
@@ -68,7 +71,17 @@ def _gripper_pcd_to_token(gripper_pcd):
 
     # Project finger vector onto plane perpendicular to forward
     finger_projected = finger_vec - np.dot(finger_vec, x_axis) * x_axis
-    y_axis = finger_projected / np.linalg.norm(finger_projected)
+    fp_norm = np.linalg.norm(finger_projected)
+    if not np.isfinite(fp_norm) or fp_norm < 1e-6:
+        # Gripper nearly closed or degenerate (NaN/zero fingertip separation).
+        # Pick an arbitrary perpendicular direction to avoid NaN in the token.
+        candidate = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        if abs(np.dot(x_axis, candidate)) > 0.9:
+            candidate = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        y_axis = np.cross(x_axis, candidate)
+        y_axis = y_axis / np.linalg.norm(y_axis)
+    else:
+        y_axis = finger_projected / fp_norm
 
     # Z completes the frame
     z_axis = np.cross(x_axis, y_axis)
@@ -97,6 +110,7 @@ def _get_gripper_pcd_droid(robot_type, robot_kwargs):
         [3] grasp : grasp center       (origin)
     """
     if "gripper_pcd" in robot_kwargs:
+        print("in it")
         return robot_kwargs["gripper_pcd"]
 
     import pytorch3d.transforms as p3d
@@ -107,8 +121,8 @@ def _get_gripper_pcd_droid(robot_type, robot_kwargs):
 
     rot_6d = ee_pose_t[:6]
     xyz = ee_pose_t[6:9].numpy().astype(np.float32)
-    gripper = float(ee_pose_t[-1])
-
+    gripper_lerobot = float(ee_pose_t[-1])
+    gripper_polaris = 1.0 - gripper_lerobot
     # rot_6d → rotation matrix (3, 3)
     R_pose = p3d.rotation_6d_to_matrix(rot_6d.unsqueeze(0)).squeeze(0)
 
@@ -126,17 +140,18 @@ def _get_gripper_pcd_droid(robot_type, robot_kwargs):
 
     rot_mat = R_pose.numpy().astype(np.float32)
 
-    # Franka finger joint: ~0 closed, ~0.04 open → half-width in meters
-    half_width = float(np.clip(gripper, 0.0, 0.04))
+    t  = np.clip(gripper_polaris, 0.0, 1.0)                             # (T,)
+    gw = _FINGER_OPEN * (1 - t) + _FINGER_CLOSED * t           # (T,) half-width
 
     offsets = np.array([
-        [0.0,         0.0, -0.05],
-        [0.0,  half_width,  0.0 ],
-        [0.0, -half_width,  0.0 ],
+        [0.0, 0.0, _TOP_Z_OFFSET],
+        [0.0,  gw,  0.0 ],
+        [0.0, -gw,  0.0 ],
         [0.0,         0.0,  0.0 ],
     ], dtype=np.float32)
 
-    return (offsets @ rot_mat.T + xyz).astype(np.float32)
+    gripper_pcd = (offsets @ rot_mat.T + xyz).astype(np.float32)
+    return gripper_pcd[[1, 2, 0, 3]]
 
 
 def _get_gripper_pcd(robot_type, robot_kwargs):
@@ -287,10 +302,9 @@ class HighLevelWrapper:
         Returns:
             trimesh object transformed to goal pose
         """
-        if robot_type == "droid":
-            return goal_prediction
         if robot_type != "aloha":
-            raise NotImplementedError(f"Goal gripper mesh visualization not implemented for robot_type={robot_type}")
+            print(f"Goal gripper mesh visualization not implemented for robot_type={robot_type}")
+            return goal_prediction
         # Get gripper mesh at current position in world frame
         gripper_mesh = render_aloha_gripper_mesh(np.eye(4), joint_state)
 
@@ -653,7 +667,7 @@ def initialize_articubot_model(run_id, use_text_embedding, use_dual_head, in_cha
     """Initialize Articubot PointNet2 model from wandb artifact"""
     # Initialize WandB API and download artifact
     # Follows naming convention in lfd3d
-    artifact_dir = "wandb"
+    artifact_dir = f"wandb/{run_id}"
     checkpoint_reference = f"r-pad/lfd3d/best_rmse_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
@@ -683,7 +697,7 @@ def initialize_dino_heatmap_model(entity, project, checkpoint_type, run_id, dino
     model_cfg = ModelConfig(dino_model, use_gripper_pcd, use_text_embedding)
     model = DinoHeatmapNetwork(model_cfg)
 
-    artifact_dir = "wandb"
+    artifact_dir = f"wandb/{run_id}"
     checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
@@ -728,7 +742,7 @@ def initialize_dino_3dgp_model(entity, project, checkpoint_type,
     )
     model = Dino3DGPNetwork(model_cfg)
 
-    artifact_dir = "wandb"
+    artifact_dir = f"wandb/{run_id}"
     checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")
@@ -782,7 +796,7 @@ def initialize_vit_3dgp_model(entity, project, checkpoint_type,
     )
     model = ViT3DGPNetwork(model_cfg)
 
-    artifact_dir = "wandb"
+    artifact_dir = f"wandb/{run_id}"
     checkpoint_reference = f"{entity}/{project}/best_{checkpoint_type}_model-{run_id}:best"
     api = wandb.Api()
     artifact = api.artifact(checkpoint_reference, type="model")

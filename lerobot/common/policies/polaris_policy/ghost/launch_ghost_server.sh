@@ -11,7 +11,7 @@ PORT="${PORT:-8766}"
 MAPANY_MODEL="${MAPANY_MODEL:-facebook/map-anything}"
 BC_WEIGHT="${BC_WEIGHT:-}"
 DEVICE="${DEVICE:-cuda}"
-CUDA_DEV="${CUDA_VISIBLE_DEVICES:-0}"
+CUDA_DEV="${CUDA_VISIBLE_DEVICES:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

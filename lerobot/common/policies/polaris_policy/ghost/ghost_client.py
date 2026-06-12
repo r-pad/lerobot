@@ -108,6 +108,7 @@ class GhostConfig(PreTrainedConfig):
     vis_tracks: bool = True
     enable_goal_conditioning: bool = False  # compatibility with control_robot.py
     local_policy_path: str | None = None
+    use_map_anything: bool = True
 
     @property
     def observation_delta_indices(self):
@@ -144,6 +145,86 @@ def img_to_tensor(img: np.ndarray) -> torch.Tensor:
         raise ValueError(f"img_to_tensor: expected (H, W, C), got shape {img.shape}")
     t = torch.from_numpy(img).to(torch.float32) / 255.0   # (H, W, C) float32 [0, 1]
     return t.permute(2, 0, 1).unsqueeze(0).contiguous()    # (1, C, H, W)
+
+
+def mix_depth_gt_and_predicted(
+    gt_depth_m: np.ndarray,
+    predicted_depth_m: np.ndarray,
+    *,
+    gt_invalid_threshold_m: float = 0.0,
+) -> np.ndarray:
+    """Fill holes in the ground-truth depth using a predicted depth map.
+
+    Where GT is "valid" (> threshold) keep GT. Where GT is missing/zero, fall back
+    to the predicted depth. Useful for combining a Kinect's `transformed_depth`
+    (accurate but full of holes, especially on shiny / dark / out-of-range surfaces)
+    with a MapAnything prediction (smooth, dense, less accurate at edges).
+
+    Args:
+        gt_depth_m:        (H, W) float32 depth in metres. 0 / NaN / negatives count as invalid.
+        predicted_depth_m: (H, W) float32 depth in metres. Same shape as `gt_depth_m`.
+        gt_invalid_threshold_m: GT depths ≤ this value are replaced by predicted.
+
+    Returns:
+        (H, W) float32 — GT where valid, predicted where GT is invalid.
+    """
+    gt = np.asarray(gt_depth_m, dtype=np.float32)
+    pr = np.asarray(predicted_depth_m, dtype=np.float32)
+    if gt.shape != pr.shape:
+        raise ValueError(
+            f"mix_depth_gt_and_predicted: shape mismatch gt={gt.shape} pr={pr.shape}"
+        )
+    valid = np.isfinite(gt) & (gt > gt_invalid_threshold_m)
+    return np.where(valid, gt, pr).astype(np.float32)
+
+
+def backproject_rgbd_to_world(
+    rgb: np.ndarray,
+    depth_m: np.ndarray,
+    K: np.ndarray,
+    cam_to_world: np.ndarray,
+    *,
+    stride: int = 4,
+    min_depth_m: float = 0.05,
+    max_depth_m: float = 3.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Back-project an RGB-D frame to a world-frame coloured point cloud.
+
+    Args:
+        rgb:         (H, W, 3) uint8 image.
+        depth_m:     (H, W) float depth in metres (0 / NaN = invalid).
+        K:           (3, 3) camera intrinsics for this RGB resolution.
+        cam_to_world:(4, 4) extrinsics that take camera-frame points to world.
+        stride:      pixel stride for subsampling (4 → 1/16 of pixels).
+        min/max_depth_m: depth clipping range to drop sky / hand-rays.
+
+    Returns:
+        pts_world: (N, 3) float32, world-frame xyz.
+        cols:      (N, 3) uint8, matching RGB.
+    """
+    h, w = depth_m.shape[:2]
+    # Subsample on a regular pixel grid for log speed.
+    vs, us = np.mgrid[0:h:stride, 0:w:stride].astype(np.float32)
+    d = depth_m[::stride, ::stride].astype(np.float32)
+    mask = np.isfinite(d) & (d > min_depth_m) & (d < max_depth_m)
+    if not mask.any():
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
+    us, vs, d = us[mask], vs[mask], d[mask]
+
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    x_c = (us - cx) * d / fx
+    y_c = (vs - cy) * d / fy
+    z_c = d
+    pts_cam = np.stack([x_c, y_c, z_c], axis=1)  # (N, 3)
+
+    # cam → world: world = R * cam + t.
+    R = cam_to_world[:3, :3].astype(np.float32)
+    t = cam_to_world[:3, 3].astype(np.float32)
+    pts_world = pts_cam @ R.T + t  # (N, 3)
+
+    cols = rgb[::stride, ::stride][mask]  # (N, 3) uint8
+    return pts_world.astype(np.float32), cols.astype(np.uint8)
 
 
 def get_heatmap_viz(rgb_image: np.ndarray, heatmap: np.ndarray, alpha: float = 0.5) -> np.ndarray:
@@ -218,11 +299,14 @@ def draw_gripper_pcd_overlay(
         x, y = int(round(pt[0])), int(round(pt[1]))
         if not (0 <= x < W and 0 <= y < H):
             continue
-        # Stamp the pcd index (0=right, 1=left, 2=top, 3=grasp). Black outline +
-        # white fill so the label stays legible on any background.
+        # White filled dot with a black outline so it stays visible on any backdrop.
+        cv2.circle(img, (x, y), 6, (0, 0, 0),       thickness=-1, lineType=cv2.LINE_AA)
+        cv2.circle(img, (x, y), 5, (255, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
+        # Small index label (0=right, 1=left, 2=top, 3=grasp) beside the dot.
         label = str(i)
-        cv2.putText(img, label, (x + 4, y - 4), font, font_scale, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(img, label, (x + 4, y - 4), font, font_scale, (255, 255, 255), 1, cv2.LINE_AA)
+        text_org = (x + 8, y - 6)
+        cv2.putText(img, label, text_org, font, font_scale, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, label, text_org, font, font_scale, (255, 255, 255), 1, cv2.LINE_AA)
     return img
 
 
@@ -271,6 +355,15 @@ class GhostClient(PreTrainedPolicy):
         self._latest_goal_heatmap_front: np.ndarray | None = None  # (H, W, 3) uint8
         self._latest_goal_heatmap_left:  np.ndarray | None = None  # (H, W, 3) uint8
 
+        # Caches for action-chunk replay: the ghost server depth call and the
+        # high-level goal prediction are expensive, so we only re-run them on
+        # steps where the inner DiffusionPolicy's action queue is empty (i.e.
+        # the start of a fresh chunk). Subsequent steps reuse these.
+        self._cached_depth_left_cpu:   torch.Tensor | None = None  # (1, H, W) float metres
+        self._cached_depth_front_cpu:  torch.Tensor | None = None  # (1, H, W) float metres
+        self._cached_depth_left_u16:   torch.Tensor | None = None  # (1, H, W) uint16 mm
+        self._cached_depth_front_u16:  torch.Tensor | None = None  # (1, H, W) uint16 mm
+
     async def _send(self, message: dict) -> dict:
         async with websockets.connect(self.uri, max_size=100 * 1024 * 1024) as ws:
             await ws.send(msgpack.packb(message, use_bin_type=True))
@@ -285,6 +378,10 @@ class GhostClient(PreTrainedPolicy):
         self._current_vis_frame = None
         self._latest_goal_heatmap_front = None
         self._latest_goal_heatmap_left = None
+        self._cached_depth_left_cpu = None
+        self._cached_depth_front_cpu = None
+        self._cached_depth_left_u16 = None
+        self._cached_depth_front_u16 = None
 
     def select_action(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
         """Build obs → send to server for depth preprocessing → run local
@@ -295,83 +392,113 @@ class GhostClient(PreTrainedPolicy):
             action_eef: (1, 10) lerobot EEF format [rot6d(6)|trans(3)|gripper_lerobot(1)].
         """
         obs = self._extract_obs(batch)
-        
-        result = asyncio.run(self._send({
-            "command": "preprocess",
-            "obs": obs,
-            # The server only does depth estimation for the two kinect views; it
-            # expects exactly 2 cam_keys ordered [cam0=front, cam1=left] (matching the
-            # calibration JSON). Any additional cam_image_keys (e.g. cam_wrist) are
-            # policy-only inputs and are not sent to the server for depth.
-            "cam_keys": list(self.config.cam_image_keys)[:2],
-            # We build the ghost viz client-side (heatmap overlay) below, so don't pay
-            # the cost of having the server render anything.
-            "return_viz": False,
-        }))
-        if "error" in result:
-            raise RuntimeError(f"[GhostClient] Server error: {result['error']}")
 
-        # The server only does depth preprocessing — its `result["obs"]` round-trips the
-        # request keys plus one `*_depth` key per cam in `cam_keys`. Merge those `*_depth`
-        # keys into batch_obs so the policy sees them alongside the original batch.
-        mapanything_obs = result["obs"]
-     
         batch_obs = batch.copy()
-
-        # predict_action moves the original batch tensors to the policy device
-        # (control_utils.py:351). All tensors we inject below must land on the same
-        # device or normalize_inputs trips on the device mismatch.
         device = self.policy.config.device
 
-        # for k, v in mapanything_obs.items():
-        #     if k.endswith("_depth"):
-        #         print(k)
-        #         v_t = v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
-        #         if v_t.dim() == 2:  # (H, W) → (1, H, W) to match the (B, ...) layout
-        #             v_t = v_t.unsqueeze(0)
-        #         batch_obs[k] = v_t.to(device)
-        # CPU versions get cached on _extra_observation for the dataset writer
-        # (dataset.add_frame calls .numpy() on every tensor → must be CPU).
-        depth_left_cpu = torch.as_tensor(
-            mapanything_obs["left"]
-        ).unsqueeze(0)
-        depth_front_cpu = torch.as_tensor(
-            mapanything_obs["front"]
-        ).unsqueeze(0)
-        
         left_depth_key = "observation.images.cam_azure_kinect_left.transformed_depth"
         front_depth_key = "observation.images.cam_azure_kinect_front.transformed_depth"
 
-        if left_depth_key in batch_obs.keys():
-            del batch_obs[left_depth_key] 
-        
-        if front_depth_key in batch_obs.keys():
-            del batch_obs[front_depth_key] 
+        # === MapAnything-depth gate ===
+        # When self.config.use_map_anything is False, skip the server call and
+        # the depth-replacement entirely. The camera-native transformed_depth
+        # already sits on the outer observation dict and will flow through to
+        # dataset.add_frame on its own (we just leave _extra_observation empty).
+        if not self.config.use_map_anything:
+            depth_left_cpu  = None
+            depth_front_cpu = None
+            self._extra_observation = {}
+        else:
+            # === Caching gate ===
+            # The ghost-server depth call (MapAnything roundtrip) and the high-level
+            # goal-prediction call are by far the two most expensive operations per
+            # step. The inner DiffusionPolicy generates a chunk of `n_action_steps`
+            # actions on the step where its action queue is empty, and dequeues one
+            # per call thereafter — so on those intermediate "replay" steps the
+            # action is already chosen and we can reuse last chunk's depth +
+            # heatmaps without changing the policy's behaviour.
+            queue_empty = (
+                self.policy._queues is None
+                or len(self.policy._queues[self.policy.act_key]) == 0
+            )
+            # On the very first call there's no cached depth yet, so force a fresh
+            # plan regardless of queue state.
+            no_cached_depth = self._cached_depth_left_u16 is None
+            run_fresh_plan = queue_empty or no_cached_depth
 
-        batch_obs[left_depth_key] = depth_left_cpu.to(device)
-        batch_obs[front_depth_key] = depth_front_cpu.to(device)
+            if run_fresh_plan:
+                result = asyncio.run(self._send({
+                    "command": "preprocess",
+                    "obs": obs,
+                    # The server only does depth estimation for the two kinect views; it
+                    # expects exactly 2 cam_keys ordered [cam0=front, cam1=left] (matching
+                    # the calibration JSON). Any additional cam_image_keys (e.g. cam_wrist)
+                    # are policy-only inputs and are not sent to the server for depth.
+                    "cam_keys": list(self.config.cam_image_keys)[:2],
+                    # We build the ghost viz client-side (heatmap overlay) below, so don't
+                    # pay the cost of having the server render anything.
+                    "return_viz": False,
+                }))
+                if "error" in result:
+                    raise RuntimeError(f"[GhostClient] Server error: {result['error']}")
 
-        # Dataset writer (image_array_to_pil_image) only supports uint8 / uint16 for
-        # 2-D grayscale-or-depth images — float32 raises NotImplementedError, the
-        # exception is swallowed in the worker, and the later video encoder fails
-        # with FileNotFoundError on the missing PNGs. Convert to uint16 millimetres
-        # (Azure-Kinect convention) for the on-disk copies; batch_obs above keeps
-        # float metres for the policy.
-        depth_left_u16 = (depth_left_cpu.float() * 1000.0).clamp(0, 65535).to(torch.uint16)
-        depth_front_u16 = (depth_front_cpu.float() * 1000.0).clamp(0, 65535).to(torch.uint16)
-        # control_utils.predict_action shallow-copies `observation` before handing it
-        # to us, so mutating `batch` doesn't reach the outer observation dict that
-        # `dataset.add_frame` later validates. Stash CPU copies of the depths on the
-        # policy instance so control_loop can merge them back (mirrors the
-        # _current_vis_frame hook). CPU because dataset.add_frame calls .numpy().
-        # Both kinect transformed_depth keys are declared in robot.features (the
-        # cameras have use_transformed_depth=true), so the dataset schema accepts
-        # both. Overwriting them here replaces the camera-native depth with the
-        # MapAnything-produced depth on disk.
-        self._extra_observation = {
-            left_depth_key: depth_left_u16,
-            front_depth_key: depth_front_u16,
-        }
+                mapanything_obs = result["obs"]
+                pred_left_2d  = np.asarray(mapanything_obs["left"],  dtype=np.float32)  # (H, W) metres
+                pred_front_2d = np.asarray(mapanything_obs["front"], dtype=np.float32)
+
+                # Hole-fill the kinect's native transformed_depth (camera depth has
+                # zeros on shiny / dark / out-of-range surfaces) with MapAnything's
+                # smooth-but-less-accurate prediction. Camera depth survives at every
+                # pixel where it read a finite, > 0 value.
+                def _squeeze_to_hw(t: torch.Tensor) -> np.ndarray:
+                    arr = t.detach().cpu().numpy().astype(np.float32)
+                    while arr.ndim > 2 and arr.shape[0] == 1:
+                        arr = arr.squeeze(0)
+                    return arr
+
+                if left_depth_key in batch_obs:
+                    gt_left_2d  = _squeeze_to_hw(batch_obs[left_depth_key])
+                    mixed_left_2d  = mix_depth_gt_and_predicted(gt_left_2d,  pred_left_2d)
+                else:
+                    mixed_left_2d  = pred_left_2d
+                if front_depth_key in batch_obs:
+                    gt_front_2d = _squeeze_to_hw(batch_obs[front_depth_key])
+                    mixed_front_2d = mix_depth_gt_and_predicted(gt_front_2d, pred_front_2d)
+                else:
+                    mixed_front_2d = pred_front_2d
+
+                depth_left_cpu  = torch.from_numpy(pred_left_2d).unsqueeze(0)   # (1, H, W) float metres
+                depth_front_cpu = torch.from_numpy(pred_front_2d).unsqueeze(0)
+                # uint16 mm for the dataset writer (the only dtype its image_array_to_pil
+                # path supports for 2-D depth images).
+                depth_left_u16  = (depth_left_cpu.float() * 1000.0).clamp(0, 65535).to(torch.uint16)
+                depth_front_u16 = (depth_front_cpu.float() * 1000.0).clamp(0, 65535).to(torch.uint16)
+
+                self._cached_depth_left_cpu   = depth_left_cpu
+                self._cached_depth_front_cpu  = depth_front_cpu
+                self._cached_depth_left_u16   = depth_left_u16
+                self._cached_depth_front_u16  = depth_front_u16
+            else:
+                depth_left_cpu   = self._cached_depth_left_cpu
+                depth_front_cpu  = self._cached_depth_front_cpu
+                depth_left_u16   = self._cached_depth_left_u16
+                depth_front_u16  = self._cached_depth_front_u16
+
+            # Both kinect transformed_depth keys are declared in robot.features (the
+            # cameras have use_transformed_depth=true), so the dataset schema accepts
+            # both. _extra_observation overwrites the camera-native depth with the
+            # MapAnything depth in the recorded frame; cached steps re-emit the same
+            # uint16 tensors so the dataset has a depth video frame every tick.
+            if left_depth_key in batch_obs.keys():
+                del batch_obs[left_depth_key]
+            if front_depth_key in batch_obs.keys():
+                del batch_obs[front_depth_key]
+            batch_obs[left_depth_key]  = depth_left_cpu.to(device)
+            batch_obs[front_depth_key] = depth_front_cpu.to(device)
+            self._extra_observation = {
+                left_depth_key:  depth_left_u16,
+                front_depth_key: depth_front_u16,
+            }
 
         # Overlay the 10-d polaris-layout eef_pose [pos(3) | rot6d(6) | gripper_polaris(1)]
         # built by _extract_obs (rotated training frame, polaris gripper convention).
@@ -388,7 +515,15 @@ class GhostClient(PreTrainedPolicy):
             return (arr * 255.0).clip(0, 255).astype(np.uint8)
 
         def _depth_to_np(t: torch.Tensor) -> np.ndarray:
-            return t.detach().squeeze(0).cpu().numpy().astype(np.float32) * 1000.0
+            # MapAnything path: t is (1, H, W) float metres.
+            # Camera path (use_map_anything=False): image-prep wrapped the
+            # camera's (H, W, 1) uint16 mm → (1, 1, H, W) float metres.
+            # Squeeze leading size-1 dims until we get the bare (H, W) the
+            # high-level wrapper expects, then scale m → mm.
+            arr = t.detach().cpu().numpy().astype(np.float32)
+            while arr.ndim > 2 and arr.shape[0] == 1:
+                arr = arr.squeeze(0)
+            return arr * 1000.0
 
         # Extract the front/left RGB frames once — used for both predict_and_project
         # and the ghost-viz blend below.
@@ -426,6 +561,8 @@ class GhostClient(PreTrainedPolicy):
                 task = batch_obs["task"]
                 if isinstance(task, list):
                     task = task[0]
+
+                goal_pcds = self.policy.high_level.predict(task, camera_obs, robot_type=self.policy.config.robot_type, robot_kwargs=robot_kwargs)
                 gripper_projs = self.policy.high_level.predict_and_project(
                     task,
                     camera_obs,
@@ -438,10 +575,15 @@ class GhostClient(PreTrainedPolicy):
                 # high_level.camera_names is the source of truth for the front/left keys.
                 self._latest_goal_heatmap_front = gripper_projs.get(cam_name_front)
                 self._latest_goal_heatmap_left  = gripper_projs.get(cam_name_left)
+                batch_obs["observation.points.goal_gripper_pcds"] = (
+                    torch.as_tensor(goal_pcds).unsqueeze(0).to(device)
+                )
 
-            # predict_and_project expects gripper_pcd as raw (4, 3); policy.select_action
-            # below queues observations along dim 1, so it needs (1, 4, 3). Add the batch
-            # dim now, after the high-level call has already consumed the unbatched form.
+            # The CURRENT 4-point gripper pcd (synthesized by _extract_obs from
+            # the live eef_pose) is needed every step — both by the policy
+            # (input_features declares `observation.points.gripper_pcds` as a
+            # STATE feature) and by the viz overlay below. Add the batch dim so
+            # populate_queues can stack along dim 1.
             batch_obs["observation.points.gripper_pcds"] = (
                 torch.as_tensor(obs["observation.points.gripper_pcds"]).unsqueeze(0).to(device)
             )
@@ -481,13 +623,99 @@ class GhostClient(PreTrainedPolicy):
 
         self._current_vis_frame = np.concatenate([front_viz, left_viz], axis=1)
 
+        # ── Rerun 3D viz ───────────────────────────────────────────────────────
+        # Scene pcd from the high-level wrapper (compute_pcd ran on the last fresh
+        # plan step), current gripper pcd (4 colored points), and the model-predicted
+        # goal gripper pcd from the most recent HL forward pass. Logged every step so
+        # the viewer always has a frame to render; the scene + goal points are stale
+        # across cached steps which is intentional — they reflect what the policy
+        # planned the chunk against.
+        try:
+            import rerun as rr
+            # Scene point cloud — back-project the live RGB + depth using the
+            # per-camera intrinsics and cam→world extrinsics from high_level. We
+            # rebuild it every step (rather than reusing high_level.last_pcd_xyz)
+            # so the viz reflects the camera's current view, even during chunk replay.
+            #
+            # Depth source depends on the flag: MapAnything (cached, shape (1, H, W))
+            # when use_map_anything=True, else the camera-native transformed_depth
+            # still sitting in batch_obs (shape (1, 1, H, W) float metres after the
+            # predict_action image-prep). Reduce both to (H, W) via _depth_to_np-style
+            # leading-1 squeeze so backproject_rgbd_to_world gets a clean 2-D map.
+            def _scene_depth_m(cached_cpu, batch_key):
+                if cached_cpu is not None:
+                    arr = cached_cpu.cpu().numpy().astype(np.float32)
+                elif batch_key in batch_obs:
+                    arr = batch_obs[batch_key].detach().cpu().numpy().astype(np.float32)
+                else:
+                    return None
+                while arr.ndim > 2 and arr.shape[0] == 1:
+                    arr = arr.squeeze(0)
+                return arr  # (H, W) float metres
+
+            depth_front_m = _scene_depth_m(depth_front_cpu, front_depth_key)
+            depth_left_m  = _scene_depth_m(depth_left_cpu,  left_depth_key)
+            if depth_front_m is not None and depth_left_m is not None:
+                cam_to_worlds  = self.policy.high_level.cam_to_worlds
+                intrinsics_all = self.policy.high_level.original_Ks
+                front_pts, front_cols = backproject_rgbd_to_world(
+                    front_rgb_np, depth_front_m, intrinsics_all[0], cam_to_worlds[0],
+                )
+                left_pts,  left_cols  = backproject_rgbd_to_world(
+                    left_rgb_np,  depth_left_m,  intrinsics_all[1], cam_to_worlds[1],
+                )
+                # Log each camera's back-projection under its own entity path so they
+                # can be toggled independently in the viewer.
+                if front_pts.shape[0]:
+                    rr.log(
+                        "world/scene_pointcloud/cam_azure_kinect_front",
+                        rr.Points3D(front_pts, colors=front_cols, radii=0.003),
+                    )
+                if left_pts.shape[0]:
+                    rr.log(
+                        "world/scene_pointcloud/cam_azure_kinect_left",
+                        rr.Points3D(left_pts, colors=left_cols, radii=0.003),
+                    )
+
+            # 4-point gripper PCDs: [right, left, top, grasp] after our axis-0
+            # permutation. Solid colors per pcd to distinguish current vs goal:
+            # current = white, goal = red.
+            _CUR_COLOR  = np.array([255, 255, 255], dtype=np.uint8)
+            _GOAL_COLOR = np.array([255,   0,   0], dtype=np.uint8)
+
+            # Current gripper pcd — re-read from batch_obs (still (1, 4, 3) here).
+            gp_cur = batch_obs["observation.points.gripper_pcds"].squeeze(0).detach().cpu().numpy()
+            rr.log(
+                "world/current_gripper_pcd",
+                rr.Points3D(gp_cur, colors=np.tile(_CUR_COLOR, (gp_cur.shape[0], 1)), radii=0.012),
+            )
+
+            # Goal gripper pcd from the HL prediction (if available).
+            gp_goal_t = batch_obs.get("observation.points.goal_gripper_pcds", None)
+            if gp_goal_t is not None:
+                gp_goal = gp_goal_t.squeeze(0).detach().cpu().numpy()
+                # last 4 points convention if HL emits more — use the points axis verbatim
+                # otherwise (shape (4, 3) on this path).
+                if gp_goal.shape[0] >= 4:
+                    gp_goal_4 = gp_goal[-4:]
+                    rr.log(
+                        "world/goal_gripper_pcd",
+                        rr.Points3D(
+                            gp_goal_4,
+                            colors=np.tile(_GOAL_COLOR, (gp_goal_4.shape[0], 1)),
+                            radii=0.012,
+                        ),
+                    )
+        except Exception as e:
+            print(f"[ghost rerun] viz log failed: {e}")
+
         # action_eef is (1, 10) polaris layout [pos(3) | rot6d(6) | gripper_polaris(1)],
         # matching the input eef_pose layout the policy was trained on.
         action_ee_np = action_eef.squeeze(0).cpu().numpy()
         if action_ee_np.shape[0] != 10:
             raise ValueError(f"Expected action_eef shape (10,), got {action_ee_np.shape}")
-        pos             = torch.from_numpy(action_ee_np[0:3])
-        rot6d_train     = torch.from_numpy(action_ee_np[3:9])
+        pos             = torch.from_numpy(action_ee_np[0:3]) # + torch.from_numpy(np.array([0.01, 0.0, 0.01], dtype=np.float32))
+        rot6d    = torch.from_numpy(action_ee_np[3:9])
         gripper_polaris = torch.from_numpy(action_ee_np[9:10])  # 0=open, 1=closed
 
         # Undo training-time Z-rotation augmentation on the predicted orientation.
@@ -506,16 +734,16 @@ class GhostClient(PreTrainedPolicy):
             R_pred = R_z @ R_pred_train
         rot6d = p3d.matrix_to_rotation_6d(R_pred.unsqueeze(0)).squeeze(0)
 
-        print(
-            f"[action] rot6d_train={rot6d_train.numpy().round(4)}  "
-            f"rot6d_world={rot6d.numpy().round(4)}  "
-            f"undo={self.config.undo_z_rotation_deg}°"
-        )
+        # print(
+        #     f"[action] rot6d_train={rot6d_train.numpy().round(4)}  "
+        #     f"rot6d_world={rot6d.numpy().round(4)}  "
+        #     f"undo={self.config.undo_z_rotation_deg}°"
+        # )
 
         # polaris → lerobot gripper convention flip
         gripper_lerobot = 1.0 - gripper_polaris
 
-        print(f"[action_eef] trans={pos.numpy().round(4)}  gripper={gripper_polaris.item():.4f}")
+        # print(f"[action_eef] trans={pos.numpy().round(4)}  gripper={gripper_polaris.item():.4f}")
 
         if self._droid_adapter is not None:
             eef_lerobot = torch.cat([rot6d, pos, gripper_lerobot])

@@ -308,7 +308,7 @@ class PointPolicyServer:
 
     def compute_gripper(self, action):
         gripper_state = action["gripper"][:1]
-
+        print(gripper_state)
         if self.prev_gripper_state == -1 and gripper_state > -0.3:
             gripper_state = 1
         elif self.prev_gripper_state == 1 and gripper_state < 0.6:

@@ -80,6 +80,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.polaris_policy.ghost.ghost_client import GhostClient
 
         return GhostClient
+    elif name == "xskill":
+        from lerobot.common.policies.polaris_policy.xskill.xskill_client import XSkillClient
+
+        return XSkillClient
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
@@ -111,6 +115,10 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
     elif policy_type == "ghost":
         from lerobot.common.policies.polaris_policy.ghost.ghost_client import GhostConfig
         return GhostConfig(**kwargs)
+    elif policy_type == "xskill":
+        from lerobot.common.policies.polaris_policy.xskill.xskill_client import XSkillConfig
+
+        return XSkillConfig(**kwargs)
     else:
         raise ValueError(f"Policy type '{policy_type}' is not available.")
 

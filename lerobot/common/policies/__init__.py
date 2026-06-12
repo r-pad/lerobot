@@ -19,3 +19,4 @@ from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
 from .vqbet.configuration_vqbet import VQBeTConfig as VQBeTConfig
 from .dp3.configuration_dp3 import DP3Config as DP3Config
 from .polaris_policy.diffusion_policy.diffusion_policy_client import DiffusionPolicyConfig as DiffusionPolicyConfig
+from .polaris_policy.xskill.xskill_client import XSkillConfig as XSkillConfig

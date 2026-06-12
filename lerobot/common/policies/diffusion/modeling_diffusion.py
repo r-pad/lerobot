@@ -544,7 +544,11 @@ class DiffusionModel(nn.Module):
         actions = self.conditional_sample(batch_size, global_cond=global_cond)
 
         # Extract `n_action_steps` steps worth of actions (from the current observation).
-        start = n_obs_steps - 1
+        if self.config.action_start_idx is not None:
+            start = self.config.action_start_idx
+        else:
+            start = n_obs_steps - 1
+
         end = start + self.config.n_action_steps
         actions = actions[:, start:end]
 

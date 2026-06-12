@@ -97,6 +97,10 @@ class PointPolicyConfig(PreTrainedConfig):
     undo_z_rotation_deg: float = 45.0
     vis_tracks: bool = False
     enable_goal_conditioning: bool = False  # compatibility with control_robot.py
+    # Clamp the predicted EEF translation to be at most this many metres away from
+    # the current observed EEF position.  None = no limit.  Typical values: 0.05 (5 cm)
+    # or 0.10 (10 cm).  Useful to avoid large jumps when the policy oscillates.
+    max_trans_delta_m: float | None = None
 
     @property
     def observation_delta_indices(self):
@@ -187,7 +191,19 @@ class PointPolicyClient(PreTrainedPolicy):
 
         pos = torch.from_numpy(action_ee_np[0:3])
         quat_wxyz = torch.from_numpy(action_ee_np[3:7])
+        # quat_wxyz = torch.from_numpy(np.array([0, 1, 0, 0]))
         gripper_polaris = torch.from_numpy(action_ee_np[7:8])  # 0=open, 1=closed
+
+        # Clamp predicted translation to at most max_trans_delta_m from current EEF pos.
+        if self.config.max_trans_delta_m is not None:
+            eef = batch[self.config.eef_pose_key].squeeze(0)
+            current_trans = eef[6:9].to(pos.dtype)
+            delta = pos - current_trans
+            dist = delta.norm()
+            max_d = self.config.max_trans_delta_m
+            if dist > max_d:
+                pos = current_trans + delta * (max_d / dist)
+                print(f"[PointPolicyClient] trans clamped: {dist:.3f}m → {max_d:.3f}m")
 
         # Undo training-time Z-rotation augmentation on the predicted gripper orientation
         # (mirrors amplify_client.py select_action). Server returns rot in the rotated frame;
@@ -216,7 +232,7 @@ class PointPolicyClient(PreTrainedPolicy):
         # polaris → lerobot gripper convention flip
         gripper_lerobot = 1.0 - gripper_polaris
 
-        print(f"[action_eef] trans={pos.numpy().round(4)}  gripper={gripper_polaris.item():.4f}")
+        # print(f"[action_eef] trans={pos.numpy().round(4)}  gripper={gripper_polaris.item():.4f}")
 
         if self._droid_adapter is not None:
             eef_lerobot = torch.cat([rot6d, pos, gripper_lerobot])
@@ -310,7 +326,7 @@ class PointPolicyClient(PreTrainedPolicy):
     # Finger geometry constants — must match training preprocessing in
     # polaris/.../robot_utils/franka/create_pp_dataset_realrobot.py.
     _FINGER_OPEN_Y   = 0.05  # half-width when fully open (m)
-    _FINGER_CLOSED_Y = 0.0   # half-width when fully closed (m)
+    _FINGER_CLOSED_Y = 0.0002   # half-width when fully closed (m)
 
     @classmethod
     def _synthesize_gripper_pcd(
