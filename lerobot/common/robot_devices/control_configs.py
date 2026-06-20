@@ -95,7 +95,8 @@ class RecordControlConfig(ControlConfig):
     openpi_port: int = 8000
     openpi_replan_steps: int = 7
     openpi_resize_size: int = 224
-    openpi_base_image_key: str = "observation.images.cam_azure_kinect_front.color"
+    # openpi_base_image_key: str = "observation.images.cam_azure_kinect_front.color"
+    openpi_base_image_key: str = "observation.images.cam_azure_kinect_back.color"
     openpi_wrist_image_key: str = "observation.images.cam_wrist"
     openpi_gripper_delta_scale: float = 1.0
     openpi_api_key: str | None = None

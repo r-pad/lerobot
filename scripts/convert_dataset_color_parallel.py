@@ -561,6 +561,11 @@ def process_one_frame(
     # filter_idx = np.logical_and(filter_idx, all_pcd_in_robot[:, 2] > -0.02) ### for onesie
     # filter_idx = np.logical_and(filter_idx, all_pcd_in_robot[:, 2] > 0.01) ### for hammer
     filter_idx = np.logical_and(filter_idx, all_pcd_in_robot[:, 2] > args.z_min)
+
+    if args.x_max is not None and args.x_min is not None:
+        filter_idx_x = np.logical_and(all_pcd_in_robot[:, 0] < args.x_max, all_pcd_in_robot[:, 0] > args.x_min)
+        filter_idx = np.logical_and(filter_idx, filter_idx_x)
+    
     all_pcd_in_robot = all_pcd_in_robot[filter_idx]
     all_rgb_flat = all_rgb_flat[filter_idx]
     if store_dino:
@@ -692,6 +697,8 @@ if __name__ == "__main__":
     parser.add_argument("--z_min", type=float, default=0.01, )
     parser.add_argument("--y_max", type=float, default=0.4, )
     parser.add_argument("--y_min", type=float, default=-0.4,)
+    parser.add_argument("--x_max", type=float, default=None,)
+    parser.add_argument("--x_min", type=float, default=None,)
     parser.add_argument("--store_dino", type=int, default=1, )
     parser.add_argument("--combine_action_steps", type=int, default=1, )
     parser.add_argument("--num_workers", type=int, default=20, )
@@ -808,45 +815,45 @@ if __name__ == "__main__":
         beg = time.time()
         
         ### parallel version
-        # with ThreadPoolExecutor(max_workers=NUM_WORKERS) as ex:
-        #     futs = {
-        #         ex.submit(
-        #             process_one_frame,
-        #             dataset,
-        #             t_idx,
-        #             traj_idx,
-        #             from_idx,
-        #             all_intrinsics,
-        #             all_extrinsics,
-        #             max_depth,
-        #             num_points,
-        #             store_dino,
-        #             target_shape,
-        #         ): t_idx
-        #         for t_idx in range(from_idx, to_idx)
-        #     }
+        with ThreadPoolExecutor(max_workers=NUM_WORKERS) as ex:
+            futs = {
+                ex.submit(
+                    process_one_frame,
+                    dataset,
+                    t_idx,
+                    traj_idx,
+                    from_idx,
+                    all_intrinsics,
+                    all_extrinsics,
+                    max_depth,
+                    num_points,
+                    store_dino,
+                    target_shape,
+                ): t_idx
+                for t_idx in range(from_idx, to_idx)
+            }
 
-        #     for fut in as_completed(futs):
-        #         t_idx = futs[fut]
-        #         out = fut.result()
-        #         results[t_idx - from_idx] = out
+            for fut in as_completed(futs):
+                t_idx = futs[fut]
+                out = fut.result()
+                results[t_idx - from_idx] = out
 
         ### serial version
-        for t_idx in range(from_idx, to_idx):
-            result = process_one_frame(
-                dataset,
-                t_idx,
-                traj_idx,
-                from_idx,
-                all_intrinsics,
-                all_extrinsics,
-                max_depth,
-                num_points,
-                store_dino,
-                target_shape,
-                visualize=True,
-            )
-            results[t_idx - from_idx] = result
+        # for t_idx in range(from_idx, to_idx):
+        #     result = process_one_frame(
+        #         dataset,
+        #         t_idx,
+        #         traj_idx,
+        #         from_idx,
+        #         all_intrinsics,
+        #         all_extrinsics,
+        #         max_depth,
+        #         num_points,
+        #         store_dino,
+        #         target_shape,
+        #         visualize=True,
+        #     )
+        #     results[t_idx - from_idx] = result
 
         # Rebuild your original lists in-order
         traj_eef_pose = [r["eef_pose_vec"] for r in results]

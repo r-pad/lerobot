@@ -194,6 +194,7 @@ policy:
   diffusion_loss_weight: 1.0
   pointnet_encoder_output_dim: 129
   pointnet_class: pointnet2_super
+  category_embedding_type: "siglip"
 
 
 ema:

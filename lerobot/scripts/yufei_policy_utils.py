@@ -824,7 +824,7 @@ def apply_transform(points, transform):
 
 
 def compute_pcd(all_cam_depth_images=None, all_pcds=None, all_intrinsics=None, all_extrinsics=None, max_depth=1.5, num_points=4500, all_cam_rgb_images=None, use_dino=False, 
-                robot_pc=None, robot=None, debug_depth=None):
+                robot_pc=None, robot=None, debug_depth=None, task_name="lego"):
     if all_intrinsics is None or all_extrinsics is None:
         all_intrinsics = default_intrinsics
         all_extrinsics = default_extrinsics
@@ -984,8 +984,19 @@ def compute_pcd(all_cam_depth_images=None, all_pcds=None, all_intrinsics=None, a
 
     filter_idx_1 = all_pcd_in_world[:, 1] < 0.4
     filter_idx_2 = all_pcd_in_world[:, 1] > -0.4
-    filter_idx_3 = all_pcd_in_world[:, 2] > 0.01 ### pap three
-    # filter_idx_3 = all_pcd_in_world[:, 2] > -0.02 ### onesie
+    if "onesie" in task_name:
+        filter_idx_3 = all_pcd_in_world[:, 2] > -0.02 ### onesie
+    elif 'pap_three' in task_name:
+        filter_idx_3 = all_pcd_in_world[:, 2] > 0.01 ### pap three
+    elif 'lego' in task_name:
+        filter_idx_1 = all_pcd_in_world[:, 1] < 0.3
+
+        filter_idx_3 = all_pcd_in_world[:, 2] > 0.02 ### lego
+        filter_idx_4 = all_pcd_in_world[:, 0] > 0.1
+        filter_idx_5 = all_pcd_in_world[:, 0] < 0.65
+        filter_idx_3 = np.logical_and(filter_idx_3, filter_idx_4)
+        filter_idx_3 = np.logical_and(filter_idx_3, filter_idx_5)
+
     # filter_idx_3 = all_pcd_in_world[:, 2] > 0.01 ### hammer
     
     filter_idx = np.logical_and(filter_idx_1, filter_idx_2)

@@ -298,12 +298,19 @@ def get_model_path():
     # cat_idx = 13
 
     ### pap three policies
-    model_path = "/data/yufei/lerobot/data/ckpts/high-level/2026-05-21aloha_pap_three_fine_tune/model_20001.pth"
-    model_path = "/data/yufei/lerobot/data/ckpts/high-level/2026-05-21aloha_pap_three_fine_tune/model_40001.pth"
+    # model_path = "/data/yufei/lerobot/data/ckpts/high-level/2026-05-21aloha_pap_three_fine_tune/model_20001.pth"
+    # model_path = "/data/yufei/lerobot/data/ckpts/high-level/2026-05-21aloha_pap_three_fine_tune/model_40001.pth"
     model_path = "/data/yufei/lerobot/data/ckpts/high-level/2026-05-21aloha_pap_three_fine_tune/model_90001.pth"
     exp_dir = "/data/yufei/lerobot/data/ckpts/low-level/0521_fine_tune_aloha_pap_three/"
     checkpoint_name = "epoch-300.ckpt"
     cat_idx = 0
+
+    ### lego policies
+    model_path = "/data/yufei/lerobot/data/ckpts/high-level/2026-05-27fine_tune_correct_aloha_lego_100_old_lang_aloha_dino_rgb/model_40001.pth"
+    exp_dir = "/data/yufei/lerobot/data/ckpts/low-level/low_level_fine_tune_100_aloha_lego_05272303_old_lang_aloha_lego/"
+    checkpoint_name = "epoch-500.ckpt"
+    cat_idx = 0
+
     
     return model_path, exp_dir, checkpoint_name, cat_idx
 
@@ -362,7 +369,13 @@ def record(
             from lerobot.common.robot_devices.openpi_websocket import make_openpi_websocket_policy_dict
 
             robot_adapter = AlohaAdapter(action_space="right_eef")
-            cfg.single_task = "fold the onesie"
+            # cfg.single_task = "fold the onesie"
+            from termcolor import cprint
+            cprint(f"cfg.openpi_base_image_key: {cfg.openpi_base_image_key}", "red")
+            cprint(f"cfg.openpi_base_image_key: {cfg.openpi_base_image_key}", "red")
+            cprint(f"cfg.openpi_base_image_key: {cfg.openpi_base_image_key}", "red")
+            cprint(f"cfg.openpi_base_image_key: {cfg.openpi_base_image_key}", "red")
+            # import pdb; pdb.set_trace()
             policy = make_openpi_websocket_policy_dict(
                 robot_adapter=robot_adapter,
                 host=cfg.openpi_host,

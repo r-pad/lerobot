@@ -315,9 +315,9 @@ def control_loop(
         #  -2.1094,  37.7051,   4.5703,  98.9891])
 
                 ### teleop reset pose
-        #         action = torch.tensor([ 92.1094, 192.6562, 192.7441, 150.5566, 150.7324,   1.0547,  37.5293,
-        #   4.8340,  75.5898,  92.0215, 198.5449, 198.9844, 174.0234, 174.2871,
-        #  -7.0312,  22.2363,   5.9766,  99.0733])
+        #         action = torch.tensor([ 84.6387, 193.2715, 193.4473, 152.2266, 152.4902, -11.8652,  37.2656,
+        #   7.5586,  10.4356,  90.9668, 196.9629, 197.4902, 153.0176, 153.1934,
+        #  -6.2402,  37.9688,   9.4922,  77.4221])
 
                 robot.send_action(action.squeeze(0))
                 
@@ -436,7 +436,8 @@ def control_loop(
                         prompt=policy["prompt"],
                         resize_size=int(policy.get("resize_size", 224)),
                         base_image_key=policy.get(
-                            "base_image_key", "observation.images.cam_azure_kinect_front.color"
+                            # "base_image_key", "observation.images.cam_azure_kinect_front.color"
+                            "base_image_key", "observation.images.cam_azure_kinect_back.color"
                         ),
                         wrist_image_key=policy.get("wrist_image_key", "observation.images.cam_wrist"),
                         use_6d_orientation=use_6d_orientation,

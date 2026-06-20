@@ -141,6 +141,11 @@ def lerobot_observation_to_openpi_dict(
     img = _convert_to_uint8(img)
     wrist_img = _convert_to_uint8(wrist_img)
 
+    # img = img * 0
+    # img = img.astype(np.uint8)
+    # wrist_img = wrist_img * 0
+    # wrist_img = wrist_img.astype(np.uint8)
+
 
     # import pdb; pdb.set_trace()
 
@@ -167,7 +172,8 @@ def make_openpi_websocket_policy_dict(
     prompt: str,
     replan_steps: int = 5,
     resize_size: int = 224,
-    base_image_key: str = "observation.images.cam_azure_kinect_front.color",
+    # base_image_key: str = "observation.images.cam_azure_kinect_front.color",
+    base_image_key: str = "observation.images.cam_azure_kinect_back.color",
     wrist_image_key: str = "observation.images.cam_wrist",
     gripper_delta_scale: float = 1.0,
     api_key: str | None = None,
