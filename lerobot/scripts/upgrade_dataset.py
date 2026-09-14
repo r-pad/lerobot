@@ -529,6 +529,8 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
             # Use events from external file (human data, phantom, or robot with manual annotation)
             goal_indices = episode_extras['episode_events']['event_idxs']
             # Ensure last frame is included as a goal
+            if goal_indices[-1] > episode_length - 1:
+                goal_indices[-1] = episode_length -1
             if goal_indices[-1] != episode_length - 1:
                 goal_indices = goal_indices + [episode_length - 1]
         else:
@@ -551,6 +553,7 @@ def _process_episode_goals(target_dataset, episode_length, new_features, humaniz
 
             goal_images = []
             for goal_idx in goal_indices:
+                goal_idx = min(goal_idx, episode_length - 1)
                 if humanize:
                     goal_img = get_goal_image(K, width, height, humanize=True, gripper_pcd=episode_gripper_pcds[goal_idx], cam_to_world=cam_to_world)
                 elif robot_type == "aloha":
@@ -609,6 +612,7 @@ def upgrade_dataset(
     humanize: bool,
     robot_type: str,
     path_to_extradata: Optional[str],
+    max_episodes: Optional[int] = None,
 ):
     """
     Upgrade an existing LeRobot dataset with additional features.
@@ -674,18 +678,26 @@ def upgrade_dataset(
     )
 
     # 4. Upgrade data episode by episode
-    print(f"Upgrading {source_meta.info['total_episodes']} episodes...")
+    total_source = source_meta.info["total_episodes"]
+    if max_episodes is not None:
+        total_source = min(total_source, max_episodes)
+        print(f"Upgrading first {total_source} episode(s) (--max_episodes={max_episodes})...")
+    else:
+        print(f"Upgrading {total_source} episodes...")
+    target_episode_idx = 0
+    episode_remap = {}  # source_idx -> target_idx
 
-    for episode_idx in range(source_meta.info["total_episodes"]):
-        print(f"Processing episode {episode_idx + 1}/{source_meta.info['total_episodes']}")
+    for episode_idx in range(total_source):
+        print(f"Processing episode {episode_idx + 1}/{total_source}")
         if episode_idx in discard_episodes:
+            print(f"  Episode {episode_idx} discarded.")
             continue
 
         # Load any extra data needed for this episode
         try:
             episode_extras = _load_episode_extras(episode_idx, phantomize, humanize, path_to_extradata, camera_names)
-        except AssertionError as e:
-            print(f"Could not find auxiliary data for episode {episode_idx}. Skipping")
+        except (AssertionError, FileNotFoundError) as e:
+            print(f"  Skipping episode {episode_idx}: {e}")
             continue
 
         # Get episode bounds
@@ -711,9 +723,17 @@ def upgrade_dataset(
             episode_extras, phantomize, calibrations, width, height, robot_type
         )
 
-        # Save episode
+        # Save episode and record remap
         target_dataset.save_episode()
+        episode_remap[episode_idx] = target_episode_idx
+        print(f"  Source episode {episode_idx} -> target episode {target_episode_idx}")
+        target_episode_idx += 1
 
+    if len(episode_remap) < total_source:
+        skipped = total_source - len(episode_remap)
+        print(f"\nSkipped {skipped} episode(s). Episode remapping (source -> target):")
+        for src, tgt in episode_remap.items():
+            print(f"  {src:06d} -> {tgt:06d}")
     print(f"Upgrade complete! New dataset saved to: {target_dataset.root}")
     return target_dataset
 
@@ -759,6 +779,8 @@ if __name__ == "__main__":
                         help="Names of features to be removed")
     parser.add_argument("--robot_type", type=str, default="droid",
                         help="Type of robot for which to generate point clouds")
+    parser.add_argument("--max_episodes", type=int, default=None,
+                        help="Only process this many episodes (useful for a quick sanity check)")
     args = parser.parse_args()
 
     # Load calibrations
@@ -857,6 +879,7 @@ if __name__ == "__main__":
         humanize=args.humanize,
         path_to_extradata=path_to_extradata,
         robot_type=args.robot_type,
+        max_episodes=args.max_episodes,
     )
 
     if args.push_to_hub: upgraded_dataset.push_to_hub(repo_id=args.target_repo_id)

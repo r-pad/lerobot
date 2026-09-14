@@ -151,6 +151,85 @@ def generate_goal_gripper_proj(gripper_pcd_4x3: np.ndarray, K: np.ndarray,
     return heatmap
 
 
+MIN_TIP_SEP = 1e-3   # metres — floor on the distance between the two fingertips
+
+
+def enforce_min_tip_separation(pcd: np.ndarray,
+                               min_sep: float = MIN_TIP_SEP) -> np.ndarray:
+    """
+    Push the two fingertip points apart so left -> right is never degenerate.
+
+    Input is (T, 4, 3) in the raw npz ordering (top, left, right, middle).
+    When the gripper closes the two tips collapse onto the middle point (as
+    little as 4e-5 m apart in this data), so anything that normalizes the
+    left -> right vector to recover the finger axis gets a direction built
+    almost entirely out of float32 rounding noise.
+
+    Frames already separated by at least ``min_sep`` are left bit-exact.
+    Degenerate frames keep their middle point and are re-separated along the
+    finger axis borrowed from the nearest non-degenerate frame.  The gripper
+    keeps turning while closed (up to ~12 deg per closed stretch in this data),
+    so the borrowed axis is rotated by the same rotation that carries the
+    approach direction (middle -> top, well defined on every frame) from that
+    frame to this one.  That keeps the tips perpendicular to the approach axis,
+    which is where a parallel-jaw gripper's fingers actually sit.
+    """
+    pcd  = pcd.copy()
+    mid  = pcd[:, 3]
+
+    axis  = pcd[:, 2] - pcd[:, 1]                            # (T, 3) left -> right
+    norm  = np.linalg.norm(axis, axis=-1)                    # (T,)
+    valid = norm >= min_sep
+    if valid.all():
+        return pcd
+
+    approach  = pcd[:, 0] - mid                              # (T, 3) middle -> top
+    approach = approach / (np.linalg.norm(approach, axis=-1, keepdims=True) + 1e-12)
+
+    if valid.any():
+        unit = np.zeros_like(axis)
+        unit[valid] = axis[valid] / norm[valid, None]
+
+        # carry the last valid axis forward; frames before the first valid one
+        # borrow that first valid axis instead
+        src = np.where(valid, np.arange(len(valid)), -1)
+        np.maximum.accumulate(src, out=src)
+        src[src < 0] = int(np.argmax(valid))
+
+        unit = _rotate_between(unit[src], approach[src], approach)
+    else:
+        # episode never opens the gripper: any axis orthogonal to the approach
+        # direction will do, since nothing observes the roll about it
+        ref  = np.broadcast_to(np.array([0.0, 1.0, 0.0], np.float32), approach.shape)
+        unit = ref - (ref * approach).sum(-1, keepdims=True) * approach
+
+    # re-orthogonalize against the approach axis, then renormalize
+    unit = unit - (unit * approach).sum(-1, keepdims=True) * approach
+    unit = unit / (np.linalg.norm(unit, axis=-1, keepdims=True) + 1e-12)
+
+    fix = ~valid
+    pcd[fix, 1] = mid[fix] - 0.5 * min_sep * unit[fix]
+    pcd[fix, 2] = mid[fix] + 0.5 * min_sep * unit[fix]
+    return pcd
+
+
+def _rotate_between(v: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Apply, per row, the minimal rotation carrying unit vector a onto unit
+    vector b to the vector v (Rodrigues).  Rows where a and b are already
+    parallel pass v through unchanged.
+    """
+    cross = np.cross(a, b)
+    s     = np.linalg.norm(cross, axis=-1, keepdims=True)
+    c     = (a * b).sum(-1, keepdims=True)
+
+    k   = cross / np.where(s < 1e-8, 1.0, s)                 # rotation axis
+    out = (v * c
+           + np.cross(k, v) * s
+           + k * (k * v).sum(-1, keepdims=True) * (1.0 - c))
+    return np.where(s < 1e-8, v, out).astype(v.dtype)
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def gen_h2rd_dataset(
@@ -161,6 +240,7 @@ def gen_h2rd_dataset(
     img_shape: tuple = (720, 1280),   # (H, W)
     num_episodes: str = "all",
     target_fps: int = None,
+    min_tip_sep: float = MIN_TIP_SEP,
 ) -> LeRobotDataset:
 
     episode_dirs = sorted(glob(os.path.join(data_dir, "episode_*")))
@@ -350,6 +430,11 @@ def gen_h2rd_dataset(
             goal_gripper_pcd = npz["goal_gripper_pcd"].astype(np.float32)
             gripper_width    = npz["gripper_width"].astype(np.float32)
             delta_action     = npz["delta_action"].astype(np.float32)
+
+            # Same transform on both, so the goal == current comparison below
+            # and the subgoal-change detection later stay unaffected.
+            gripper_pcd      = enforce_min_tip_separation(gripper_pcd, min_tip_sep)
+            goal_gripper_pcd = enforce_min_tip_separation(goal_gripper_pcd, min_tip_sep)
 
             states_ee = upgrade_action_space(states_ee)
             action_ee = upgrade_action_space(action_ee)
@@ -561,6 +646,9 @@ if __name__ == "__main__":
     parser.add_argument("--calibration_config", type=str, required=False,
                         default="/home/haotian/lerobot/lerobot/scripts/droid_calibration/calibration_multiview.json",
                         help="Path to calibration JSON config file")
+    parser.add_argument("--min_tip_sep", type=float, default=MIN_TIP_SEP,
+                        help="Minimum distance (m) between the two fingertip points, "
+                             "so the left->right vector stays well defined when closed")
     parser.add_argument("--push_to_hub", action="store_true",
                         help="Whether to push the dataset to HuggingFace Hub after creation")
     args = parser.parse_args()
@@ -576,6 +664,7 @@ if __name__ == "__main__":
         img_shape=img_shape,
         num_episodes=args.num_episodes,
         target_fps=args.target_fps,
+        min_tip_sep=args.min_tip_sep,
     )
 
     if args.push_to_hub:

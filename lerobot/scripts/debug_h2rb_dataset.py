@@ -170,50 +170,77 @@ def debug_episode(repo_id: str, ep_idx: int, output_dir: Path, alpha: float) -> 
     print("\nDone.")
 
 
+def get_parquet_path(root: Path, info: dict, ep_idx: int) -> Path:
+    ep_chunk = ep_idx // info.get("chunks_size", 1000)
+    return root / info["data_path"].format(episode_chunk=ep_chunk, episode_index=ep_idx)
+
+
 def debug_gripper_pcd_episode(repo_id: str, ep_idx: int, output_dir: Path) -> None:
     """
     For each frame in the episode, project observation.points.gripper_pcds and
     goal_gripper_pcds onto the front/left camera views, label each point 0-3,
     and write a side-by-side video.
-    """
-    from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
-    dataset    = LeRobotDataset(repo_id)
-    from_idx   = dataset.episode_data_index["from"][ep_idx].item()
-    to_idx     = dataset.episode_data_index["to"][ep_idx].item()
-    fps        = dataset.meta.fps
-    root       = repo_root(repo_id)
+    Reads the episode's parquet directly rather than constructing a
+    LeRobotDataset, so it works while the dataset is still being written
+    (LeRobotDataset validates timestamp continuity across *all* episodes and
+    fails on a half-written trailing episode).
+    """
+    import pandas as pd
+
+    root = repo_root(repo_id)
+    if not root.exists():
+        raise FileNotFoundError(f"Dataset not found locally: {root}")
+
+    with open(root / "meta" / "info.json") as f:
+        info = json.load(f)
+    fps      = info["fps"]
+    features = info["features"]
+
+    pq_path = get_parquet_path(root, info, ep_idx)
+    if not pq_path.exists():
+        raise FileNotFoundError(f"Episode {ep_idx} not written yet: {pq_path}")
+    ep_df = pd.read_parquet(pq_path)
 
     cam_cfgs = [
         ("cam_azure_kinect_front", "observation.images.cam_azure_kinect_front.color"),
         ("cam_azure_kinect_left",  "observation.images.cam_azure_kinect_left.color"),
     ]
 
+    def col(name: str) -> np.ndarray:
+        """
+        Parquet stores multi-dim features as nested object arrays (one object
+        array per row of the matrix) — unnest recursively, then restore the
+        declared feature shape.
+        """
+        def unnest(v):
+            a = np.asarray(v)
+            return np.stack([unnest(x) for x in a]) if a.dtype == object else a
+
+        arr   = np.stack([unnest(v) for v in ep_df[name].to_numpy()]).astype(np.float32)
+        shape = tuple(features[name]["shape"])
+        return arr.reshape(len(arr), *shape)
+
     for cam_key, vid_feat_key in cam_cfgs:
         intr_key = f"observation.{cam_key}.intrinsics"
         extr_key = f"observation.{cam_key}.extrinsics"
-        if intr_key not in dataset.meta.features:
+        if intr_key not in features:
             print(f"  [{cam_key}] intrinsics not found in dataset, skipping.")
             continue
 
-        with open(root / "meta" / "info.json") as f:
-            info = json.load(f)
         vid_path = get_video_path(root, info, ep_idx, vid_feat_key)
         if not vid_path.exists():
             print(f"  [{cam_key}] video not found: {vid_path}")
             continue
 
         color_frames = load_rgb_video(vid_path)   # (T, H, W, 3) RGB uint8
-        T = min(len(color_frames), to_idx - from_idx)
+        T = min(len(color_frames), len(ep_df))
         out_frames = []
 
-        # Batch-load all non-video features via to_pydict() → plain Python lists,
-        # then convert to numpy once. This avoids per-row PyArrow deprecation warnings.
-        ep_dict  = dataset.hf_dataset.select(range(from_idx, from_idx + T)).to_pydict()
-        curr_pcds = np.array(ep_dict["observation.points.gripper_pcds"],      dtype=np.float32)  # (T, 4, 3)
-        goal_pcds = np.array(ep_dict["observation.points.goal_gripper_pcds"], dtype=np.float32)  # (T, 4, 3)
-        Ks        = np.array(ep_dict[intr_key], dtype=np.float32)                                # (T, 3, 3)
-        T_wcs     = np.array(ep_dict[extr_key], dtype=np.float32)                               # (T, 4, 4)
+        curr_pcds = col("observation.points.gripper_pcds")[:T]       # (T, 4, 3)
+        goal_pcds = col("observation.points.goal_gripper_pcds")[:T]  # (T, 4, 3)
+        Ks        = col(intr_key)[:T]                                # (T, 3, 3)
+        T_wcs     = col(extr_key)[:T]                                # (T, 4, 4)
 
         print(f"  [{cam_key}] Rendering {T} frames...")
         for t in tqdm(range(T), desc=f"  [{cam_key}]", leave=False):
