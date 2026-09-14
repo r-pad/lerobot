@@ -25,6 +25,73 @@ This is a **research fork** of [HuggingFace LeRobot](https://github.com/huggingf
 
 > **Warning:** This fork is **not compatible with upstream** LeRobot. The two should not be used interchangeably.
 
+### Training GHOST for H2R Benchmark
+
+GHOST has two levels. The **high-level** model (`dino_3dgp`, trained in [lfd3d](https://github.com/r-pad/lfd3d)) predicts a 3D goal gripper pose. The **low-level** policy (goal-conditioned diffusion, trained here) produces actions conditioned on that goal. Tasks: `pick_place_red_mug`, `stack_bowls`, `insert_donut`, `pick_toys`.
+
+**Dataset suffixes:** `_ss` = subsampled, `_filter` = bad demos removed, `_hg` = heatmap goal features added, `_hN` = trained with N human demos.
+
+#### 1. Robot data
+
+Sim robot (Polaris/DROID rollouts → LeRobot format, 15 fps):
+```bash
+python lerobot/scripts/create_h2rb_dataset.py --data_dir <polaris_data>/insert_donut_200 \
+  --repo_id <user>/insert_donut_100_simrobot --task "insert donut" --num_episodes 100 \
+  --calibration_config lerobot/scripts/droid_calibration/calibration_multiview.json --target_fps 15
+```
+
+Real robot (subsampled) → add goal features:
+```bash
+python lerobot/scripts/upgrade_dataset.py --source_repo_id <user>/pick_red_mug_realrobot_3_..._ss \
+  --target_repo_id <user>/pick_red_mug_realrobot_3_ss_hg \
+  --new_features goal_gripper_proj gripper_pcds next_event_idx goal_gripper_pcds calibration
+```
+
+#### 2. Human data
+
+```bash
+# (optional) drop bad demos
+python lerobot/scripts/filter_dataset.py --repo_id <user>/pick_red_mug_human_ss --episodes 0 3 7
+
+# hand detection via WiLoR (~/WiLoR)
+python demo_lerobot_detectron2.py \
+  --input_folder $HF_HOME/lerobot/<user>/pick_red_mug_human_ss/videos/chunk-000/ \
+  --output_folder <extradata_dir>/pick_red_mug_human_ss/wilor_hand_pose --visualize
+
+# hand pose → gripper annotations
+python lerobot/scripts/annotate_wilor.py <extradata_dir> --task <task_name>
+
+# retarget human to gripper and add goal features
+python lerobot/scripts/upgrade_dataset.py --source_repo_id <user>/pick_red_mug_human_ss \
+  --target_repo_id <user>/pick_red_mug_human_ss_hg --humanize \
+  --new_features goal_gripper_proj gripper_pcds next_event_idx goal_gripper_pcds calibration \
+  --path_to_extradata <extradata_dir>
+```
+
+#### 3. High-level training (in `lfd3d`)
+
+Pass a list of robot and/or human `_hg` datasets:
+```bash
+HF_HOME=<hf_home> torchrun --nproc_per_node=1 scripts/train.py model=dino_3dgp dataset=rpadLerobot \
+  dataset.repo_id='["<user>/pick_place_red_mug_5_simrobot","<user>/pick_red_mug_human_ss_hg_40"]' \
+  dataset.cache_dir=<cache_dir> resources.num_workers=32 resources.gpus=-1 training.batch_size=32 \
+  training.check_val_every_n_epochs=3 wandb.entity=<entity> wandb.project=lfd3d wandb.name=<run_name>
+```
+
+#### 4. Low-level training (this repo)
+
+Use the W&B run ID of the high-level model from step 3 as `hl_run_id`:
+```bash
+HF_HOME=<hf_home> python lerobot/scripts/train.py \
+  --dataset.repo_id='["<user>/pick_place_red_mug_40_simrobot"]' --policy.type=diffusion \
+  --policy.enable_goal_conditioning=true --policy.robot_type=droid "--policy.crop_shape=[600, 600]" \
+  --policy.hl_run_id=<hl_wandb_run_id> --policy.hl_entity=<entity> --policy.hl_project=lfd3d \
+  --policy.calibration_json=lerobot/scripts/droid_calibration/calibration_multiview.json \
+  --output_dir=outputs/train/pick_place_red_mug_r40h0 --job_name=pick_place_red_mug_r40h0 \
+  --steps=50_000 --batch_size=4 --save_freq=5000 --num_workers=8 --wandb.enable=true --wandb.project=lerobot
+```
+For end-effector actions, use a `_rot6d` dataset with `--policy.action_space=right_eef`. Longer runs used up to `--steps=300_000`.
+
 ## What's Different from Upstream
 
 ### Hardware
