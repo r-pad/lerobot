@@ -282,6 +282,89 @@ class RobotIKController():
 
             t += 1
 
+    def control_refined(
+        self,
+        target_pos,
+        target_rot,
+        grasping_action,
+        max_iters=10,
+        pos_tol=5e-4,
+        rot_tol_deg=0.2,
+        gain=1.0,
+        settle_steps=20,
+        max_pos_correction=0.01,
+        max_rot_correction_deg=5.0,
+        wait_times=50,
+        joint_threshold=0.5,
+        verbose=True,
+    ):
+        """Closed-loop EEF pose control that compensates steady-state pose error.
+
+        Gravity (plug + gripper load) and IK/FK model mismatch leave the measured EEF
+        pose offset from the commanded one, mostly as a small tilt. Each iteration
+        commands the target plus the accumulated measured error (an integral-style
+        correction, bounded by ``max_*_correction``), lets the controller settle, and
+        re-measures, until the measured pose is within tolerance.
+        """
+        target_pos = np.asarray(target_pos, dtype=np.float64).reshape(3)
+        target_rot = np.asarray(target_rot, dtype=np.float64).reshape(3, 3)
+        cmd_pos = target_pos.copy()
+        cmd_rot = R.from_matrix(target_rot)
+        pos_err_norm, rot_err_deg = float("inf"), float("inf")
+
+        for it in range(max(1, int(max_iters))):
+            self.control(
+                target_pos=cmd_pos,
+                target_rot=cmd_rot.as_matrix(),
+                grasping_action=grasping_action,
+                wait_times=wait_times,
+                joint_threshold=joint_threshold,
+            )
+            # Hold the joint target for a few more ticks so the pose settles under load.
+            for _ in range(int(settle_steps)):
+                self.robot_interface.control(
+                    controller_type=self.controller_type,
+                    action=self.last_action,
+                    controller_cfg=self.controller_cfg,
+                    binary_grasping=self.binary_grasping,
+                )
+
+            pose = np.asarray(self.eef_pose, dtype=np.float64)
+            pos_err = target_pos - pose[:3, 3]
+            # World-frame rotation error: target = rot_err * measured.
+            rot_err = R.from_matrix(target_rot) * R.from_matrix(pose[:3, :3]).inv()
+            pos_err_norm = float(np.linalg.norm(pos_err))
+            rot_err_deg = float(np.rad2deg(rot_err.magnitude()))
+            if pos_err_norm < pos_tol and rot_err_deg < rot_tol_deg:
+                if verbose:
+                    cprint(
+                        f"Pose refined in {it + 1} iters: pos_err={pos_err_norm * 1e3:.2f} mm, rot_err={rot_err_deg:.3f} deg",
+                        "green",
+                    )
+                return True
+
+            cmd_pos = cmd_pos + gain * pos_err
+            cmd_rot = R.from_rotvec(gain * rot_err.as_rotvec()) * cmd_rot
+
+            # Bound the accumulated correction relative to the true target.
+            pos_offset = cmd_pos - target_pos
+            pos_offset_norm = np.linalg.norm(pos_offset)
+            if pos_offset_norm > max_pos_correction:
+                cmd_pos = target_pos + pos_offset * (max_pos_correction / pos_offset_norm)
+            rot_offset = (cmd_rot * R.from_matrix(target_rot).inv()).as_rotvec()
+            rot_offset_norm = np.linalg.norm(rot_offset)
+            max_rot_correction = np.deg2rad(max_rot_correction_deg)
+            if rot_offset_norm > max_rot_correction:
+                rot_offset = rot_offset * (max_rot_correction / rot_offset_norm)
+                cmd_rot = R.from_rotvec(rot_offset) * R.from_matrix(target_rot)
+
+        if verbose:
+            cprint(
+                f"Pose refinement stopped after {max_iters} iters: pos_err={pos_err_norm * 1e3:.2f} mm, rot_err={rot_err_deg:.3f} deg",
+                "yellow",
+            )
+        return False
+
     @property
     def eef_pose(self):
         # pose of the gripper tip

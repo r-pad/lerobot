@@ -322,21 +322,24 @@ class ScriptRobot(DroidRobot):
         relative_rot = current_rot @ init_rot.T
         return float(np.arctan2(relative_rot[1, 0], relative_rot[0, 0]))
 
-    def _yaw_only_rotation_from_init(self, init_eef_pose: np.ndarray, target_rot: np.ndarray) -> np.ndarray:
-        init_rot = np.asarray(init_eef_pose, dtype=np.float32).reshape(4, 4)[:3, :3]
-        target_rot = np.asarray(target_rot, dtype=np.float32).reshape(3, 3)
-        relative_rot = target_rot @ init_rot.T
-        yaw = float(np.arctan2(relative_rot[1, 0], relative_rot[0, 0]))
-        c, s = np.cos(yaw), np.sin(yaw)
-        yaw_rot = np.array(
-            [
-                [c, -s, 0.0],
-                [s, c, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float32,
+    def _control_refined(self, target_pos, target_rot, max_iters: int | None = None, verbose: bool = True) -> bool:
+        """Move to the full 6-DoF target pose with closed-loop refinement (see RobotIKController.control_refined)."""
+        cfg = self.config
+        return self._robot_ik_controller.control_refined(
+            target_pos=target_pos,
+            target_rot=target_rot,
+            grasping_action=getattr(self, "_last_gripper_action", cfg.gripper_open_action),
+            max_iters=cfg.pose_refine_max_iters if max_iters is None else max_iters,
+            pos_tol=cfg.pose_refine_pos_tol,
+            rot_tol_deg=cfg.pose_refine_rot_tol_deg,
+            gain=cfg.pose_refine_gain,
+            settle_steps=cfg.pose_refine_settle_steps,
+            max_pos_correction=cfg.pose_refine_max_pos_correction,
+            max_rot_correction_deg=cfg.pose_refine_max_rot_correction_deg,
+            wait_times=50,
+            joint_threshold=float(cfg.script_joint_solution_threshold),
+            verbose=verbose,
         )
-        return (yaw_rot @ init_rot).astype(np.float32)
 
     def _rotate_image(self, image: np.ndarray | torch.Tensor, angle_deg: float, output_shape=(480, 640)) -> np.ndarray:
         import cv2
@@ -952,7 +955,7 @@ class ScriptRobot(DroidRobot):
                 action_rot6d = action[3:9]
                 action_rot_mat = transforms.rotation_6d_to_matrix(torch.from_numpy(action_rot6d).float().unsqueeze(0)).squeeze(0).numpy()   
                 target_rot_candidate = action_rot_mat @ current_rot
-                target_rot = self._yaw_only_rotation_from_init(init_eef_pose, target_rot_candidate)
+                target_rot = target_rot_candidate
                 action9d = action.copy()
                 # Debug Mode
                 # if frame_index < 1:
@@ -978,13 +981,11 @@ class ScriptRobot(DroidRobot):
                 action9d = torch.cat([action_pos, relative_rot6d], dim=-1)
 
             before_fwrite_t = time.perf_counter()
-            pybullet_control_success = self._robot_ik_controller.control(
-                target_pos=target_pos,
-                target_rot=target_rot,
-                grasping_action=getattr(self, "_last_gripper_action", self.config.gripper_open_action),
-                wait_times=50,
-                joint_threshold=float(getattr(self.config, "script_joint_solution_threshold", 0.5)),
-                )
+            pybullet_control_success = self._control_refined(
+                target_pos,
+                target_rot,
+                max_iters=self.config.step_refine_max_iters,
+            )
             self.logs["write_follower_dt_s"] = time.perf_counter() - before_fwrite_t
 
             if not record_data or isDisturb:

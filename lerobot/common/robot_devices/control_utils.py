@@ -1003,6 +1003,75 @@ def save_depth_vis(depth_image, img_name):
                 cmap="viridis",
             )
 
+FRANKA_JOINT7_LIMIT = 2.8973
+
+
+def twist_angle_deg(rot: R, axis: np.ndarray) -> float:
+    """Signed twist of ``rot`` about unit ``axis`` (swing-twist decomposition), in degrees."""
+    q = rot.as_quat()  # xyzw
+    twist = 2.0 * np.arctan2(float(np.dot(q[:3], axis)), float(q[3]))
+    return float(np.rad2deg((twist + np.pi) % (2.0 * np.pi) - np.pi))
+
+
+def sample_agos_initial_pose(robot, aligned_pos, aligned_rot, max_attempts=200):
+    """Sample the initial EEF pose with the AGOS (AutoMateTaskAGOS) distribution.
+
+    Mirrors ``AutoMateTaskTiltedInsertion._randomize_gripper_pose`` in third_party/AGOS:
+    lift along the socket axis, add uniform world-frame position noise, and rotate about
+    the fingertip by ``delta = q_rpy * q_axial`` (left-multiplied, i.e. world frame), where
+    q_rpy ~ U(+-init_rot_noise_deg) per axis (Isaac Gym quat_from_euler_xyz convention) and
+    q_axial is a spin about the insertion axis ~ U(+-init_axial_spin_deg). As in the AGOS
+    wrist budget, samples whose total twist exceeds ``init_max_total_twist_deg`` or would
+    push joint 7 past its limit are rejected.
+    """
+    cfg = robot.config
+    aligned_pos = np.asarray(aligned_pos, dtype=np.float64)
+    aligned_rot = np.asarray(aligned_rot, dtype=np.float64)
+    # The socket sits flat on the table, so the insertion (disassembly) axis is world +z.
+    insertion_axis = np.array([0.0, 0.0, 1.0])
+    base_pos = aligned_pos + insertion_axis * cfg.init_lift_height
+    # Joint 7 rotates about the EEF z axis, so a world twist phi about the insertion axis
+    # changes joint 7 by about phi * <insertion_axis, eef_z>.
+    j7_per_twist = float(np.dot(insertion_axis, aligned_rot[:, 2]))
+    j7_now = float(np.asarray(robot._robot_ik_controller.robot_interface.last_q)[6])
+    j7_limit = FRANKA_JOINT7_LIMIT - cfg.init_joint7_limit_margin
+    pos_noise = np.asarray(cfg.init_pos_noise, dtype=np.float64)
+    rot_noise = np.deg2rad(np.asarray(cfg.init_rot_noise_deg, dtype=np.float64))
+    rng = np.random.default_rng()
+
+    for attempt in range(max_attempts):
+        pos_offset = rng.uniform(-1.0, 1.0, 3) * pos_noise
+        rpy = rng.uniform(-1.0, 1.0, 3) * rot_noise
+        # scipy lowercase "xyz" is extrinsic: Rz(yaw) Ry(pitch) Rx(roll), same as Isaac Gym.
+        q_rpy = R.from_euler("xyz", rpy)
+        spin_deg = rng.uniform(-cfg.init_axial_spin_deg, cfg.init_axial_spin_deg)
+        q_axial = R.from_rotvec(np.deg2rad(spin_deg) * insertion_axis)
+        delta = q_rpy * q_axial
+        total_twist_deg = twist_angle_deg(delta, insertion_axis)
+        if abs(total_twist_deg) > cfg.init_max_total_twist_deg:
+            continue
+        j7_pred = j7_now + np.deg2rad(total_twist_deg) * j7_per_twist
+        if abs(j7_pred) > j7_limit:
+            continue
+        target_pos = base_pos + pos_offset
+        target_rot = (delta * R.from_matrix(aligned_rot)).as_matrix()
+        info = {
+            "pos_offset": pos_offset,
+            "rpy_deg": np.rad2deg(rpy),
+            "axial_spin_deg": spin_deg,
+            "total_twist_deg": total_twist_deg,
+            "joint7_pred": j7_pred,
+        }
+        print(
+            f"[script] AGOS initial pose (attempt {attempt + 1}): pos_offset={np.round(pos_offset * 1e3, 1).tolist()} mm, "
+            f"rpy={np.round(info['rpy_deg'], 1).tolist()} deg, spin={spin_deg:.1f} deg, twist={total_twist_deg:.1f} deg"
+        )
+        return target_pos, target_rot, info
+
+    print("[script] No AGOS initial pose satisfied the wrist budget; using the lifted aligned pose.")
+    return base_pos, aligned_rot.copy(), {"pos_offset": np.zeros(3), "rpy_deg": np.zeros(3), "axial_spin_deg": 0.0}
+
+
 def run_scripted_grasp_sequence(robot):
     # visualize_world_and_wrist_camera_frames(robot)
     # exit(0)
@@ -1089,13 +1158,7 @@ def run_scripted_grasp_sequence(robot):
 
                 target_rot, yaw = closest_vertical_yaw_rot(cur_rot, vertical_rot)
 
-                robot._robot_ik_controller.control(
-                    target_pos=target_rot,
-                    target_rot=cur_pos,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=10,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
+                robot._control_refined(cur_pos, target_rot)
 
                 print(f"Reoriented vertical. yaw={yaw:.3f} rad. Press 'r' again or Enter to record.")
 
@@ -1112,34 +1175,23 @@ def run_scripted_grasp_sequence(robot):
             "aligned_pos": aligned_pos,
             "aligned_rot": aligned_rot,
         }
-        # # Lift Up the Gripper
-        target_pos = aligned_pos.copy()
-        target_pos[2] += 0.03
-        target_pos[1] += np.random.uniform(-0.01, 0.01)
-        target_pos[0] += np.random.uniform(-0.01, 0.01)
-        yaw_noise = np.random.uniform(-np.pi / 2, np.pi / 2)
-        # yaw_noise = np.pi/2
-        # yaw_noise = 0
-        yaw_quat_xyzw = np.array(
-            [0.0, 0.0, np.sin(yaw_noise * 0.5), np.cos(yaw_noise * 0.5)],
-            dtype=np.float64,
-        )
-        aligned_quat_xyzw = R.from_matrix(aligned_rot).as_quat()
-        ctrl_tgt_quat_xyzw = R.from_quat(yaw_quat_xyzw) * R.from_quat(aligned_quat_xyzw)
-        target_rot = ctrl_tgt_quat_xyzw.as_matrix()
+        # Initial pose: AGOS distribution (translation + full RPY / axial-spin rotation noise).
+        target_pos, target_rot, init_pose_sample = sample_agos_initial_pose(robot, aligned_pos, aligned_rot)
+        record["init_pose_sample"] = init_pose_sample
         
     skip_initialization = False
     if not skip_initialization:
         total_init_steps = 150
+        num_lift_steps = 25
         for i in range(total_init_steps):
             current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
             current_pos = robot._robot_ik_controller.eef_pose[:3,3]
             # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-            if i < 25:
-                print(f"Initial lift step {i+1}/150")
-                next_tgt_pos = current_pos.copy()
-                next_tgt_pos[2] += 0.004
-                next_tgt_rot = current_rot.copy()
+            if i < num_lift_steps:
+                # Straight extraction along the socket axis, keeping the aligned orientation.
+                next_tgt_pos = record["aligned_pos"].copy()
+                next_tgt_pos[2] += robot.config.init_lift_height * (i + 1) / num_lift_steps
+                next_tgt_rot = record["aligned_rot"].copy()
             else:
                 next_tgt_pos = (target_pos - current_pos) / (total_init_steps-i) + current_pos
                 next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
@@ -1155,8 +1207,10 @@ def run_scripted_grasp_sequence(robot):
                     joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                 )
         
-        init_pos = robot._robot_ik_controller.eef_pose[:3,3]
-        init_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+        # Compensate gravity-induced pose error at the sampled pose (full 6-DoF, no projection).
+        robot._control_refined(target_pos, target_rot)
+        init_pos = np.asarray(target_pos, dtype=np.float64).copy()
+        init_rot = np.asarray(target_rot, dtype=np.float64).copy()
         print("[script] Rendering initial wrist point cloud in world frame...")
         target_pos = init_pos.copy()
         target_pos[2] += 0.04 # Lift the gripper by 4cm to ensure the wrist camera has a clear view of the scene for the initial point cloud capture
@@ -1270,6 +1324,25 @@ def run_scripted_grasp_sequence(robot):
         # depth_normalized = (depth_img / max(float(depth_img.max()), 1e-8) * 255).astype(np.uint8)
         # depth_crop_normalized = (depth_crop / max(float(depth_crop.max()), 1e-8) * 255).astype(np.uint8)
         init_socket_depth = normalize_depth_for_shape(init_socket_depth)
+
+        # Return from the camera-view lift to the sampled initial pose.
+        for i in range(10):
+            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+            next_tgt_pos = (init_pos - current_pos) / (10 - i) + current_pos
+            next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+                current_rot,
+                init_rot,
+                max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+            )
+            robot._robot_ik_controller.control(
+                    target_pos=next_tgt_pos,
+                    target_rot=next_tgt_rot,
+                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                    wait_times=100,
+                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+                )
+        robot._control_refined(init_pos, init_rot)
         # save_rgb(init_socket_rgb, "initial_socket_rgb")
         # save_depth_vis(init_socket_depth, "initial_socket_depth")
         # print("Inspect the initial socket RGB and depth captures, then press Enter to continue...")
@@ -1385,14 +1458,7 @@ def run_scripted_grasp_sequence(robot):
                     joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                 )
         # Fine adjustment to ensure we are back to the initial pose
-        for _ in range(5):
-            robot._robot_ik_controller.control(
-                    target_pos=init_pos,
-                    target_rot=init_rot,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
+        robot._control_refined(init_pos, init_rot)
         record["init_socket_depth_img"] = init_socket_depth
         record["init_socket_rgb_img"] = init_socket_rgb
         record["init_plug_rgb_img"] = init_plug_rgb

@@ -662,6 +662,32 @@ class ScriptRobotConfig(RobotConfig):
     script_joint_solution_threshold: float = 0.5
     script_rot_max_angle_step_deg: float = 2.0
 
+    # Initial pose randomization, matching AGOS (third_party/AGOS, AutoMateTaskAGOS):
+    # lift along the socket axis, then world-frame xyz noise and RPY + axial-spin noise
+    # applied about the fingertip (delta = q_rpy * q_axial, target = delta * aligned).
+    # Height (m) of the plug above the aligned pose (plug tip just above the socket hole).
+    # AGOS lifts 1.4 * d + 0.05 from the seated pose; for asset 300006 that leaves the plug
+    # bottom ~0.083 m above the socket top.
+    init_lift_height: float = 0.083
+    init_pos_noise: tuple[float, float, float] = (0.01, 0.01, 0.0)
+    init_rot_noise_deg: tuple[float, float, float] = (10.0, 10.0, 10.0)
+    init_axial_spin_deg: float = 180.0
+    # AGOS wrist budget: |total twist about the insertion axis| <= 180 - return margin (30).
+    init_max_total_twist_deg: float = 150.0
+    init_joint7_limit_margin: float = 0.15
+
+    # Closed-loop pose refinement: re-command target + measured error so that gravity sag
+    # and IK/FK model mismatch do not leave a residual (tilt) error at the EEF.
+    pose_refine_max_iters: int = 10
+    pose_refine_pos_tol: float = 0.0005
+    pose_refine_rot_tol_deg: float = 0.2
+    pose_refine_gain: float = 1.0
+    pose_refine_settle_steps: int = 20
+    pose_refine_max_pos_correction: float = 0.01
+    pose_refine_max_rot_correction_deg: float = 5.0
+    # Refinement iterations per policy step in teleop_step (kept small for loop timing).
+    step_refine_max_iters: int = 3
+
     gripper_threshold: float = 0.5
     gripper_open_action: float = 1.0
     gripper_close_action: float = 0.0
