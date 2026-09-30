@@ -935,6 +935,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
     def clear_episode_buffer(self) -> None:
         episode_index = self.episode_buffer["episode_index"]
         if self.image_writer is not None:
+            self.image_writer.wait_until_done()
             for cam_key in self.meta.camera_keys:
                 img_dir = self._get_image_file_path(
                     episode_index=episode_index, image_key=cam_key, frame_index=0
@@ -1008,13 +1009,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
             )
             if len(input_list) == 0:
                 raise FileNotFoundError(f"No images found in {img_dir}.")
-            dummy_image = PIL.Image.open(input_list[0])
+            with PIL.Image.open(input_list[0]) as dummy_image:
+                dummy_mode = dummy_image.mode
 
-            if dummy_image.mode == "I;16":
+            if dummy_mode == "I;16":
                 vcodec = "ffv1"
                 pix_fmt = "gray16le"
                 video_path = video_path.with_suffix(".mkv")
-            elif dummy_image.mode == "RGB":
+            elif dummy_mode == "RGB":
                 vcodec = "h264"
                 pix_fmt = "yuv420p"
             else:
@@ -1022,6 +1024,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
             video_paths[key] = str(video_path)
             encoding_tasks.append((img_dir, video_path, self.fps, vcodec, pix_fmt))
+
+        if not encoding_tasks:
+            return video_paths
 
         # Encode all videos in parallel
         max_workers = min(len(encoding_tasks), mp.cpu_count())

@@ -98,6 +98,10 @@ def compute_episode_stats(episode_data: dict[str, list[str] | np.ndarray], featu
             ep_ft_array = data  # data is already a np.ndarray (B, N, 3)
             axes_to_reduce = (0, 1)  # compute stats over the first two axes (across points)
             keepdims = True  # keep dims to preserve coordinate structure (1, 1, 3,)
+        elif "image" in key and "depth" in key:
+            ep_ft_array = data
+            axes_to_reduce = tuple(range(data.ndim))
+            keepdims = True
         else:
             ep_ft_array = data  # data is already a np.ndarray
             axes_to_reduce = 0  # compute stats over the first axis

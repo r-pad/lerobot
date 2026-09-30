@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import multiprocessing
+import os
 import queue
 import threading
 from pathlib import Path
@@ -83,16 +84,24 @@ def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) 
 
 
 def write_image(image: np.ndarray | PIL.Image.Image, fpath: Path):
+    tmp_fpath = None
     try:
+        fpath.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(image, np.ndarray):
             img = image_array_to_pil_image(image)
         elif isinstance(image, PIL.Image.Image):
             img = image
         else:
             raise TypeError(f"Unsupported image type: {type(image)}")
-        img.save(fpath)
+        tmp_fpath = fpath.with_name(
+            f".{fpath.stem}.tmp-{os.getpid()}-{threading.get_ident()}{fpath.suffix}"
+        )
+        img.save(tmp_fpath)
+        tmp_fpath.replace(fpath)
     except Exception as e:
         print(f"Error writing image {fpath}: {e}")
+        if tmp_fpath is not None and tmp_fpath.exists():
+            tmp_fpath.unlink(missing_ok=True)
 
 
 def worker_thread_loop(queue: queue.Queue):

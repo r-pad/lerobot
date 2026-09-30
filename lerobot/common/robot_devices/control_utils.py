@@ -682,6 +682,8 @@ def crop_rgb_depth_foreground_center(
     x1 = x0 + crop_w
 
     if debug:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
 
@@ -970,10 +972,14 @@ def closest_vertical_yaw_rot(cur_rot, vertical_rot):
     return vertical_rot @ yaw_rot, yaw
 
 def save_rgb(rgb_image, img_name):
+            import matplotlib
+            matplotlib.use("Agg", force=True)
             import matplotlib.pyplot as plt
             plt.imsave(f"/home/yinongh/automate/lerobot/outputs/{img_name}.png", rgb_image)
 def save_depth_vis(depth_image, img_name):
             import numpy as np
+            import matplotlib
+            matplotlib.use("Agg", force=True)
             import matplotlib.pyplot as plt
 
             depth = np.asarray(depth_image)
@@ -996,6 +1002,7 @@ def run_scripted_grasp_sequence(robot):
     # exit(0)
     # return
     record = {}
+    command_gripper(robot,action = -1.0, label="open")
     skip_grasping = False
     if not skip_grasping:
         home_joints = np.array(
@@ -1140,6 +1147,7 @@ def run_scripted_grasp_sequence(robot):
                     wait_times=100,
                     joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                 )
+        
         init_pos = robot._robot_ik_controller.eef_pose[:3,3]
         init_rot = robot._robot_ik_controller.eef_pose[:3,:3]
         print("[script] Rendering initial wrist point cloud in world frame...")
@@ -1164,6 +1172,7 @@ def run_scripted_grasp_sequence(robot):
                         joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                     )
         wrist_camera = robot.cameras["cam_wrist"]
+        
         wrist_images = read_zed_stereo_rgb(wrist_camera)
         wrist_depth = compute_foundation_stereo_depth(wrist_images, wrist_camera)
         wrist_k, _ = get_zed_intrinsics_and_baseline(wrist_camera)
@@ -1345,8 +1354,8 @@ def run_scripted_grasp_sequence(robot):
         init_plug_depth = normalize_depth_for_shape(init_plug_depth)
         init_plug_rgb = np.flipud(init_plug_rgb).copy()
         init_plug_depth = np.flipud(init_plug_depth).copy()
-        save_rgb(init_plug_rgb, "processed_auxiliary_rgb")
-        save_depth_vis(init_plug_depth, "processed_auxiliary_depth")
+        # save_rgb(init_plug_rgb, "processed_auxiliary_rgb")
+        # save_depth_vis(init_plug_depth, "processed_auxiliary_depth")
         # print("Inspect the processed auxiliary RGB and depth captures, then press Enter to continue...")
         # input()
         target_pos = init_pos
@@ -1384,6 +1393,7 @@ def run_scripted_grasp_sequence(robot):
 
     # Random Offset from 0.003 ~ 0.005 in x & y direction
     # Random yaw rotation ranging from 5~90 degrees.
+    np.random.seed(int(time.time_ns() % (2**32)))
     x_offset = np.random.uniform(0.003, 0.005)
     y_offset = np.random.uniform(0.003, 0.005)
     yaw_rotation = np.random.uniform(5, 90)
@@ -1700,6 +1710,7 @@ def control_loop(
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset['fps']} != {fps}).")
 
     timestamp = 0
+    frame_index = 0
     start_episode_t = time.perf_counter()
 
     # Controls starts, if policy is given it needs cleaning up
@@ -1714,31 +1725,30 @@ def control_loop(
             robot._scripted_insert_meta_data = run_scripted_grasp_sequence(robot)
         insert_meta_data = getattr(robot, "_scripted_insert_meta_data", None)
         episode_index = None
-        frame_index = None
         if dataset is not None:
             if dataset.episode_buffer is None:
                 episode_index = dataset.meta.total_episodes
-                frame_index = 0
             else:
                 episode_index = dataset.episode_buffer["episode_index"]
-                frame_index = dataset.episode_buffer["size"]
         print("Episode Index, Frame Index: ", episode_index, frame_index)
-        observation, action = robot.teleop_step(record_data=True, insert_meta_data=insert_meta_data, episode_index=episode_index, frame_index=frame_index)
-        attach_auxiliary_observation_to_frame(observation, robot, dataset)
+        step_data = robot.teleop_step(record_data=True, insert_meta_data=insert_meta_data, episode_index=episode_index, frame_index=frame_index)
+        if step_data is not None:
+            observation, action = step_data
+            attach_auxiliary_observation_to_frame(observation, robot, dataset)
 
-        if policy is not None and getattr(policy, "_current_vis_frame", None) is not None:
-            # Each policy declares the observation key for its visualization frame
-            # via cfg.vis_obs_key; we just route the (H, W*v, 3) uint8 RGB array
-            # to that key here without knowing what policy produced it.
-            vis_key = getattr(getattr(policy, "config", None), "vis_obs_key", None) \
-                or getattr(policy, "vis_obs_key", None)
-            if vis_key:
-                import torch as _torch
-                observation[vis_key] = _torch.from_numpy(policy._current_vis_frame)
+            if policy is not None and getattr(policy, "_current_vis_frame", None) is not None:
+                # Each policy declares the observation key for its visualization frame
+                # via cfg.vis_obs_key; we just route the (H, W*v, 3) uint8 RGB array
+                # to that key here without knowing what policy produced it.
+                vis_key = getattr(getattr(policy, "config", None), "vis_obs_key", None) \
+                    or getattr(policy, "vis_obs_key", None)
+                if vis_key:
+                    import torch as _torch
+                    observation[vis_key] = _torch.from_numpy(policy._current_vis_frame)
 
-        if dataset is not None:
-            frame = {**observation, **action, "task": single_task}
-            dataset.add_frame(frame)
+            if dataset is not None:
+                frame = {**observation, **action, "task": single_task}
+                dataset.add_frame(frame)
         if fps is not None:
             dt_s = time.perf_counter() - start_loop_t
             busy_wait(1 / fps - dt_s)
@@ -1746,6 +1756,7 @@ def control_loop(
         dt_s = time.perf_counter() - start_loop_t
         log_control_info(robot, dt_s, fps=fps)
 
+        frame_index += 1
         timestamp = time.perf_counter() - start_episode_t
         if events["exit_early"]:
             events["exit_early"] = False
@@ -1792,12 +1803,16 @@ def sanity_check_dataset_name(repo_id, policy_cfg):
 
 
 def sanity_check_dataset_robot_compatibility(
-    dataset: LeRobotDataset, robot: Robot, fps: int, use_videos: bool
+    dataset: LeRobotDataset, robot: Robot, fps: int, use_videos: bool, extra_features: dict | None = None
 ) -> None:
+    expected_features = get_features_from_robot(robot, use_videos)
+    if extra_features:
+        expected_features = {**expected_features, **extra_features}
+
     fields = [
         ("robot_type", dataset.meta.robot_type, robot.robot_type),
         ("fps", dataset.fps, fps),
-        ("features", dataset.features, get_features_from_robot(robot, use_videos)),
+        ("features", dataset.features, expected_features),
     ]
 
     mismatches = []

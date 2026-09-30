@@ -179,6 +179,57 @@ from lerobot.configs import parser
 ########################################################################################
 
 
+def get_record_extra_features(robot: Robot, cfg: RecordControlConfig) -> dict:
+    if cfg.policy is not None and cfg.policy.enable_goal_conditioning:
+        with open(cfg.policy.calibration_json) as f:
+            calibration_data = json.load(f)
+        cam_names = calibration_data.keys()
+        extra_features = {f"observation.images.{cam}.goal_gripper_proj":
+                          {'dtype': 'video', 'shape': (720, 1280, 3),
+                           'names': ['height', 'width', 'channels'],
+                           'info': 'Projection of gripper pcd at goal position onto image'} for cam in cam_names}
+    else:
+        extra_features = {}
+
+    auxiliary_camera = robot.cameras.get("cam_auxiliary")
+    if auxiliary_camera is not None:
+        aux_height = auxiliary_camera.height
+        aux_width = auxiliary_camera.width
+        aux_dtype = "video" if cfg.video else "image"
+        extra_features["observation.images.cam_auxiliary.left"] = {
+            "dtype": aux_dtype,
+            "shape": (aux_height, aux_width, 3),
+            "names": ["height", "width", "channels"],
+            "info": "One-shot auxiliary ZED left RGB captured during scripted setup",
+        }
+        extra_features["observation.images.cam_auxiliary.depth"] = {
+            "dtype": aux_dtype,
+            "shape": (aux_height, aux_width, 1),
+            "names": ["height", "width", "channels"],
+            "info": "One-shot auxiliary FoundationStereo depth in uint16 millimeters",
+        }
+
+    # Generic per-policy visualization channel. A policy that wants to record a
+    # per-step visualization frame into the dataset declares two fields on its
+    # config:
+    #   - vis_obs_key: str — observation key under which the frame is stored.
+    #   - vis_shape:  (H, W, C) — shape of the uint8 RGB frame.
+    # Both can be plain dataclass fields or @property's. The policy instance
+    # must also assign `self._current_vis_frame` to a (H, W, C) uint8 numpy
+    # array each step it wants the frame recorded.
+    if cfg.policy is not None:
+        vis_key = getattr(cfg.policy, "vis_obs_key", None)
+        vis_shape = getattr(cfg.policy, "vis_shape", None)
+        if vis_key and vis_shape:
+            extra_features[vis_key] = {
+                "dtype": "video",
+                "shape": tuple(vis_shape),
+                "names": ["height", "width", "channels"],
+            }
+
+    return extra_features
+
+
 @safe_disconnect
 def calibrate(robot: Robot, cfg: CalibrateControlConfig):
     # TODO(aliberts): move this code in robots' classes
@@ -257,6 +308,8 @@ def record(
         )
         cfg.resume = True
 
+    extra_features = get_record_extra_features(robot, cfg)
+
     if cfg.resume:
         dataset = LeRobotDataset.from_prerecorded(
             cfg.repo_id,
@@ -267,56 +320,10 @@ def record(
                 num_processes=cfg.num_image_writer_processes,
                 num_threads=cfg.num_image_writer_threads_per_camera * len(robot.cameras),
             )
-        sanity_check_dataset_robot_compatibility(dataset, robot, cfg.fps, cfg.video)
+        sanity_check_dataset_robot_compatibility(dataset, robot, cfg.fps, cfg.video, extra_features=extra_features)
     else:
         # Create empty dataset or load existing saved episodes
         sanity_check_dataset_name(cfg.repo_id, cfg.policy)
-
-        if cfg.policy is not None and cfg.policy.enable_goal_conditioning:
-            with open(cfg.policy.calibration_json) as f:
-                calibration_data = json.load(f)
-            cam_names = calibration_data.keys()
-            extra_features = {f"observation.images.{cam}.goal_gripper_proj":
-                              {'dtype': 'video', 'shape': (720, 1280, 3),
-                               'names': ['height', 'width', 'channels'],
-                               'info': 'Projection of gripper pcd at goal position onto image'} for cam in cam_names}
-        else:
-            extra_features = {}
-
-        auxiliary_camera = robot.cameras.get("cam_auxiliary")
-        if auxiliary_camera is not None:
-            aux_height = auxiliary_camera.height
-            aux_width = auxiliary_camera.width
-            aux_dtype = "video" if cfg.video else "image"
-            extra_features["observation.images.cam_auxiliary.left"] = {
-                "dtype": aux_dtype,
-                "shape": (aux_height, aux_width, 3),
-                "names": ["height", "width", "channels"],
-                "info": "One-shot auxiliary ZED left RGB captured during scripted setup",
-            }
-            extra_features["observation.images.cam_auxiliary.depth"] = {
-                "dtype": aux_dtype,
-                "shape": (aux_height, aux_width, 1),
-                "names": ["height", "width", "channels"],
-                "info": "One-shot auxiliary FoundationStereo depth in uint16 millimeters",
-            }
-        # Generic per-policy visualization channel. A policy that wants to record a
-        # per-step visualization frame into the dataset declares two fields on its
-        # config:
-        #   - vis_obs_key: str — observation key under which the frame is stored.
-        #   - vis_shape:  (H, W, C) — shape of the uint8 RGB frame.
-        # Both can be plain dataclass fields or @property's. The policy instance
-        # must also assign `self._current_vis_frame` to a (H, W, C) uint8 numpy
-        # array each step it wants the frame recorded.
-        if cfg.policy is not None:
-            vis_key   = getattr(cfg.policy, "vis_obs_key", None)
-            vis_shape = getattr(cfg.policy, "vis_shape", None)
-            if vis_key and vis_shape:
-                extra_features[vis_key] = {
-                    "dtype": "video",
-                    "shape": tuple(vis_shape),
-                    "names": ["height", "width", "channels"],
-                }
 
         dataset = LeRobotDataset.create(
             cfg.repo_id,

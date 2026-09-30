@@ -62,6 +62,7 @@ dependencies = [
     "huggingface-hub[hf-transfer,cli]>=0.27.1 ; python_version < '4.0'",
     "imageio[ffmpeg]>=2.34.0",
     "jsonlines>=4.0.0",
+    "msgpack>=1.1.0,<2",
     "numba>=0.59.0",
     "omegaconf>=2.3.0",
     "opencv-python-headless>=4.9.0",
@@ -174,6 +175,7 @@ cuda-toolkit = "12.4.*"
 ffmpeg = ">=7,<8"
 pkg-config = "*"
 cython = ">=3"
+h5py = ">=3.16.0,<4"
 
 [tool.pixi.activation]
 env = { PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig" }
