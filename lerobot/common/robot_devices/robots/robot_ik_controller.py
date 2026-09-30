@@ -335,6 +335,9 @@ class RobotIKController():
             rot_err = R.from_matrix(target_rot) * R.from_matrix(pose[:3, :3]).inv()
             pos_err_norm = float(np.linalg.norm(pos_err))
             rot_err_deg = float(np.rad2deg(rot_err.magnitude()))
+            # Correction (command - target) that produced this measurement.
+            self.last_pos_correction = cmd_pos - target_pos
+            self.last_rot_correction = (cmd_rot * R.from_matrix(target_rot).inv()).as_rotvec()
             if pos_err_norm < pos_tol and rot_err_deg < rot_tol_deg:
                 if verbose:
                     cprint(

@@ -676,6 +676,30 @@ class ScriptRobotConfig(RobotConfig):
     init_max_total_twist_deg: float = 150.0
     init_joint7_limit_margin: float = 0.15
 
+    # Multi-view socket pre-scan, matching AGOS `env.plug_photo.socket_views`: the fingertip is
+    # driven to socket_top + offset (world frame, m) keeping the start-pose orientation, one
+    # wrist capture per view, and the world-frame clouds are concatenated.
+    socket_scan_views: tuple[tuple[float, float, float], ...] = (
+        (0.0, 0.0, 0.16),
+        (0.06, 0.0, 0.14),
+        (-0.06, 0.0, 0.14),
+    )
+    # Socket top = aligned_pos - (0, 0, this). aligned_pos is the fingertip with the plug tip just
+    # above the hole, so set this to the fingertip-to-plug-tip length to match the sim anchor.
+    socket_scan_plug_tip_offset: float = 0.0
+    socket_scan_move_steps: int = 10
+    # FoundationStereo input scale and unprojection stride for the scan. The default pipeline runs
+    # at scale 0.5 (640x360 depth), which leaves the socket with only ~800 points per view.
+    socket_scan_stereo_scale: float = 1.0
+    socket_scan_stride: int = 1
+    # Stand-in for the sim's socket segmentation mask: keep world points in this z band and
+    # within this xy radius of the socket (<= 0 disables the radius crop).
+    socket_scan_z_range: tuple[float, float] = (0.025, 0.06)
+    socket_scan_crop_radius: float = 0.08
+
+    # Master switch for gravity compensation. False = plain open-loop IK control everywhere
+    # (no refinement iterations, no per-step feedforward), for comparison.
+    gravity_compensation: bool = True
     # Closed-loop pose refinement: re-command target + measured error so that gravity sag
     # and IK/FK model mismatch do not leave a residual (tilt) error at the EEF.
     pose_refine_max_iters: int = 10
@@ -685,8 +709,9 @@ class ScriptRobotConfig(RobotConfig):
     pose_refine_settle_steps: int = 20
     pose_refine_max_pos_correction: float = 0.01
     pose_refine_max_rot_correction_deg: float = 5.0
-    # Refinement iterations per policy step in teleop_step (kept small for loop timing).
-    step_refine_max_iters: int = 3
+    # teleop_step uses one control call per step with a feedforward correction carried across
+    # steps (warm-started by the last refinement); this is its per-step update gain (0 = frozen).
+    step_feedforward_gain: float = 0.5
 
     gripper_threshold: float = 0.5
     gripper_open_action: float = 1.0

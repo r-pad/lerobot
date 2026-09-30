@@ -547,20 +547,30 @@ def get_foundation_stereo_depth(
 def compute_foundation_stereo_depth(
     images: dict[str, np.ndarray],
     camera,
+    scale: float | None = None,
 ) -> np.ndarray:
-    """Run FoundationStereo on an auxiliary ZED pair and return metric depth."""
+    """Run FoundationStereo on an auxiliary ZED pair and return metric depth.
+
+    ``scale`` overrides the model's input downscale for this call (1.0 = full resolution).
+    """
     k, baseline_m = get_zed_intrinsics_and_baseline(camera)
     left_rgb = images["left"]
     right_rgb = images["right"]
 
     fs_depth = get_foundation_stereo_depth()
-    depth = fs_depth.infer_depth(
-        left_rgb,
-        right_rgb,
-        fx=float(k[0, 0]),
-        baseline_m=baseline_m,
-        remove_invisible=True,
-    )
+    default_scale = fs_depth.scale
+    if scale is not None:
+        fs_depth.scale = float(scale)
+    try:
+        depth = fs_depth.infer_depth(
+            left_rgb,
+            right_rgb,
+            fx=float(k[0, 0]),
+            baseline_m=baseline_m,
+            remove_invisible=True,
+        )
+    finally:
+        fs_depth.scale = default_scale
     if depth.shape[:2] != left_rgb.shape[:2]:
         import cv2
 
@@ -753,8 +763,16 @@ def crop_rgb_depth_foreground_center(
 
     return rgb[y0:y1, x0:x1], depth[y0:y1, x0:x1]
 
-def visualize_open3d_point_cloud(points: np.ndarray, colors: np.ndarray, window_name: str) -> None:
-    """Render an RGB point cloud with the world-frame axes in Open3D."""
+def visualize_open3d_point_cloud(
+    points: np.ndarray,
+    colors: np.ndarray,
+    window_name: str,
+    center_on_cloud: bool = False,
+) -> None:
+    """Render an RGB point cloud with the world-frame axes in Open3D.
+
+    With ``center_on_cloud`` the default view is kept but re-centred on the cloud.
+    """
     import open3d as o3d
 
     if points.shape[0] == 0:
@@ -772,6 +790,8 @@ def visualize_open3d_point_cloud(points: np.ndarray, colors: np.ndarray, window_
     vis.add_geometry(world_frame)
     vis.get_render_option().point_size = 1.0
     vis.get_render_option().background_color = np.array([0.5, 0.5, 0.5])
+    if center_on_cloud:
+        vis.get_view_control().set_lookat(np.median(points, axis=0))  # median: robust to stray points
     vis.run()
     vis.destroy_window()
 
@@ -1211,40 +1231,11 @@ def run_scripted_grasp_sequence(robot):
         robot._control_refined(target_pos, target_rot)
         init_pos = np.asarray(target_pos, dtype=np.float64).copy()
         init_rot = np.asarray(target_rot, dtype=np.float64).copy()
-        print("[script] Rendering initial wrist point cloud in world frame...")
-        target_pos = init_pos.copy()
-        target_pos[2] += 0.04 # Lift the gripper by 4cm to ensure the wrist camera has a clear view of the scene for the initial point cloud capture
-        print("Lifting up the gripper")
-        for i in range(10):
-                current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-                current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-                # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-                next_tgt_pos = (target_pos - current_pos) / (10-i) + current_pos
-                next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-                    current_rot,
-                    target_rot,
-                    max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
-                )
-                robot._robot_ik_controller.control(
-                        target_pos=next_tgt_pos,
-                        target_rot=next_tgt_rot,
-                        grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                        wait_times=100,
-                        joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                    )
+        # Multi-view socket pre-scan (AGOS socket_views): capture from each view pose while holding
+        # the plug, keep the start-pose orientation, and concatenate the world-frame clouds.
+        print("[script] Pre-scanning the socket from multiple wrist views...")
         wrist_camera = robot.cameras["cam_wrist"]
-        
-        wrist_images = read_zed_stereo_rgb(wrist_camera)
-        wrist_depth = compute_foundation_stereo_depth(wrist_images, wrist_camera)
         wrist_k, _ = get_zed_intrinsics_and_baseline(wrist_camera)
-        wrist_points_cam, wrist_colors = depth_rgb_to_camera_point_cloud(
-                wrist_depth,
-                wrist_images["left"],
-                wrist_k,
-                stride=2,
-                max_depth_m=0.5,
-            )
-
         cam_to_gripper = np.array(
                 [
                     [-0.00768086, -0.94557934, -0.32530096, 0.07294499],
@@ -1254,18 +1245,59 @@ def run_scripted_grasp_sequence(robot):
                 ],
                 dtype=np.float64,
             )
-        world_from_gripper = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64)
-        world_from_cam = world_from_gripper @ cam_to_gripper
-        wrist_points_world = transform_points(wrist_points_cam, world_from_cam)
-        # world_z_low_threshold = 0.0
-        # world_z_threshold = 0.09
-        world_z_low_threshold = 0.025
-        world_z_threshold = 0.06
+        socket_top = np.asarray(record["aligned_pos"], dtype=np.float64).copy()
+        socket_top[2] -= robot.config.socket_scan_plug_tip_offset
+        z_low, z_high = robot.config.socket_scan_z_range
+        crop_radius = float(robot.config.socket_scan_crop_radius)
+        move_steps = int(robot.config.socket_scan_move_steps)
+        view_points, view_colors = [], []
+        for view_idx, offset in enumerate(robot.config.socket_scan_views):
+            view_pos = socket_top + np.asarray(offset, dtype=np.float64)
+            for i in range(move_steps):
+                current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
+                current_pos = robot._robot_ik_controller.eef_pose[:3,3]
+                next_tgt_pos = (view_pos - current_pos) / (move_steps - i) + current_pos
+                next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+                    current_rot,
+                    init_rot,
+                    max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+                )
+                robot._robot_ik_controller.control(
+                        target_pos=next_tgt_pos,
+                        target_rot=next_tgt_rot,
+                        grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+                        wait_times=100,
+                        joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+                    )
+            # Settle at the view pose so the capture is not blurred and the pose is accurate.
+            robot._control_refined(view_pos, init_rot)
 
-        keep = (wrist_points_world[:, 2] >= world_z_low_threshold) & (wrist_points_world[:, 2]<= world_z_threshold)
+            wrist_images = read_zed_stereo_rgb(wrist_camera)
+            # Full-resolution stereo + every pixel: the socket covers a small part of the image.
+            wrist_depth = compute_foundation_stereo_depth(
+                wrist_images, wrist_camera, scale=robot.config.socket_scan_stereo_scale
+            )
+            points_cam, colors = depth_rgb_to_camera_point_cloud(
+                    wrist_depth,
+                    wrist_images["left"],
+                    wrist_k,
+                    stride=robot.config.socket_scan_stride,
+                    max_depth_m=0.5,
+                )
+            world_from_gripper = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64)
+            points_world = transform_points(points_cam, world_from_gripper @ cam_to_gripper)
+            keep = (points_world[:, 2] >= z_low) & (points_world[:, 2] <= z_high)
+            if crop_radius > 0:
+                keep &= np.linalg.norm(points_world[:, :2] - socket_top[:2], axis=1) <= crop_radius
+            print(f"[script] Socket view {view_idx + 1}/{len(robot.config.socket_scan_views)} "
+                  f"offset={list(offset)}: kept {int(keep.sum())} / {len(keep)} points")
+            view_points.append(points_world[keep])
+            view_colors.append(colors[keep])
 
-        wrist_points_world = wrist_points_world[keep]
-        wrist_colors = wrist_colors[keep]
+        wrist_points_world = np.concatenate(view_points, axis=0)
+        wrist_colors = np.concatenate(view_colors, axis=0)
+        if wrist_points_world.shape[0] == 0:
+            raise RuntimeError("[script] Socket pre-scan produced no points; check socket_scan_* settings.")
         robot._initial_wrist_points_world = wrist_points_world.astype(np.float32)
         robot._initial_wrist_points_world_colored = np.concatenate(
             [wrist_points_world.astype(np.float32), wrist_colors.astype(np.float32)],
@@ -1286,7 +1318,8 @@ def run_scripted_grasp_sequence(robot):
         visualize_open3d_point_cloud(
             wrist_points_world,
             wrist_colors,
-            "Initial wrist point cloud in world frame",
+            "Socket point cloud (multi-view pre-scan)",
+            center_on_cloud=True,
         )
         record["init_socket_pcd"] = robot._initial_wrist_points_world_colored
         init_socket_pcd = np.asarray(record["init_socket_pcd"], dtype=np.float32)
@@ -1325,7 +1358,7 @@ def run_scripted_grasp_sequence(robot):
         # depth_crop_normalized = (depth_crop / max(float(depth_crop.max()), 1e-8) * 255).astype(np.uint8)
         init_socket_depth = normalize_depth_for_shape(init_socket_depth)
 
-        # Return from the camera-view lift to the sampled initial pose.
+        # Return from the last socket-scan view to the sampled initial pose.
         for i in range(10):
             current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
             current_pos = robot._robot_ik_controller.eef_pose[:3,3]

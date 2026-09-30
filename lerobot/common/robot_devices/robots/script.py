@@ -168,6 +168,10 @@ class ScriptRobot(DroidRobot):
         self._teleop_hold_z = None
         self.force_buffer = None
         self._last_gripper_action = self.config.gripper_close_action
+        # World-frame pose correction (command - target) that compensates gravity sag; warm-started
+        # by _control_refined and updated once per step by _control_feedforward.
+        self._ff_pos = np.zeros(3, dtype=np.float64)
+        self._ff_rotvec = np.zeros(3, dtype=np.float64)
         data=load_processed_dataset("/home/yinongh/automate/lerobot/ckpt/processed_dataset_forward_sim2real_0523_automate.h5")
         all_actions = data['actions'][()]  # (N, K, 9)
         delta_pos = all_actions[..., 0:3]  # (N, K, 3)
@@ -325,7 +329,15 @@ class ScriptRobot(DroidRobot):
     def _control_refined(self, target_pos, target_rot, max_iters: int | None = None, verbose: bool = True) -> bool:
         """Move to the full 6-DoF target pose with closed-loop refinement (see RobotIKController.control_refined)."""
         cfg = self.config
-        return self._robot_ik_controller.control_refined(
+        if not cfg.gravity_compensation:
+            return self._robot_ik_controller.control(
+                target_pos=target_pos,
+                target_rot=target_rot,
+                grasping_action=getattr(self, "_last_gripper_action", cfg.gripper_open_action),
+                wait_times=50,
+                joint_threshold=float(cfg.script_joint_solution_threshold),
+            )
+        ok = self._robot_ik_controller.control_refined(
             target_pos=target_pos,
             target_rot=target_rot,
             grasping_action=getattr(self, "_last_gripper_action", cfg.gripper_open_action),
@@ -340,6 +352,47 @@ class ScriptRobot(DroidRobot):
             joint_threshold=float(cfg.script_joint_solution_threshold),
             verbose=verbose,
         )
+        # Warm-start the per-step feedforward with the correction that worked here.
+        self._ff_pos = np.asarray(self._robot_ik_controller.last_pos_correction, dtype=np.float64).copy()
+        self._ff_rotvec = np.asarray(self._robot_ik_controller.last_rot_correction, dtype=np.float64).copy()
+        return ok
+
+    def _control_feedforward(self, target_pos, target_rot) -> bool:
+        """One control call per step with gravity compensation carried across steps.
+
+        Commands target + feedforward correction, then updates the correction from the
+        measured error (a low-gain integral across steps). The sag varies slowly with the
+        arm configuration, so this tracks it without extra iterations or settle ticks.
+        """
+        cfg = self.config
+        target_pos = np.asarray(target_pos, dtype=np.float64).reshape(3)
+        target_r = R.from_matrix(np.asarray(target_rot, dtype=np.float64).reshape(3, 3))
+        ok = self._robot_ik_controller.control(
+            target_pos=target_pos + self._ff_pos,
+            target_rot=(R.from_rotvec(self._ff_rotvec) * target_r).as_matrix(),
+            grasping_action=getattr(self, "_last_gripper_action", cfg.gripper_open_action),
+            wait_times=50,
+            joint_threshold=float(cfg.script_joint_solution_threshold),
+        )
+        pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float64)
+        pos_err = target_pos - pose[:3, 3]
+        rot_err = (target_r * R.from_matrix(pose[:3, :3]).inv()).as_rotvec()
+        print(
+            f"[script] step pose error (gravity_compensation={cfg.gravity_compensation}): "
+            f"pos={np.linalg.norm(pos_err) * 1e3:.2f} mm, rot={np.rad2deg(np.linalg.norm(rot_err)):.3f} deg"
+        )
+        gain = float(cfg.step_feedforward_gain)
+        if cfg.gravity_compensation and gain > 0:
+            self._ff_pos = self._ff_pos + gain * pos_err
+            self._ff_rotvec = (R.from_rotvec(gain * rot_err) * R.from_rotvec(self._ff_rotvec)).as_rotvec()
+            pos_norm = np.linalg.norm(self._ff_pos)
+            if pos_norm > cfg.pose_refine_max_pos_correction:
+                self._ff_pos *= cfg.pose_refine_max_pos_correction / pos_norm
+            rot_norm = np.linalg.norm(self._ff_rotvec)
+            max_rot = np.deg2rad(cfg.pose_refine_max_rot_correction_deg)
+            if rot_norm > max_rot:
+                self._ff_rotvec *= max_rot / rot_norm
+        return ok
 
     def _rotate_image(self, image: np.ndarray | torch.Tensor, angle_deg: float, output_shape=(480, 640)) -> np.ndarray:
         import cv2
@@ -981,11 +1034,7 @@ class ScriptRobot(DroidRobot):
                 action9d = torch.cat([action_pos, relative_rot6d], dim=-1)
 
             before_fwrite_t = time.perf_counter()
-            pybullet_control_success = self._control_refined(
-                target_pos,
-                target_rot,
-                max_iters=self.config.step_refine_max_iters,
-            )
+            pybullet_control_success = self._control_feedforward(target_pos, target_rot)
             self.logs["write_follower_dt_s"] = time.perf_counter() - before_fwrite_t
 
             if not record_data or isDisturb:
