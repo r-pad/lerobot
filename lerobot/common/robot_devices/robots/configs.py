@@ -632,8 +632,10 @@ class ScriptRobotConfig(RobotConfig):
     insertion_pose_path: str = "outputs/scripted_insertion_pose.json"
     z_step: float = 0.0001
     script_mode: str = "pose"
+    # Skip policy inference in teleop_step (set via `collect_data.sh --debug`).
+    debug: bool = False
     # Task 1
-    approach_pos: tuple[float, float, float] = (0.493, 0.00, 0.065)
+    approach_pos: tuple[float, float, float] = (0.66, -0.012, 0.065)
     target_quat: tuple[float, float, float, float] = (
        9.99670212e-01, 3.90303529e-04, 2.46570828e-02, 7.16535067e-03
     )

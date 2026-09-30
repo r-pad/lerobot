@@ -252,6 +252,10 @@ class ScriptRobot(DroidRobot):
                 "names": ["points", "xyz"],
             },
         }
+        if self.config.debug:
+            # teleop_step only produces these depth images when running policy inference.
+            motor_features.pop("observation.aligned_socket_depth_img")
+            motor_features.pop("observation.init_plug_depth_img")
         if "cam_wrist" in self.cameras:
             motor_features["observation.cam_wrist.extrinsics"] = {
                 "dtype": "float32",
@@ -875,16 +879,19 @@ class ScriptRobot(DroidRobot):
 
         isDisturb = episode_index is not None and frame_index is not None and episode_index < 8 and frame_index < 200
         isDisturb = False
+        # Inference 
+        inference = not self.config.debug
         before_fread_t = time.perf_counter()
         pre_action_eef_pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float32).copy()
         init_eef_pose = insert_meta_data["init_EEF_pose"]
-        init_socket_depth_img = insert_meta_data["init_socket_depth_img"]
-        init_plug_depth_img = np.asarray(insert_meta_data["init_plug_depth_img"], dtype=np.float32)
-        aligned_socket_depth_img, _ = self._rotate_socket_depth_opposite_eef_yaw(
-            init_socket_depth_img,
-            init_eef_pose,
-            pre_action_eef_pose,
-        )
+        if inference:
+            init_socket_depth_img = insert_meta_data["init_socket_depth_img"]
+            init_plug_depth_img = np.asarray(insert_meta_data["init_plug_depth_img"], dtype=np.float32)
+            aligned_socket_depth_img, _ = self._rotate_socket_depth_opposite_eef_yaw(
+                init_socket_depth_img,
+                init_eef_pose,
+                pre_action_eef_pose,
+            )
         pre_action_wrist_extrinsics = self._wrist_camera_extrinsics(pre_action_eef_pose)
         current_forces = self._get_eef_internal_forces(
                 pre_action_eef_pose,
@@ -915,7 +922,7 @@ class ScriptRobot(DroidRobot):
             dtype=torch.float32,
         )
         # Inference 
-        inference = True
+        inference = not self.config.debug
         if inference:
             pre_action_eef_internal_forces_normalize = ((pre_action_eef_internal_forces - self.force_min) / (self.force_max - self.force_min + 1e-8)) * 2.0 -1.0
             force_input_tensor = torch.from_numpy(pre_action_eef_internal_forces_normalize.numpy()).unsqueeze(0).float()
@@ -993,13 +1000,14 @@ class ScriptRobot(DroidRobot):
                 self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
 
             obs_dict, action_dict = {}, {}
-            obs_dict["observation.init_plug_depth_img"] = torch.from_numpy(init_plug_depth_img)
+            if inference:
+                obs_dict["observation.init_plug_depth_img"] = torch.from_numpy(init_plug_depth_img)
+                obs_dict["observation.aligned_socket_depth_img"] = torch.from_numpy(
+                    np.asarray(aligned_socket_depth_img, dtype=np.float32)
+                )
             obs_dict["observation.eef_internal_forces"] = pre_action_eef_internal_forces
             obs_dict["observation.eef_pose"] = pre_action_eef_pose
             obs_dict["observation.cam_wrist.extrinsics"] = pre_action_wrist_extrinsics
-            obs_dict["observation.aligned_socket_depth_img"] = torch.from_numpy(
-                np.asarray(aligned_socket_depth_img, dtype=np.float32)
-            )
             action_dict["action"] = action9d
             for name in ["cam_wrist"]:
                 if pre_action_wrist_images is not None:

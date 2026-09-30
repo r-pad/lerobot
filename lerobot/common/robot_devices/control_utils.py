@@ -22,6 +22,7 @@ import json
 import os
 import time
 import traceback
+import warnings
 from contextlib import nullcontext
 from copy import copy
 from functools import cache
@@ -48,6 +49,11 @@ import termios
 import tty
 import select
 import numpy as np
+
+# Silence noisy third-party warnings from FoundationStereo / DINOv2 (torch hub).
+warnings.filterwarnings("ignore", message=r"`torch\.cuda\.amp\.autocast\(args\.\.\.\)` is deprecated", category=FutureWarning)
+warnings.filterwarnings("ignore", message=r"xFormers is (disabled|not available)", category=UserWarning)
+
 
 
 @cache
@@ -1124,14 +1130,15 @@ def run_scripted_grasp_sequence(robot):
         
     skip_initialization = False
     if not skip_initialization:
-        total_init_steps = 100
+        total_init_steps = 150
         for i in range(total_init_steps):
             current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
             current_pos = robot._robot_ik_controller.eef_pose[:3,3]
             # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-            if i < 50:
+            if i < 25:
+                print(f"Initial lift step {i+1}/150")
                 next_tgt_pos = current_pos.copy()
-                next_tgt_pos[2] += 0.001
+                next_tgt_pos[2] += 0.004
                 next_tgt_rot = current_rot.copy()
             else:
                 next_tgt_pos = (target_pos - current_pos) / (total_init_steps-i) + current_pos
@@ -1222,11 +1229,11 @@ def run_scripted_grasp_sequence(robot):
             print(f"[script] Saved colored initial wrist point cloud to {colored_pcd_path}")
         except Exception as exc:
             print(f"[script] Failed to save colored initial wrist point cloud: {exc}")
-        # visualize_open3d_point_cloud(
-        #     wrist_points_world,
-        #     wrist_colors,
-        #     "Initial wrist point cloud in world frame",
-        # )
+        visualize_open3d_point_cloud(
+            wrist_points_world,
+            wrist_colors,
+            "Initial wrist point cloud in world frame",
+        )
         record["init_socket_pcd"] = robot._initial_wrist_points_world_colored
         init_socket_pcd = np.asarray(record["init_socket_pcd"], dtype=np.float32)
         init_points = init_socket_pcd[:, :3].copy()
@@ -1267,7 +1274,7 @@ def run_scripted_grasp_sequence(robot):
         # save_depth_vis(init_socket_depth, "initial_socket_depth")
         # print("Inspect the initial socket RGB and depth captures, then press Enter to continue...")
         # input()
-    skip_plug_photo = False
+    skip_plug_photo = True
     if not skip_plug_photo:
         print("Initial Pose Achieved")
         time.sleep(3)
