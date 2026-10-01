@@ -42,6 +42,13 @@ from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.robot_devices.utils import busy_wait
 from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.pointcloud_rgbd import render_top_down_custom, render_bottom_up_custom
+from lerobot.common.utils.agos_canonical import (
+    green_mask,
+    overlay_profiles,
+    render_plug_canonical,
+    render_socket_canonical,
+    world_points_to_fingertip_frame,
+)
 from lerobot.common.utils.aloha_utils import ALOHA_CONFIGURATION, ALOHA_MODEL, VIRTUAL_CAMERA_MAPPING, forward_kinematics, render_and_overlay, setup_renderer
 from PIL import Image
 import sys
@@ -803,8 +810,20 @@ def attach_auxiliary_observation_to_frame(observation: dict, robot, dataset: LeR
 
     initial_wrist_points = getattr(robot, "_initial_wrist_points_world", None)
     initial_wrist_points_key = "observation.points.initial_wrist_points_world"
-    if initial_wrist_points is not None and initial_wrist_points_key in dataset.features:
-        observation[initial_wrist_points_key] = initial_wrist_points
+    # A skipped scan is recorded as a single NaN point (the feature must be present in every frame).
+    missing_points = np.full((1, 3), np.nan, dtype=np.float32)
+    if initial_wrist_points_key in dataset.features:
+        observation[initial_wrist_points_key] = (
+            initial_wrist_points if initial_wrist_points is not None else missing_points
+        )
+
+    plug_points = getattr(robot, "_plug_points_fingertip", None)
+    plug_points_key = "observation.points.init_plug_points_fingertip"
+    if plug_points_key in dataset.features:
+        # AGOS stores the plug cloud in the fingertip frame (init_plug_points_fingertip).
+        observation[plug_points_key] = (
+            plug_points if plug_points is not None else missing_points
+        )
 
     left_rgb = getattr(robot, "_last_auxiliary_left_rgb", None)
     depth = getattr(robot, "_last_auxiliary_depth", None)
@@ -1092,12 +1111,199 @@ def sample_agos_initial_pose(robot, aligned_pos, aligned_rot, max_attempts=200):
     return base_pos, aligned_rot.copy(), {"pos_offset": np.zeros(3), "rpy_deg": np.zeros(3), "axial_spin_deg": 0.0}
 
 
+def move_to_pose_interpolated(robot, target_pos, target_rot, num_steps=5):
+    """Interpolate from the measured pose to the target in ``num_steps`` IK commands."""
+    target_pos = np.asarray(target_pos, dtype=np.float64)
+    for i in range(num_steps):
+        current_rot = robot._robot_ik_controller.eef_pose[:3, :3]
+        current_pos = robot._robot_ik_controller.eef_pose[:3, 3]
+        next_tgt_pos = (target_pos - current_pos) / (num_steps - i) + current_pos
+        next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+            current_rot,
+            target_rot,
+            max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
+        )
+        robot._robot_ik_controller.control(
+            target_pos=next_tgt_pos,
+            target_rot=next_tgt_rot,
+            grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
+            wait_times=100,
+            joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+        )
+
+
+def largest_cluster_mask(points: np.ndarray, eps_m: float, min_points: int = 5, voxel_m: float = 0.001) -> np.ndarray:
+    """Mask of the points in the largest DBSCAN cluster (computed on a voxel grid for speed)."""
+    points = np.asarray(points, dtype=np.float64)
+    if eps_m <= 0 or points.shape[0] < max(min_points, 2):
+        return np.ones(points.shape[0], dtype=bool)
+    import open3d as o3d
+    from scipy.spatial import cKDTree
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    voxels = np.asarray(pcd.voxel_down_sample(voxel_m).points) if voxel_m > 0 else points
+    vpcd = o3d.geometry.PointCloud()
+    vpcd.points = o3d.utility.Vector3dVector(voxels)
+    labels = np.asarray(vpcd.cluster_dbscan(eps=eps_m, min_points=min_points))
+    if labels.size == 0 or labels.max() < 0:
+        return np.ones(points.shape[0], dtype=bool)
+    largest = np.bincount(labels[labels >= 0]).argmax()
+    # Map every original point to its nearest voxel's label.
+    _, nearest = cKDTree(voxels).query(points)
+    return labels[nearest] == largest
+
+
+def estimate_aux_camera_rotation(plug_cam_views, fingertip_poses, fallback_rot, min_points=50):
+    """Estimate world_from_aux rotation from the plug scan itself (no extrinsic calibration needed).
+
+    All views keep the same fingertip orientation and only translate, so the plug moves rigidly
+    by the fingertip displacement: R_world_cam (c_i - c_0) = t_ft_i - t_ft_0, where c_i is the
+    plug's (median) position in the camera frame. Solve for R by Kabsch on the displacements.
+    The camera translation is not observable this way, and the plug canonical view does not
+    depend on it.
+    """
+    idx = [i for i, pts in enumerate(plug_cam_views) if pts.shape[0] >= min_points]
+    if len(idx) < 3:
+        print(f"[script] Only {len(idx)} plug views with >= {min_points} points; keeping configured aux rotation.")
+        return fallback_rot
+    centers_cam = np.stack([np.median(plug_cam_views[i], axis=0) for i in idx]).astype(np.float64)
+    tips_world = np.stack([np.asarray(fingertip_poses[i])[:3, 3] for i in idx]).astype(np.float64)
+    d_cam = centers_cam - centers_cam.mean(axis=0)
+    d_world = tips_world - tips_world.mean(axis=0)
+    u, _, vt = np.linalg.svd(d_cam.T @ d_world)
+    sign = np.sign(np.linalg.det(vt.T @ u.T))
+    rot = vt.T @ np.diag([1.0, 1.0, sign]) @ u.T
+    residual_mm = np.linalg.norm(d_cam @ rot.T - d_world, axis=1) * 1e3
+    print(
+        "[script] Estimated aux camera rotation (world_from_aux, xyz euler deg): "
+        f"{np.round(R.from_matrix(rot).as_euler('xyz', degrees=True), 1).tolist()} "
+        f"(configured: {np.round(R.from_matrix(fallback_rot).as_euler('xyz', degrees=True), 1).tolist()}); "
+        f"per-view residual {np.round(residual_mm, 1).tolist()} mm"
+    )
+    if residual_mm.max() > 10.0:
+        print("[script] WARNING: large residual; the plug segmentation may be picking up non-plug points.")
+    return rot
+
+
+def prescan_plug(robot, record: dict) -> None:
+    # AGOS capture_plug_bottom_view: carry the held plug over the upward-looking auxiliary
+    # camera, keep the held orientation, capture from several fingertip positions, segment
+    # the (green) plug, and store the fused cloud in the fingertip frame.
+    print("[script] Pre-scanning the plug with the auxiliary camera...")
+    time.sleep(1)
+    cfg = robot.config
+    return_pose = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64).copy()
+    photo_rot = return_pose[:3, :3].copy()
+    auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
+    auxiliary_k, _ = get_zed_intrinsics_and_baseline(auxiliary_camera)
+    world_from_aux = np.eye(4, dtype=np.float64)
+    world_from_aux[:3, :3] = R.from_euler("xyz", cfg.aux_cam_rot_euler_deg, degrees=True).as_matrix()
+    world_from_aux[:3, 3] = np.asarray(cfg.aux_cam_pos_world, dtype=np.float64)
+
+    plug_cam_views, plug_color_views, fingertip_poses = [], [], []
+    for view_idx, offset in enumerate(cfg.plug_photo_views):
+        view_pos = np.asarray(cfg.plug_photo_pos, dtype=np.float64) + np.asarray(offset, dtype=np.float64)
+        move_to_pose_interpolated(robot, view_pos, photo_rot, num_steps=5)
+        robot._control_refined(view_pos, photo_rot)
+
+        auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
+        auxiliary_depth = compute_foundation_stereo_depth(
+            auxiliary_images, auxiliary_camera, scale=cfg.plug_photo_stereo_scale
+        )
+        points_cam, colors = depth_rgb_to_camera_point_cloud(
+            auxiliary_depth,
+            auxiliary_images["left"],
+            auxiliary_k,
+            stride=1,
+            max_depth_m=cfg.plug_photo_max_depth_m,
+        )
+        keep = green_mask(
+            colors,
+            hue_range_deg=cfg.plug_green_hue_range_deg,
+            min_saturation=cfg.plug_green_min_saturation,
+            min_value=cfg.plug_green_min_value,
+        )
+        num_green = int(keep.sum())
+        keep[keep] = largest_cluster_mask(
+            points_cam[keep], cfg.plug_cluster_eps_m, cfg.plug_cluster_min_points, cfg.plug_cluster_voxel_m
+        )
+        # Measured fingertip pose at capture time (sim uses the reached pose, not the target).
+        fingertip_pose = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64).copy()
+        plug_cam_views.append(points_cam[keep])
+        plug_color_views.append(colors[keep])
+        fingertip_poses.append(fingertip_pose)
+        print(f"[script] Plug view {view_idx + 1}/{len(cfg.plug_photo_views)} offset={list(offset)}: "
+              f"{num_green} green / {len(keep)} points, {int(keep.sum())} in the largest cluster")
+        if view_idx == 0:
+            robot._last_auxiliary_stereo_rgb = auxiliary_images
+            robot._last_auxiliary_left_rgb = auxiliary_images["left"]
+            robot._last_auxiliary_depth = auxiliary_depth
+
+    if cfg.aux_cam_estimate_rotation:
+        world_from_aux[:3, :3] = estimate_aux_camera_rotation(
+            plug_cam_views, fingertip_poses, fallback_rot=world_from_aux[:3, :3]
+        )
+    plug_local_views = [
+        world_points_to_fingertip_frame(transform_points(points_cam, world_from_aux), pose)
+        for points_cam, pose in zip(plug_cam_views, fingertip_poses)
+    ]
+    fingertip_pose = fingertip_poses[-1]
+    plug_points_fingertip = np.concatenate(plug_local_views, axis=0).astype(np.float32)
+    plug_colors = np.concatenate(plug_color_views, axis=0).astype(np.uint8)
+    if cfg.plug_outlier_nb_neighbors > 0 and plug_points_fingertip.shape[0] > cfg.plug_outlier_nb_neighbors:
+        import open3d as o3d
+
+        plug_pcd = o3d.geometry.PointCloud()
+        plug_pcd.points = o3d.utility.Vector3dVector(plug_points_fingertip.astype(np.float64))
+        _, inlier_idx = plug_pcd.remove_statistical_outlier(
+            nb_neighbors=int(cfg.plug_outlier_nb_neighbors), std_ratio=float(cfg.plug_outlier_std_ratio)
+        )
+        plug_points_fingertip = plug_points_fingertip[inlier_idx]
+        plug_colors = plug_colors[inlier_idx]
+    fused_keep = largest_cluster_mask(
+        plug_points_fingertip, cfg.plug_cluster_eps_m, cfg.plug_cluster_min_points, cfg.plug_cluster_voxel_m
+    )
+    plug_points_fingertip = plug_points_fingertip[fused_keep]
+    plug_colors = plug_colors[fused_keep]
+    if plug_points_fingertip.shape[0] == 0:
+        raise RuntimeError(
+            f"[script] Plug pre-scan with {auxiliary_camera_name} found no green points; "
+            "check plug_photo_* / plug_green_* settings."
+        )
+    print(f"[script] Fused plug cloud: {plug_points_fingertip.shape[0]} points (fingertip frame)")
+    robot._plug_points_fingertip = plug_points_fingertip
+    robot._plug_colors = plug_colors
+    record["init_plug_points_fingertip"] = plug_points_fingertip
+    record["init_plug_colors"] = plug_colors
+    record["init_plug_photo_fingertip_pose"] = fingertip_pose
+    visualize_open3d_point_cloud(
+        plug_points_fingertip,
+        plug_colors,
+        "Plug point cloud (fingertip frame, multi-view pre-scan)",
+        center_on_cloud=True,
+    )
+
+    # Back to the pose held before the photo.
+    move_to_pose_interpolated(robot, return_pose[:3, 3], return_pose[:3, :3], num_steps=5)
+    robot._control_refined(return_pose[:3, 3], return_pose[:3, :3])
+
+    # Debug: canonical plug view at the start pose (+ overlay with the socket if scanned).
+    plug_view = render_plug_canonical(
+        plug_points_fingertip, plug_colors, robot._robot_ik_controller.eef_pose
+    )
+    save_depth_vis(plug_view["depth"], "plug_canonical_depth")
+    if "socket_canonical_view" in record:
+        save_rgb(overlay_profiles(plug_view, record["socket_canonical_view"]), "canonical_overlay")
+
+
 def run_scripted_grasp_sequence(robot):
     # visualize_world_and_wrist_camera_frames(robot)
     # exit(0)
     # return
     record = {}
     command_gripper(robot,action = -1.0, label="open")
+
     skip_grasping = False
     if not skip_grasping:
         home_joints = np.array(
@@ -1199,7 +1405,7 @@ def run_scripted_grasp_sequence(robot):
         target_pos, target_rot, init_pose_sample = sample_agos_initial_pose(robot, aligned_pos, aligned_rot)
         record["init_pose_sample"] = init_pose_sample
         
-    skip_initialization = False
+    skip_initialization = True
     if not skip_initialization:
         total_init_steps = 150
         num_lift_steps = 25
@@ -1322,41 +1528,13 @@ def run_scripted_grasp_sequence(robot):
             center_on_cloud=True,
         )
         record["init_socket_pcd"] = robot._initial_wrist_points_world_colored
-        init_socket_pcd = np.asarray(record["init_socket_pcd"], dtype=np.float32)
-        init_points = init_socket_pcd[:, :3].copy()
-        init_colors = init_socket_pcd[:, 3:].copy()
-        rgb_init, depth_init = render_top_down_custom(
-            torch.as_tensor(init_points, dtype=torch.float32),
-            torch.as_tensor(init_colors[:, :3], dtype=torch.float32),
-            center_x=record["aligned_pos"][0],
-            center_y=record["aligned_pos"][1],
-            H=720,
-            W=1280,
-            camera_height_offset=0.02,
-            fov_deg=68.66,
-            point_radius=5,
-        )
-        rgb_img = rgb_init.clone().detach().cpu().numpy()
-        depth_img = depth_init.clone().detach().cpu().numpy()
-        init_socket_rgb, init_socket_depth = crop_rgb_depth_foreground_center(
-            rgb_img,
-            depth_img,
-            center_x=record["aligned_pos"][0],
-            center_y=record["aligned_pos"][1],
-            crop_h=480,
-            crop_w=640,
-            debug=True,
-            debug_path="/home/yinongh/automate/lerobot/outputs/debug_initial_crop.png",
-        )
-        output_dir = "/home/yinongh/automate/lerobot/outputs"
-        os.makedirs(output_dir, exist_ok=True)
-        # rgb_np = (np.clip(rgb_img, 0.0, 1.0) * 255).astype(np.uint8)
-        # rgb_crop = np.rot90(rgb_crop, k=1)
-        # depth_crop = np.rot90(depth_crop, k=1)
-        # rgb_crop_np = (np.clip(rgb_crop, 0.0, 1.0) * 255).astype(np.uint8)
-        # depth_normalized = (depth_img / max(float(depth_img.max()), 1e-8) * 255).astype(np.uint8)
-        # depth_crop_normalized = (depth_crop / max(float(depth_crop.max()), 1e-8) * 255).astype(np.uint8)
-        init_socket_depth = normalize_depth_for_shape(init_socket_depth)
+        # AGOS: render the fused socket cloud once, top-down in world axes, bbox centre.
+        socket_view = render_socket_canonical(wrist_points_world, wrist_colors)
+        record["init_socket_points_world"] = robot._initial_wrist_points_world_colored
+        record["socket_canonical_view"] = socket_view
+        record["socket_canonical_depth"] = socket_view["depth"]
+        record["socket_canonical_center_xy"] = np.asarray(socket_view["center_xy"], dtype=np.float32)
+        save_depth_vis(socket_view["depth"], "socket_canonical_depth")
 
         # Return from the last socket-scan view to the sampled initial pose.
         for i in range(10):
@@ -1380,122 +1558,9 @@ def run_scripted_grasp_sequence(robot):
         # save_depth_vis(init_socket_depth, "initial_socket_depth")
         # print("Inspect the initial socket RGB and depth captures, then press Enter to continue...")
         # input()
-    skip_plug_photo = True
+    skip_plug_photo = False
     if not skip_plug_photo:
-        print("Initial Pose Achieved")
-        time.sleep(3)
-        target_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-        # target_pos = np.array([0.485, -0.22, 0.25], dtype=np.float64)
-        target_pos = np.array([0.485, -0.25, 0.22], dtype=np.float64)
-
-        # Translate to take photo
-        total_photo_steps = 5
-        for i in range(total_photo_steps):
-            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-            next_tgt_pos = (target_pos - current_pos) / (total_photo_steps-i) + current_pos
-            next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-                current_rot,
-                target_rot,
-                max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
-            )
-            robot._robot_ik_controller.control(
-                    target_pos=next_tgt_pos,
-                    target_rot=next_tgt_rot,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
-        # Taking Photo
-        print("Taking auxiliary ZED stereo photo...")
-    if not skip_plug_photo:
-        auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
-        auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
-        robot._last_auxiliary_stereo_rgb = auxiliary_images
-        robot._last_auxiliary_left_rgb = auxiliary_images["left"]
-        robot._last_auxiliary_depth = compute_foundation_stereo_depth(auxiliary_images, auxiliary_camera)
-        auxiliary_k, _ = get_zed_intrinsics_and_baseline(auxiliary_camera)
-        auxiliary_points_cam, auxiliary_colors = depth_rgb_to_auxiliary_camera_point_cloud(
-            robot._last_auxiliary_depth,
-            robot._last_auxiliary_left_rgb,
-            auxiliary_k,
-            stride=4,
-            max_depth_m=float(getattr(robot.config, "script_auxiliary_point_cloud_max_depth_m", 0.5)),
-        )
-        # visualize_open3d_point_cloud(
-        #     auxiliary_points_cam,
-        #     auxiliary_colors,
-        #     f"Auxiliary {auxiliary_camera_name} point cloud in camera frame",
-        # )
-        # points = torch.concatenate([torch.from_numpy(auxiliary_points_cam), torch.from_numpy(auxiliary_colors / 255.0)], dim=1)
-        # torch.save(points,"debug_pcd.pth")
-        points = auxiliary_points_cam  # shape: (N, 3)
-
-        # Use lowest surface points as plug estimate
-        z = points[:, 2]
-        z_min = z.min()
-
-        # Tune this thickness if needed
-        lowest_band = z < z_min + 0.01   # 1 cm above lowest point
-
-        plug_xy_center = points[lowest_band, :2].mean(axis=0)
-
-        center_x = float(plug_xy_center[0])
-        center_y = float(plug_xy_center[1])
-        print("CENTER_X, CENTER_Y: ", center_x, center_y)
-        rgb_img, depth_img = render_bottom_up_custom(
-            torch.from_numpy(auxiliary_points_cam),
-            torch.from_numpy(auxiliary_colors / 255.0),
-            center_x=center_x,
-            center_y=center_y,
-            H=720,
-            W=1280,
-            camera_height_offset=0.02,
-            fov_deg=68.66,
-            brightness_scale=1,
-            point_radius=5
-        )
-        crop_h, crop_w = 480, 640
-        H, W = rgb_img.shape[:2]
-
-        top = (H - crop_h) // 2      # 120
-        left = (W - crop_w) // 2     # 320
-
-        init_plug_rgb = rgb_img[top:top + crop_h, left:left + crop_w].numpy().copy()
-        init_plug_depth = depth_img[top:top + crop_h, left:left + crop_w].numpy().copy()
-        init_plug_depth = normalize_depth_for_shape(init_plug_depth)
-        init_plug_rgb = np.flipud(init_plug_rgb).copy()
-        init_plug_depth = np.flipud(init_plug_depth).copy()
-        # save_rgb(init_plug_rgb, "processed_auxiliary_rgb")
-        # save_depth_vis(init_plug_depth, "processed_auxiliary_depth")
-        # print("Inspect the processed auxiliary RGB and depth captures, then press Enter to continue...")
-        # input()
-        target_pos = init_pos
-        target_rot = init_rot
-        for i in range(total_photo_steps):
-            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-            next_tgt_pos = (target_pos - current_pos) / (total_photo_steps-i) + current_pos
-            next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-                current_rot,
-                target_rot,
-                max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
-            )
-            robot._robot_ik_controller.control(
-                    target_pos=next_tgt_pos,
-                    target_rot=next_tgt_rot,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
-        # Fine adjustment to ensure we are back to the initial pose
-        robot._control_refined(init_pos, init_rot)
-        record["init_socket_depth_img"] = init_socket_depth
-        record["init_socket_rgb_img"] = init_socket_rgb
-        record["init_plug_rgb_img"] = init_plug_rgb
-        record["init_plug_depth_img"] = init_plug_depth
+        prescan_plug(robot, record)
 
     # Random Offset from 0.003 ~ 0.005 in x & y direction
     # Random yaw rotation ranging from 5~90 degrees.

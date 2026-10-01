@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import warnings
+
 import numpy as np
 
 from lerobot.common.datasets.utils import load_image_as_numpy, load_depth_image_as_numpy
@@ -76,13 +78,16 @@ def sample_images(image_paths: list[str]) -> np.ndarray:
 
 
 def get_feature_stats(array: np.ndarray, axis: tuple, keepdims: bool) -> dict[str, np.ndarray]:
-    return {
-        "min": np.min(array, axis=axis, keepdims=keepdims),
-        "max": np.max(array, axis=axis, keepdims=keepdims),
-        "mean": np.mean(array, axis=axis, keepdims=keepdims),
-        "std": np.std(array, axis=axis, keepdims=keepdims),
-        "count": np.array([len(array)]),
-    }
+    # NaN-aware: canonical depth images mark empty pixels with NaN (identical to np.min/... otherwise).
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)  # all-NaN slices -> NaN
+        return {
+            "min": np.nanmin(array, axis=axis, keepdims=keepdims),
+            "max": np.nanmax(array, axis=axis, keepdims=keepdims),
+            "mean": np.nanmean(array, axis=axis, keepdims=keepdims),
+            "std": np.nanstd(array, axis=axis, keepdims=keepdims),
+            "count": np.array([len(array)]),
+        }
 
 
 def compute_episode_stats(episode_data: dict[str, list[str] | np.ndarray], features: dict) -> dict:

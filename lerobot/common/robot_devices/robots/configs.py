@@ -697,6 +697,47 @@ class ScriptRobotConfig(RobotConfig):
     socket_scan_z_range: tuple[float, float] = (0.025, 0.06)
     socket_scan_crop_radius: float = 0.08
 
+    # Plug pre-scan with the upward-looking auxiliary ZED on the table (AGOS capture_plug_bottom_view).
+    # The fingertip visits plug_photo_pos + each offset (world, m) keeping the held orientation, so
+    # the camera sees the plug tip from several angles (sim: two bottom cameras ~39 deg off vertical).
+    plug_photo_pos: tuple[float, float, float] = (0.535, -0.15, 0.22)
+    # Centre + a ring of 8 views (sides and diagonals, 6 cm radius) so a tilted plug is seen from
+    # every side of the camera.
+    plug_photo_views: tuple[tuple[float, float, float], ...] = (
+        (0.0, 0.0, 0.0),
+        (0.06, 0.0, 0.0),
+        (0.0424, 0.0424, 0.0),
+        (0.0, 0.06, 0.0),
+        (-0.0424, 0.0424, 0.0),
+        (-0.06, 0.0, 0.0),
+        (-0.0424, -0.0424, 0.0),
+        (0.0, -0.06, 0.0),
+        (0.0424, -0.0424, 0.0),
+    )
+    # world_from_aux_cam. The camera optical axes are aligned with world x/y/z (camera on the table
+    # looking up, square to the table edges). The plug canonical image is centred on the plug's own
+    # mean and its lowest point, so only the rotation matters; the position just places the cloud.
+    aux_cam_rot_euler_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    aux_cam_pos_world: tuple[float, float, float] = (0.535, -0.15, 0.03)
+    # Estimate the camera rotation from the plug scan itself (the views only translate, so the plug's
+    # displacement seen by the camera vs the fingertip displacement gives world_from_aux rotation).
+    # aux_cam_rot_euler_deg is then only the fallback.
+    aux_cam_estimate_rotation: bool = True
+    plug_photo_stereo_scale: float = 1.0
+    plug_photo_max_depth_m: float = 0.4
+    # Green colour segmentation of the plug (stand-in for the sim plug segmentation id).
+    plug_green_hue_range_deg: tuple[float, float] = (70.0, 170.0)
+    plug_green_min_saturation: float = 0.25
+    plug_green_min_value: float = 0.15
+    # Statistical outlier removal on the fused plug cloud (0 neighbours disables).
+    plug_outlier_nb_neighbors: int = 20
+    plug_outlier_std_ratio: float = 2.0
+    # Keep only the largest connected cluster (per view and after fusion): drops detached streaks
+    # such as green-tinted finger edges / shadows. Clustering runs on a voxel grid of this size.
+    plug_cluster_eps_m: float = 0.004  # <= 0 disables
+    plug_cluster_min_points: int = 5
+    plug_cluster_voxel_m: float = 0.001
+
     # Master switch for gravity compensation. False = plain open-loop IK control everywhere
     # (no refinement iterations, no per-step feedforward), for comparison.
     gravity_compensation: bool = True

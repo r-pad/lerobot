@@ -20,6 +20,12 @@ from lerobot.common.robot_devices.robots.configs import ScriptRobotConfig
 from lerobot.common.robot_devices.robots.droid import DroidRobot
 from lerobot.common.robot_devices.robots.robot_ik_controller import RobotIKController
 from lerobot.common.utils.pointcloud_rgbd import render_top_down_custom
+from lerobot.common.utils.agos_canonical import (
+    CANONICAL_HEIGHT,
+    CANONICAL_WIDTH,
+    canonical_normalize,
+    render_plug_canonical,
+)
 from lerobot.common.policy.force_diffusion_policy_image_condition import Diffusion_Policy
 
 
@@ -238,17 +244,29 @@ class ScriptRobot(DroidRobot):
                 "shape": (4, 4),
                 "names": ["row", "col"],
             },
-            "observation.aligned_socket_depth_img": {
+            "observation.plug_canonical_depth": {
                 "dtype": "float32",
-                "shape": (480, 640),
+                "shape": (CANONICAL_HEIGHT, CANONICAL_WIDTH),
                 "names": ["height", "width"],
-                "info": "Socket depth image aligned by rotating opposite current EEF yaw change",
+                "info": "AGOS plug canonical depth (m, NaN = empty): fingertip-frame plug cloud moved "
+                "with the current fingertip pose, world axes, bottom-up, own xy-mean centre",
             },
-            "observation.init_plug_depth_img": {
+            "observation.plug_canonical_center_xy": {
                 "dtype": "float32",
-                "shape": (480, 640),
+                "shape": (2,),
+                "names": ["x", "y"],
+            },
+            "observation.socket_canonical_depth": {
+                "dtype": "float32",
+                "shape": (CANONICAL_HEIGHT, CANONICAL_WIDTH),
                 "names": ["height", "width"],
-                "info": "Initial plug depth image rendered from the auxiliary point cloud",
+                "info": "AGOS socket canonical depth (m, NaN = empty): fused wrist scan, world axes, "
+                "top-down, bbox centre; constant within an episode",
+            },
+            "observation.points.init_plug_points_fingertip": {
+                "dtype": "pcd",
+                "shape": (-1, 3),
+                "names": ["points", "xyz"],
             },
             "observation.points.initial_wrist_points_world": {
                 "dtype": "pcd",
@@ -256,10 +274,6 @@ class ScriptRobot(DroidRobot):
                 "names": ["points", "xyz"],
             },
         }
-        if self.config.debug:
-            # teleop_step only produces these depth images when running policy inference.
-            motor_features.pop("observation.aligned_socket_depth_img")
-            motor_features.pop("observation.init_plug_depth_img")
         if "cam_wrist" in self.cameras:
             motor_features["observation.cam_wrist.extrinsics"] = {
                 "dtype": "float32",
@@ -319,12 +333,6 @@ class ScriptRobot(DroidRobot):
         vector_cam_wrist = self._wrist_camera_vector_to_isaacgym(vector_isaacgym_wrist)
         return self._wrist_camera_vector_to_world(vector_cam_wrist, wrist_extrinsics)
 
-
-    def _relative_world_yaw(self, init_eef_pose: np.ndarray, current_eef_pose: np.ndarray) -> float:
-        init_rot = np.asarray(init_eef_pose, dtype=np.float32).reshape(4, 4)[:3, :3]
-        current_rot = np.asarray(current_eef_pose, dtype=np.float32).reshape(4, 4)[:3, :3]
-        relative_rot = current_rot @ init_rot.T
-        return float(np.arctan2(relative_rot[1, 0], relative_rot[0, 0]))
 
     def _control_refined(self, target_pos, target_rot, max_iters: int | None = None, verbose: bool = True) -> bool:
         """Move to the full 6-DoF target pose with closed-loop refinement (see RobotIKController.control_refined)."""
@@ -393,45 +401,6 @@ class ScriptRobot(DroidRobot):
             if rot_norm > max_rot:
                 self._ff_rotvec *= max_rot / rot_norm
         return ok
-
-    def _rotate_image(self, image: np.ndarray | torch.Tensor, angle_deg: float, output_shape=(480, 640)) -> np.ndarray:
-        import cv2
-
-        if torch.is_tensor(image):
-            image = image.detach().cpu().numpy()
-        image = np.asarray(image, dtype=np.float32)
-        if image.ndim == 3 and image.shape[-1] == 1:
-            image = image[..., 0]
-
-        h, w = image.shape[:2]
-        center = ((w - 1) / 2.0, (h - 1) / 2.0)
-        rot_mat = cv2.getRotationMatrix2D(center, float(angle_deg), 1.0)
-        rotated = cv2.warpAffine(
-            image,
-            rot_mat,
-            (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0.0,
-        )
-        if output_shape is not None and rotated.shape[:2] != tuple(output_shape):
-            rotated = cv2.resize(rotated, (output_shape[1], output_shape[0]), interpolation=cv2.INTER_LINEAR)
-        return rotated.astype(np.float32)
-
-    def _rotate_socket_depth_opposite_eef_yaw(
-        self,
-        init_socket_depth_img: np.ndarray | torch.Tensor,
-        init_eef_pose: np.ndarray,
-        current_eef_pose: np.ndarray,
-    ) -> tuple[np.ndarray, float]:
-        delta_yaw = self._relative_world_yaw(init_eef_pose, current_eef_pose)
-        delta_yaw_deg = float(np.rad2deg(delta_yaw))
-        rotated_depth = self._rotate_image(init_socket_depth_img, -delta_yaw_deg, output_shape=(480, 640))
-        print(
-            f"[script] Rotating init socket depth by {-delta_yaw_deg:.2f} deg "
-            f"to compensate EEF yaw change of {delta_yaw_deg:.2f} deg"
-        )
-        return rotated_depth, delta_yaw_deg
 
     def _find_robotiq_port_without_gello(self) -> str:
         import minimalmodbus as mm
@@ -900,6 +869,31 @@ class ScriptRobot(DroidRobot):
         q_step = cls._axis_angle_to_quat(axis, step_angle)
         return q_step, angle
 
+    def _canonical_observation(self, insert_meta_data: dict, fingertip_pose: np.ndarray):
+        """AGOS canonical_observation(): (plug depth, plug centre xy, socket depth), raw metres, NaN = empty.
+
+        The plug cloud stored in the fingertip frame is moved with the current fingertip pose
+        (proprioception) and rendered bottom-up around its own xy mean; the socket view is the
+        one-off render of the fused wrist scan. A missing scan gives an all-NaN image, like a
+        failed plug photo in sim.
+        """
+        empty = np.full((CANONICAL_HEIGHT, CANONICAL_WIDTH), np.nan, dtype=np.float32)
+        plug_points = insert_meta_data.get("init_plug_points_fingertip")
+        if plug_points is not None and len(plug_points) > 0:
+            plug_view = render_plug_canonical(plug_points, insert_meta_data["init_plug_colors"], fingertip_pose)
+            plug_depth = plug_view["depth"].astype(np.float32)
+            plug_center = np.asarray(plug_view["center_xy"], dtype=np.float32)
+        else:
+            plug_depth, plug_center = empty.copy(), np.full(2, np.nan, dtype=np.float32)
+        socket_depth = insert_meta_data.get("socket_canonical_depth")
+        socket_depth = empty.copy() if socket_depth is None else np.asarray(socket_depth, dtype=np.float32)
+        if (plug_points is None or socket_depth is None or not np.isfinite(socket_depth).any()) and not getattr(
+            self, "_warned_missing_canonical", False
+        ):
+            print("[script] Plug or socket scan missing; recording NaN canonical images for it.")
+            self._warned_missing_canonical = True
+        return plug_depth, plug_center, socket_depth
+
     def _scripted_action(self, insert_meta_data: dict, pre_action_eef_internal_forces: float, isDisturb: bool) -> tuple[torch.Tensor, torch.Tensor]:
         current_pose = self._robot_ik_controller.eef_pose
         current_rot = current_pose[:3, :3]
@@ -940,14 +934,9 @@ class ScriptRobot(DroidRobot):
         before_fread_t = time.perf_counter()
         pre_action_eef_pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float32).copy()
         init_eef_pose = insert_meta_data["init_EEF_pose"]
-        if inference:
-            init_socket_depth_img = insert_meta_data["init_socket_depth_img"]
-            init_plug_depth_img = np.asarray(insert_meta_data["init_plug_depth_img"], dtype=np.float32)
-            aligned_socket_depth_img, _ = self._rotate_socket_depth_opposite_eef_yaw(
-                init_socket_depth_img,
-                init_eef_pose,
-                pre_action_eef_pose,
-            )
+        plug_canonical_depth, plug_canonical_center_xy, socket_canonical_depth = self._canonical_observation(
+            insert_meta_data, pre_action_eef_pose
+        )
         pre_action_wrist_extrinsics = self._wrist_camera_extrinsics(pre_action_eef_pose)
         current_forces = self._get_eef_internal_forces(
                 pre_action_eef_pose,
@@ -982,8 +971,9 @@ class ScriptRobot(DroidRobot):
         if inference:
             pre_action_eef_internal_forces_normalize = ((pre_action_eef_internal_forces - self.force_min) / (self.force_max - self.force_min + 1e-8)) * 2.0 -1.0
             force_input_tensor = torch.from_numpy(pre_action_eef_internal_forces_normalize.numpy()).unsqueeze(0).float()
-            init_plug_photo_depth_tensor = torch.from_numpy(init_plug_depth_img).unsqueeze(0).float()
-            socket_depth_tensor = torch.from_numpy(aligned_socket_depth_img).unsqueeze(0).float()
+            # AGOS CanonicalNormalizer: per-image min-max over finite pixels, NaN -> 1.0 (far).
+            init_plug_photo_depth_tensor = torch.from_numpy(canonical_normalize(plug_canonical_depth)).unsqueeze(0).float()
+            socket_depth_tensor = torch.from_numpy(canonical_normalize(socket_canonical_depth)).unsqueeze(0).float()
             # init_plug_photo_depth_tensor[...] = 0
             # socket_depth_tensor[...] = 0
             raw_actions = self.policy(depth = wrist_depth_input_tensor.cuda(), force = force_input_tensor.cuda(), init_plug_photo_depth= init_plug_photo_depth_tensor.cuda(), socket_depth = socket_depth_tensor.cuda())
@@ -1050,11 +1040,9 @@ class ScriptRobot(DroidRobot):
                 self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
 
             obs_dict, action_dict = {}, {}
-            if inference:
-                obs_dict["observation.init_plug_depth_img"] = torch.from_numpy(init_plug_depth_img)
-                obs_dict["observation.aligned_socket_depth_img"] = torch.from_numpy(
-                    np.asarray(aligned_socket_depth_img, dtype=np.float32)
-                )
+            obs_dict["observation.plug_canonical_depth"] = plug_canonical_depth
+            obs_dict["observation.plug_canonical_center_xy"] = plug_canonical_center_xy
+            obs_dict["observation.socket_canonical_depth"] = socket_canonical_depth
             obs_dict["observation.eef_internal_forces"] = pre_action_eef_internal_forces
             obs_dict["observation.eef_pose"] = pre_action_eef_pose
             obs_dict["observation.cam_wrist.extrinsics"] = pre_action_wrist_extrinsics
