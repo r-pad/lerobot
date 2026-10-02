@@ -704,15 +704,10 @@ class ScriptRobotConfig(RobotConfig):
     # Centre + a ring of 8 views (sides and diagonals, 6 cm radius) so a tilted plug is seen from
     # every side of the camera.
     plug_photo_views: tuple[tuple[float, float, float], ...] = (
-        (0.0, 0.0, 0.0),
-        (0.06, 0.0, 0.0),
-        (0.0424, 0.0424, 0.0),
-        (0.0, 0.06, 0.0),
-        (-0.0424, 0.0424, 0.0),
         (-0.06, 0.0, 0.0),
-        (-0.0424, -0.0424, 0.0),
-        (0.0, -0.06, 0.0),
-        (0.0424, -0.0424, 0.0),
+        (0.06, 0.0, 0.0),
+        (0.06, -0.13, 0.0),
+        (-0.06, -0.13, 0.0),
     )
     # world_from_aux_cam. The camera optical axes are aligned with world x/y/z (camera on the table
     # looking up, square to the table edges). The plug canonical image is centred on the plug's own
@@ -737,6 +732,21 @@ class ScriptRobotConfig(RobotConfig):
     plug_cluster_eps_m: float = 0.004  # <= 0 disables
     plug_cluster_min_points: int = 5
     plug_cluster_voxel_m: float = 0.001
+    # Multi-view overlap: drop stereo "flying pixels" at depth edges (relative depth range in a
+    # 5x5 window; <= 0 disables), refine the camera rotation by ICP over all views (3 DoF), then
+    # apply a small bounded per-view ICP correction for robot-pose / stereo errors.
+    plug_depth_edge_rel_thresh: float = 0.02
+    plug_depth_edge_window: int = 3
+    plug_refine_rotation_icp: bool = True
+    # Align each view's plug-tip face (largest fingertip-frame z) to the median over views: removes
+    # the "several bottom surfaces" from per-view depth/pose errors along the plug axis.
+    plug_align_tips: bool = True
+    plug_tip_band_m: float = 0.002
+    plug_tip_max_shift_m: float = 0.006
+    plug_per_view_icp: bool = True
+    plug_icp_max_dist_m: float = 0.002
+    plug_icp_max_translation_m: float = 0.003
+    plug_icp_max_rotation_deg: float = 3.0
 
     # Master switch for gravity compensation. False = plain open-loop IK control everywhere
     # (no refinement iterations, no per-step feedforward), for comparison.

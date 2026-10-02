@@ -1132,6 +1132,134 @@ def move_to_pose_interpolated(robot, target_pos, target_rot, num_steps=5):
         )
 
 
+def depth_edge_mask(depth: np.ndarray, rel_thresh: float = 0.02, window: int = 5) -> np.ndarray:
+    """True where depth is valid and locally smooth.
+
+    Stereo depth smears "flying pixels" along camera rays at depth discontinuities; those
+    show up as ghost layers when views are fused. A pixel is dropped when the depth range in
+    its ``window`` neighbourhood exceeds ``rel_thresh`` * depth (holes count as edges).
+    """
+    from scipy.ndimage import maximum_filter, minimum_filter
+
+    depth = np.nan_to_num(np.asarray(depth, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    if depth.ndim == 3:
+        depth = depth[..., 0]
+    local_range = maximum_filter(depth, size=window) - minimum_filter(depth, size=window)
+    return (depth > 0) & (local_range <= rel_thresh * depth)
+
+
+def _views_to_fingertip(cam_views, fingertip_poses, world_from_aux):
+    return [
+        world_points_to_fingertip_frame(transform_points(points_cam, world_from_aux), pose).astype(np.float64)
+        for points_cam, pose in zip(cam_views, fingertip_poses)
+    ]
+
+
+def multiview_alignment_error(views_ft, max_dist=0.005, sample=2000, seed=0):
+    """Mean distance (m) from each view's points to the nearest point of the other views."""
+    from scipy.spatial import cKDTree
+
+    rng = np.random.default_rng(seed)
+    dists = []
+    for i, view in enumerate(views_ft):
+        others = [v for j, v in enumerate(views_ft) if j != i and len(v)]
+        if not len(view) or not others:
+            continue
+        pts = view[rng.choice(len(view), min(sample, len(view)), replace=False)]
+        d, _ = cKDTree(np.concatenate(others)).query(pts, distance_upper_bound=max_dist)
+        dists.append(d[np.isfinite(d)])
+    dists = np.concatenate(dists) if dists else np.zeros(0)
+    return float(dists.mean()) if dists.size else float("nan")
+
+
+def refine_aux_rotation_icp(cam_views, fingertip_poses, world_from_aux, iters=30, max_dist=0.004, sample=3000):
+    """Refine world_from_aux rotation (3 DoF) so all plug views overlap in the fingertip frame.
+
+    The views only differ by fingertip translation, so the camera translation shifts every view
+    equally and only the rotation decides how well they overlap. ICP-style Gauss-Newton: for each
+    view, residual r = p_ft - q (q = nearest point of the other views, within max_dist), with
+    p_ft = R_ft^T (R p_cam + t - t_ft) and an update R <- exp(delta) R, so dr/d delta = -R_ft^T [R p_cam]x.
+    """
+    from scipy.spatial import cKDTree
+
+    rng = np.random.default_rng(0)
+    world_from_aux = world_from_aux.copy()
+    samples = [v[rng.choice(len(v), min(sample, len(v)), replace=False)] for v in cam_views]
+    for _ in range(int(iters)):
+        views_ft = _views_to_fingertip(cam_views, fingertip_poses, world_from_aux)
+        rot = world_from_aux[:3, :3]
+        jtj, jtr, used = np.zeros((3, 3)), np.zeros(3), 0
+        for i, pts_cam in enumerate(samples):
+            others = [v for j, v in enumerate(views_ft) if j != i and len(v)]
+            if not len(pts_cam) or not others:
+                continue
+            ft_rot = np.asarray(fingertip_poses[i])[:3, :3]
+            a = pts_cam.astype(np.float64) @ rot.T  # R p_cam
+            p_ft = _views_to_fingertip([pts_cam], [fingertip_poses[i]], world_from_aux)[0]
+            d, idx = cKDTree(np.concatenate(others)).query(p_ft, distance_upper_bound=max_dist)
+            ok = np.isfinite(d)
+            if not ok.any():
+                continue
+            q = np.concatenate(others)[idx[ok]]
+            r = p_ft[ok] - q
+            # J_k = -R_ft^T [a_k]x  (3x3 per point)
+            ax = np.zeros((ok.sum(), 3, 3))
+            ak = a[ok]
+            ax[:, 0, 1], ax[:, 0, 2] = -ak[:, 2], ak[:, 1]
+            ax[:, 1, 0], ax[:, 1, 2] = ak[:, 2], -ak[:, 0]
+            ax[:, 2, 0], ax[:, 2, 1] = -ak[:, 1], ak[:, 0]
+            jac = -np.einsum("ji,njk->nik", ft_rot, ax)
+            jtj += np.einsum("nij,nik->jk", jac, jac)
+            jtr += np.einsum("nij,ni->j", jac, r)
+            used += int(ok.sum())
+        if used < 10:
+            break
+        delta = -np.linalg.solve(jtj + 1e-9 * np.eye(3), jtr)
+        delta = np.clip(delta, -np.deg2rad(2.0), np.deg2rad(2.0))  # damp large steps
+        world_from_aux[:3, :3] = R.from_rotvec(delta).as_matrix() @ rot
+        if np.linalg.norm(delta) < 1e-5:
+            break
+    return world_from_aux
+
+
+def refine_views_icp(views_ft, max_dist=0.002, max_translation=0.003, max_rotation_deg=3.0):
+    """Small per-view rigid ICP correction (robot pose / stereo errors), bounded and anchored.
+
+    The view with the most points is the anchor; the others are registered, largest first, to
+    the union of the views accepted so far (point-to-plane). A correction is only applied if it
+    is small and improves the fitness.
+    """
+    import open3d as o3d
+
+    def to_pcd(pts):
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(np.asarray(pts, dtype=np.float64))
+        return pcd
+
+    order = np.argsort([-len(v) for v in views_ft])
+    out = [np.asarray(v, dtype=np.float64).copy() for v in views_ft]
+    model = [out[order[0]]]
+    for i in order[1:]:
+        if len(out[i]) < 10:
+            continue
+        target = to_pcd(np.concatenate(model)).voxel_down_sample(0.0005)
+        target.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.003, max_nn=30))
+        source = to_pcd(out[i])
+        before = o3d.pipelines.registration.evaluate_registration(source, target, max_dist, np.eye(4))
+        result = o3d.pipelines.registration.registration_icp(
+            source, target, max_dist, np.eye(4),
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50),
+        )
+        tf = np.asarray(result.transformation)
+        trans = np.linalg.norm(tf[:3, 3])
+        ang = np.rad2deg(R.from_matrix(tf[:3, :3]).magnitude())
+        if trans <= max_translation and ang <= max_rotation_deg and result.fitness >= before.fitness:
+            out[i] = out[i] @ tf[:3, :3].T + tf[:3, 3]
+        model.append(out[i])
+    return out
+
+
 def largest_cluster_mask(points: np.ndarray, eps_m: float, min_points: int = 5, voxel_m: float = 0.001) -> np.ndarray:
     """Mask of the points in the largest DBSCAN cluster (computed on a voxel grid for speed)."""
     points = np.asarray(points, dtype=np.float64)
@@ -1154,6 +1282,46 @@ def largest_cluster_mask(points: np.ndarray, eps_m: float, min_points: int = 5, 
     return labels[nearest] == largest
 
 
+def extreme_band_centroid(points: np.ndarray, axis: int, side: str = "max", band_m: float = 0.002,
+                          percentile: float = 0.5) -> np.ndarray:
+    """Centroid of the points within ``band_m`` of the robust extreme along ``axis``."""
+    points = np.asarray(points, dtype=np.float64)
+    coord = points[:, axis]
+    if side == "max":
+        extreme = np.percentile(coord, 100.0 - percentile)
+        sel = coord >= extreme - band_m
+    else:
+        extreme = np.percentile(coord, percentile)
+        sel = coord <= extreme + band_m
+    return points[sel].mean(axis=0)
+
+
+def align_view_tips(views_ft, band_m=0.002, max_shift_m=0.006):
+    """Translate each view so its plug-tip face centre matches the median over views.
+
+    In the fingertip frame +z points from the hand to the plug tip, so the tip face is the band
+    of largest z. The plug walls are parallel to that axis and cannot constrain it in ICP; the
+    tip face can. Returns the aligned views and the per-view shifts (m).
+    """
+    tips = np.stack([extreme_band_centroid(v, axis=2, side="max", band_m=band_m) if len(v) else np.full(3, np.nan)
+                     for v in views_ft])
+    target = np.nanmedian(tips, axis=0)
+    out, shifts = [], []
+    for view, tip in zip(views_ft, tips):
+        shift = target - tip if np.all(np.isfinite(tip)) else np.zeros(3)
+        if np.linalg.norm(shift) > max_shift_m:  # implausible: likely a bad view, leave it to ICP
+            shift = np.zeros(3)
+        out.append(np.asarray(view, dtype=np.float64) + shift)
+        shifts.append(shift)
+    return out, np.asarray(shifts)
+
+
+def tip_spread_mm(views_ft, band_m=0.002) -> float:
+    """Spread (max - min, mm) of the per-view tip height along the plug axis."""
+    z = [extreme_band_centroid(v, axis=2, side="max", band_m=band_m)[2] for v in views_ft if len(v)]
+    return float(np.ptp(z) * 1e3) if z else float("nan")
+
+
 def estimate_aux_camera_rotation(plug_cam_views, fingertip_poses, fallback_rot, min_points=50):
     """Estimate world_from_aux rotation from the plug scan itself (no extrinsic calibration needed).
 
@@ -1167,7 +1335,9 @@ def estimate_aux_camera_rotation(plug_cam_views, fingertip_poses, fallback_rot, 
     if len(idx) < 3:
         print(f"[script] Only {len(idx)} plug views with >= {min_points} points; keeping configured aux rotation.")
         return fallback_rot
-    centers_cam = np.stack([np.median(plug_cam_views[i], axis=0) for i in idx]).astype(np.float64)
+    # Bottom-face centre (points nearest the upward camera): the same physical feature in every view,
+    # unlike the median, which side views pull up the plug walls and so bias the camera tilt.
+    centers_cam = np.stack([extreme_band_centroid(plug_cam_views[i], axis=2, side="min") for i in idx])
     tips_world = np.stack([np.asarray(fingertip_poses[i])[:3, 3] for i in idx]).astype(np.float64)
     d_cam = centers_cam - centers_cam.mean(axis=0)
     d_world = tips_world - tips_world.mean(axis=0)
@@ -1211,8 +1381,11 @@ def prescan_plug(robot, record: dict) -> None:
         auxiliary_depth = compute_foundation_stereo_depth(
             auxiliary_images, auxiliary_camera, scale=cfg.plug_photo_stereo_scale
         )
+        clean_depth = np.asarray(auxiliary_depth, dtype=np.float32).copy()
+        if cfg.plug_depth_edge_rel_thresh > 0:
+            clean_depth[~depth_edge_mask(clean_depth, cfg.plug_depth_edge_rel_thresh, cfg.plug_depth_edge_window)] = 0.0
         points_cam, colors = depth_rgb_to_camera_point_cloud(
-            auxiliary_depth,
+            clean_depth,
             auxiliary_images["left"],
             auxiliary_k,
             stride=1,
@@ -1244,10 +1417,37 @@ def prescan_plug(robot, record: dict) -> None:
         world_from_aux[:3, :3] = estimate_aux_camera_rotation(
             plug_cam_views, fingertip_poses, fallback_rot=world_from_aux[:3, :3]
         )
-    plug_local_views = [
-        world_points_to_fingertip_frame(transform_points(points_cam, world_from_aux), pose)
-        for points_cam, pose in zip(plug_cam_views, fingertip_poses)
-    ]
+    plug_local_views = _views_to_fingertip(plug_cam_views, fingertip_poses, world_from_aux)
+    err_initial = multiview_alignment_error(plug_local_views)
+    err_rotation = err_initial
+    if cfg.plug_refine_rotation_icp:
+        refined = refine_aux_rotation_icp(plug_cam_views, fingertip_poses, world_from_aux)
+        refined_views = _views_to_fingertip(plug_cam_views, fingertip_poses, refined)
+        refined_err = multiview_alignment_error(refined_views)
+        if refined_err < err_initial:  # keep only if the views actually overlap better
+            world_from_aux, plug_local_views, err_rotation = refined, refined_views, refined_err
+    spread_before = tip_spread_mm(plug_local_views)
+    if cfg.plug_align_tips:
+        plug_local_views, tip_shifts = align_view_tips(
+            plug_local_views, band_m=cfg.plug_tip_band_m, max_shift_m=cfg.plug_tip_max_shift_m
+        )
+        print(f"[script] Plug tip alignment shifts (mm): {np.round(tip_shifts * 1e3, 2).tolist()}")
+    if cfg.plug_per_view_icp:
+        plug_local_views = refine_views_icp(
+            plug_local_views,
+            max_dist=cfg.plug_icp_max_dist_m,
+            max_translation=cfg.plug_icp_max_translation_m,
+            max_rotation_deg=cfg.plug_icp_max_rotation_deg,
+        )
+    err_final = multiview_alignment_error(plug_local_views)
+    print(f"[script] Plug tip height spread across views: {spread_before:.2f} mm -> "
+          f"{tip_spread_mm(plug_local_views):.2f} mm")
+    print(
+        "[script] Plug multi-view overlap (mean distance to other views): "
+        f"{err_initial * 1e3:.2f} mm -> {err_rotation * 1e3:.2f} mm (rotation ICP) "
+        f"-> {err_final * 1e3:.2f} mm (per-view ICP); refined aux rotation "
+        f"{np.round(R.from_matrix(world_from_aux[:3, :3]).as_euler('xyz', degrees=True), 2).tolist()} deg"
+    )
     fingertip_pose = fingertip_poses[-1]
     plug_points_fingertip = np.concatenate(plug_local_views, axis=0).astype(np.float32)
     plug_colors = np.concatenate(plug_color_views, axis=0).astype(np.uint8)
