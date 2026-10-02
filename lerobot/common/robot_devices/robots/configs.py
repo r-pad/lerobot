@@ -634,6 +634,14 @@ class ScriptRobotConfig(RobotConfig):
     script_mode: str = "pose"
     # Skip policy inference in teleop_step (set via `collect_data.sh --debug`).
     debug: bool = False
+    # AGOS policy checkpoint (third_party/AGOS format, e.g. agos_canonical_split_unet); "" = no policy.
+    agos_policy_ckpt: str = "/home/yinongh/automate/lerobot/ckpt/AGOS_sim2real.pt"
+    # In debug (scripted) mode, still run the policy each frame and print its first action next to the
+    # scripted one, without executing it.
+    agos_shadow_predict: bool = True
+    # Socket contact force = sign * (Franka O_F_ext_hat_K - episode-start bias). Sim socket force z is
+    # negative when the plug presses down; verify on the robot (press down -> z should go negative).
+    agos_force_sign: float = -1.0
     # Task 1
     approach_pos: tuple[float, float, float] = (0.66, -0.012, 0.065)
     target_quat: tuple[float, float, float, float] = (
@@ -661,6 +669,20 @@ class ScriptRobotConfig(RobotConfig):
     script_joint_convergence_tolerance: float = 1e-3
     script_joint_solution_threshold: float = 0.5
     script_rot_max_angle_step_deg: float = 2.0
+    # Per-action pace in teleop_step, matching AGOS (TiltedInsertion/AGOS task + eval limiter):
+    # translation <= 0.3 mm/action (max_translation_step), rotation <= 0.5 deg/action
+    # (max_angle_step_deg / eval_rot_cap_deg), policy rotations < 0.3 deg zeroed (eval_rot_deadband_deg).
+    # The translation step is capped at AGOS scale and then multiplied by teleop_translation_gain before
+    # execution (a 0.3 mm command is too small for the real controller to move); recorded actions stay
+    # at AGOS scale. Rotation is executed as is.
+    teleop_translation_gain: float = 5.0
+    # Minimum wall-clock time per executed action (AGOS control rate 10 Hz -> 0.1 s), so the per-action
+    # caps give AGOS-like speeds (rotation <= 5 deg/s). 0 = run actions as fast as the arm converges.
+    teleop_min_action_period_s: float = 0.1
+    teleop_z_bias_m: float = 0.0
+    teleop_max_translation_step_m: float = 0.0003
+    teleop_max_rotation_step_deg: float = 0.5
+    teleop_rot_deadband_deg: float = 0.3
 
     # Initial pose randomization, matching AGOS (third_party/AGOS, AutoMateTaskAGOS):
     # lift along the socket axis, then world-frame xyz noise and RPY + axial-spin noise
@@ -676,30 +698,53 @@ class ScriptRobotConfig(RobotConfig):
     init_max_total_twist_deg: float = 150.0
     init_joint7_limit_margin: float = 0.15
 
-    # Multi-view socket pre-scan, matching AGOS `env.plug_photo.socket_views`: the fingertip is
-    # driven to socket_top + offset (world frame, m) keeping the start-pose orientation, one
-    # wrist capture per view, and the world-frame clouds are concatenated.
+    # Socket capture, as in the May implementation: during the straight lift after the grasp, with
+    # the aligned (vertical) orientation, the fingertip stops at socket_top + offset (world frame, m)
+    # for one wrist capture per view (clouds concatenated); then the arm continues to the sampled
+    # start pose. Default: one view 7 cm above the aligned pose (May: +3 cm, then a 4 cm lift).
+    # Higher / tilted views (e.g. from the AGOS start pose) lose the dark hole in stereo depth.
+    # Views are translations (dx, dy, dz) from the aligned pose at the capture height, all with the
+    # aligned orientation: the socket is seen from different angles, so what the held plug occludes
+    # in one view is visible in another.
     socket_scan_views: tuple[tuple[float, float, float], ...] = (
-        (0.0, 0.0, 0.16),
-        (0.06, 0.0, 0.14),
-        (-0.06, 0.0, 0.14),
+        (0.0, 0.0, 0.07),
+        (-0.04, 0.0, 0.07),
     )
+    # Show the reprojected socket virtual image right after the capture and wait for Enter.
+    socket_check_pause: bool = True
     # Socket top = aligned_pos - (0, 0, this). aligned_pos is the fingertip with the plug tip just
     # above the hole, so set this to the fingertip-to-plug-tip length to match the sim anchor.
     socket_scan_plug_tip_offset: float = 0.0
     socket_scan_move_steps: int = 10
-    # FoundationStereo input scale and unprojection stride for the scan. The default pipeline runs
-    # at scale 0.5 (640x360 depth), which leaves the socket with only ~800 points per view.
-    socket_scan_stereo_scale: float = 1.0
-    socket_scan_stride: int = 1
+    # FoundationStereo input scale and unprojection stride for the scan (May: 0.5 and 2).
+    socket_scan_stereo_scale: float = 0.5
+    socket_scan_stride: int = 2
+    # Drop stereo flying pixels at depth edges before fusing (not in May; can eat the hole rim).
+    socket_scan_edge_filter: bool = False
     # Stand-in for the sim's socket segmentation mask: keep world points in this z band and
     # within this xy radius of the socket (<= 0 disables the radius crop).
     socket_scan_z_range: tuple[float, float] = (0.025, 0.06)
     socket_scan_crop_radius: float = 0.08
+    # The black socket's hole is textureless, so stereo fills it with near-top-face depth; find it
+    # by colour instead (darker than the top face: Otsu split + largest dark cluster) and remove it.
+    # Multi-view visibility check (depth only): remove points another view saw through, e.g. a flat
+    # stereo "lid" over the hole in one view while another view sees into it. Off by default: it
+    # needs the views aligned to ~mm (hand-eye + pose error), otherwise it carves a band off one side.
+    socket_free_space_carving: bool = False
+    socket_carving_margin_m: float = 0.004
+    socket_hole_from_color: bool = False
+    socket_hole_top_band_m: float = 0.004
+    socket_hole_rim_m: float = 0.002
+    socket_hole_min_fraction: float = 0.02
+    socket_hole_max_fraction: float = 0.5
+    socket_hole_min_contrast: float = 8.0
 
     # Plug pre-scan with the upward-looking auxiliary ZED on the table (AGOS capture_plug_bottom_view).
     # The fingertip visits plug_photo_pos + each offset (world, m) keeping the held orientation, so
     # the camera sees the plug tip from several angles (sim: two bottom cameras ~39 deg off vertical).
+    # Scan the plug with its axis vertical (tilt removed, spin kept), then return to the tilted start
+    # pose. False = keep the held (tilted) orientation, as in AGOS sim.
+    plug_photo_vertical: bool = True
     plug_photo_pos: tuple[float, float, float] = (0.535, -0.15, 0.22)
     # Centre + a ring of 8 views (sides and diagonals, 6 cm radius) so a tilted plug is seen from
     # every side of the camera.
@@ -747,6 +792,14 @@ class ScriptRobotConfig(RobotConfig):
     plug_icp_max_dist_m: float = 0.002
     plug_icp_max_translation_m: float = 0.003
     plug_icp_max_rotation_deg: float = 3.0
+
+    # AGOS visualization: every `agos_vis_every` teleop steps store the wrist RGB and the AGOS overlay
+    # (plug virtual image about the socket centre over the socket virtual image); at episode end
+    # write a paper-style figure, an mp4 and per-frame PNGs to agos_vis_dir/episode_XXX/.
+    agos_visualize: bool = True
+    agos_vis_every: int = 1
+    agos_vis_columns: int = 6
+    agos_vis_dir: str = "outputs/agos_vis"
 
     # Master switch for gravity compensation. False = plain open-loop IK control everywhere
     # (no refinement iterations, no per-step feedforward), for comparison.

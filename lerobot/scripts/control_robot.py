@@ -385,6 +385,10 @@ def record(
             fps=cfg.fps,
             single_task=cfg.single_task,
         )
+        if robot.robot_type == "script":
+            from lerobot.common.robot_devices.control_utils import save_agos_episode_visualization
+
+            save_agos_episode_visualization(robot, dataset.num_episodes)
 
         # Skip post-episode reset — environment reset is handled pre-episode above
 

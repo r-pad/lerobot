@@ -23,10 +23,14 @@ from lerobot.common.utils.pointcloud_rgbd import render_top_down_custom
 from lerobot.common.utils.agos_canonical import (
     CANONICAL_HEIGHT,
     CANONICAL_WIDTH,
+    PLUG_POINT_RADIUS,
     canonical_normalize,
+    fingertip_points_to_world,
+    paper_overlay,
     render_plug_canonical,
+    render_world_canonical,
 )
-from lerobot.common.policy.force_diffusion_policy_image_condition import Diffusion_Policy
+from lerobot.common.policy.agos_policy import AGOSPolicy
 
 
 WRIST_CAM_TO_GRIPPER = np.array(
@@ -38,71 +42,6 @@ WRIST_CAM_TO_GRIPPER = np.array(
     ],
     dtype=np.float32,
 )
-import h5py
-def downsample_depth_with_top_padding(depth_img, target_h=360, target_w=640):
-    """Downsample, pad top/width to target size, normalize, rotate 180 degrees, and negate."""
-    # Downsample by nearest-neighbor index selection.
-    row_idx = np.linspace(0, depth_img.shape[0] - 1, target_h).astype(np.int64)
-    col_idx = np.linspace(0, depth_img.shape[1] - 1, target_w).astype(np.int64)
-    resized = depth_img[row_idx][:, col_idx]
-    # If a later change makes height smaller than target, pad above with the top row.
-    if resized.shape[0] < 480:
-        pad_top = 480 - resized.shape[0]
-        top_row = resized[0:1, :]
-        top_pad = np.repeat(top_row, pad_top, axis=0)
-        resized = np.concatenate([top_pad, resized], axis=0)
-
-    if resized.shape[1] < target_w:
-        pad_w = target_w - resized.shape[1]
-        pad_left = pad_w // 2
-        pad_right = pad_w - pad_left
-        left_col = resized[:, 0:1]
-        right_col = resized[:, -1:]
-        left_pad = np.repeat(left_col, pad_left, axis=1)
-        right_pad = np.repeat(right_col, pad_right, axis=1)
-        resized = np.concatenate([left_pad, resized, right_pad], axis=1)
-    resized = - resized
-    resized = resized.astype(np.float32, copy=False)
-    resized = np.clip(resized, a_min=-0.5, a_max=0.0)
-    resized = (resized - (-0.1890)) / 0.0795
-    return np.rot90(resized, 2)
-def unnormalize_actions(actions, pos_min, pos_max, rot_min,rot_max, scale_to_unit=True):
-    """
-    Undo the normalization from DepthActionDataset.
-    
-    Args:
-        actions: (B, K, 9) torch.Tensor, with normalized delta_pos and raw rot6d
-        pos_min: np.ndarray or torch.Tensor, shape (3,)
-        pos_max: np.ndarray or torch.Tensor, shape (3,)
-        scale_to_unit: bool, whether dataset was scaled to [-1, 1] or just [0, 1]
-    Returns:
-        unnorm_actions: (B, K, 9) torch.Tensor, with real delta_pos + rot6d
-    """
-    # device = actions.device
-    # pos_min = torch.tensor(pos_min, dtype=torch.float32, device=device)
-    # pos_max = torch.tensor(pos_max, dtype=torch.float32, device=device)
-
-    delta_norm = actions[..., :3]
-    delta_norm_rot=actions[...,3:]
-    if scale_to_unit:
-        # [-1,1] -> [0,1]
-        delta_norm = (delta_norm + 1.0) / 2.0
-        delta_norm_rot=(delta_norm_rot + 1.0) / 2.0
-    # [0,1] -> original range
-    delta_pos = delta_norm * (pos_max - pos_min) + pos_min
-    delta_rot = delta_norm_rot * (rot_max-rot_min) + rot_min
-    return torch.cat([delta_pos, delta_rot], dim=-1)
-
-def load_processed_dataset(filename):
-    import h5py
-    data = {}
-    with h5py.File(filename, "r") as f:
-        # data["depth"] = f["depth"][()]               # (N, H, W)
-        data["proprioception"] = f["proprioception"][()]  # (N, 9)
-        data["actions"] = f["actions"][()]           # (N, K, 9)
-        data["force"] = f["force"][()]             # (N, K, 3)
-    return data
-
 class _FrankaInterfaceControlAdapter:
     """Delegate FrankaInterface calls while tolerating mentor controller kwargs."""
 
@@ -178,27 +117,17 @@ class ScriptRobot(DroidRobot):
         # by _control_refined and updated once per step by _control_feedforward.
         self._ff_pos = np.zeros(3, dtype=np.float64)
         self._ff_rotvec = np.zeros(3, dtype=np.float64)
-        data=load_processed_dataset("/home/yinongh/automate/lerobot/ckpt/processed_dataset_forward_sim2real_0523_automate.h5")
-        all_actions = data['actions'][()]  # (N, K, 9)
-        delta_pos = all_actions[..., 0:3]  # (N, K, 3)
-        delta_rot = all_actions[...,3:]
-        self.pos_min = torch.from_numpy(delta_pos.min(axis=(0, 1))).cuda()
-        self.pos_max = torch.from_numpy(delta_pos.max(axis=(0, 1))).cuda()
-        self.rot_min=torch.from_numpy(delta_rot.min(axis=(0,1))).cuda()
-        self.rot_max=torch.from_numpy(delta_rot.max(axis=(0,1))).cuda()
-        self.rot_min=torch.from_numpy(delta_rot.min(axis=(0,1))).cuda()
-        self.rot_max=torch.from_numpy(delta_rot.max(axis=(0,1))).cuda()
-        self.force_min = np.min(data['force'][()], axis=0)
-        self.force_max = np.max(data['force'][()], axis=0)
-        self.policy = Diffusion_Policy(
-            action_dim=9,
-            obs_feature_dim= 512,
-            hidden_dim=512,
-            num_action = 10,
-        ).to("cuda")
-        state_dict = torch.load("/home/yinongh/automate/lerobot/ckpt/real_world_2/automate_policy_epoch_200.ckpt", map_location="cuda")
-        self.policy.load_state_dict(state_dict)
-        self.policy.eval()
+        # AGOS visuo-tactile diffusion policy (third_party/AGOS, e.g. agos_canonical_split_unet), built with
+        # the AGOS code from the checkpoint's own config, EMA weights, normalizers and action frame.
+        self.policy = None
+        if self.config.agos_policy_ckpt:
+            self.policy = AGOSPolicy(
+                self.config.agos_policy_ckpt,
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                rot_cap_deg=self.config.teleop_max_rotation_step_deg,
+                rot_deadband_deg=self.config.teleop_rot_deadband_deg,
+            )
+        self._agos_force_bias = None
 
     @property
     def camera_features(self) -> dict:
@@ -894,6 +823,82 @@ class ScriptRobot(DroidRobot):
             self._warned_missing_canonical = True
         return plug_depth, plug_center, socket_depth
 
+    def _record_agos_visualization(self, insert_meta_data: dict, fingertip_pose: np.ndarray, wrist_rgb) -> None:
+        """Store one (wrist RGB, AGOS overlay) pair.
+
+        The overlay is G_t = {plug virtual image I_p^t, socket virtual image I_s^0}: the two policy
+        inputs, each rendered about its own centre (plug: xy mean, socket: bbox), drawn on top of
+        each other.
+        """
+        if not self.config.agos_visualize or (self._agos_vis_frames_count - 1) % max(1, self.config.agos_vis_every):
+            return
+        plug_points = insert_meta_data.get("init_plug_points_fingertip")
+        socket_view = insert_meta_data.get("socket_canonical_view")
+        if plug_points is None or len(plug_points) == 0:
+            return
+        if socket_view is None:
+            empty = np.full((CANONICAL_HEIGHT, CANONICAL_WIDTH), np.nan, dtype=np.float32)
+            socket_view = {"mask": np.zeros_like(empty, dtype=bool), "depth": empty, "center_xy": None}
+        plug_world = fingertip_points_to_world(plug_points, fingertip_pose)
+        plug_view = render_world_canonical(
+            plug_world, insert_meta_data["init_plug_colors"], +1, point_radius=PLUG_POINT_RADIUS, center_mode="mean"
+        )
+        if wrist_rgb is not None:
+            wrist_rgb = np.asarray(wrist_rgb)[::4, ::4].copy()  # 720x1280 -> 180x320
+        frames = getattr(self, "_agos_vis_frames", None)
+        if frames is None:
+            frames = self._agos_vis_frames = []
+        frames.append({"wrist": wrist_rgb, "overlay": paper_overlay(plug_view, socket_view)})
+
+    def on_manual_pause(self) -> None:
+        """Space pressed: stop commanding so the arm can be hand-guided (Franka guiding button)."""
+        self._pause_pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float64).copy()
+        print("[script] PAUSED: no commands are sent. Hand-guide the arm, release the guiding button, "
+              "then press Space to resume.")
+
+    def on_manual_resume(self, fresh_state_timeout_s: float = 2.0) -> None:
+        """Re-sync after a manual move: wait for a fresh robot state, drop the gravity feedforward
+        (it would treat the hand push as tracking error and drive the arm back), continue from the
+        measured pose."""
+        n0 = self.robot_interface.state_buffer_size
+        t0 = time.perf_counter()
+        while self.robot_interface.state_buffer_size <= n0 + 2 and time.perf_counter() - t0 < fresh_state_timeout_s:
+            time.sleep(0.01)
+        if self.robot_interface.state_buffer_size <= n0:
+            print("[script] WARNING: no fresh robot state after resume; the pose may be stale.")
+        self._ff_pos[:] = 0.0
+        self._ff_rotvec[:] = 0.0
+        self._teleop_hold_z = None
+        pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float64)
+        moved_mm = np.linalg.norm(pose[:3, 3] - self._pause_pose[:3, 3]) * 1e3 if getattr(self, "_pause_pose", None) is not None else float("nan")
+        moved_deg = np.rad2deg((R.from_matrix(pose[:3, :3]) * R.from_matrix(self._pause_pose[:3, :3]).inv()).magnitude()) \
+            if getattr(self, "_pause_pose", None) is not None else float("nan")
+        print(f"[script] RESUMED from the measured pose (moved {moved_mm:.1f} mm, {moved_deg:.1f} deg while paused); "
+              "feedforward reset.")
+
+    def _socket_force_world(self, frame_index) -> np.ndarray:
+        """AGOS force input: socket contact force in the world frame (N).
+
+        Sim uses the net contact force on the socket. On the robot this is the reaction of the
+        Franka external-force estimate at the EE (O_F_ext_hat_K, base frame): sign * (F_ext - bias),
+        with the bias taken in free space at the first step of each episode (plug weight, model error).
+        """
+        f = np.zeros(3, dtype=np.float64)
+        if self.robot_interface is not None and self.robot_interface.state_buffer_size > 0:
+            state = self.robot_interface._state_buffer[-1]
+            if hasattr(state, "O_F_ext_hat_K"):
+                f = np.asarray(state.O_F_ext_hat_K, dtype=np.float64).reshape(-1)[:3]
+        if self._agos_force_bias is None or frame_index == 0:
+            self._agos_force_bias = f.copy()
+        return (float(self.config.agos_force_sign) * (f - self._agos_force_bias)).astype(np.float32)
+
+    def _cap_translation_step(self, delta: np.ndarray) -> np.ndarray:
+        """Clip a per-action translation to teleop_max_translation_step_m (AGOS max_translation_step)."""
+        delta = np.asarray(delta, dtype=np.float64)
+        norm = float(np.linalg.norm(delta))
+        cap = float(self.config.teleop_max_translation_step_m)
+        return delta * (cap / norm) if cap > 0 and norm > cap else delta
+
     def _scripted_action(self, insert_meta_data: dict, pre_action_eef_internal_forces: float, isDisturb: bool) -> tuple[torch.Tensor, torch.Tensor]:
         current_pose = self._robot_ik_controller.eef_pose
         current_rot = current_pose[:3, :3]
@@ -912,14 +917,21 @@ class ScriptRobot(DroidRobot):
         # insert_action_cam_wrist = np.array([0., -0.005, 0.0], dtype=np.float32)
         # insert_action = self._wrist_camera_vector_to_world(insert_action_cam_wrist, wrist_extrinsics)
         target_pos = current_pos.copy()
-        target_pos[:2] = target_pos[:2] + insert_action[:2] * 5
+        cfg = self.config
+        raw_step = np.zeros(3, dtype=np.float64)
+        raw_step[:2] = insert_action[:2]
         # target_pos[2] += insert_action[2]
         if pre_action_eef_internal_forces > 0.5:
             insert_action[2] = -0.00002
-        target_pos[2] = target_pos[2] + 0.0005 + insert_action[2] * 5
+        raw_step[2] = cfg.teleop_z_bias_m + insert_action[2]
+        raw_step = self._cap_translation_step(raw_step)  # AGOS-scale step (<= 0.3 mm)
+        target_pos = current_pos + raw_step * cfg.teleop_translation_gain  # amplified for execution
         # target_rot = aligned_rot.copy()
-        target_rot, _, _, _ = self._interpolate_rotation_matrix(current_rot, aligned_rot)
-        return target_pos, target_rot, insert_action
+        target_rot, _, _, _ = self._interpolate_rotation_matrix(
+            current_rot, aligned_rot, max_angle_step_deg=cfg.teleop_max_rotation_step_deg
+        )
+        # Record the AGOS-scale step (before the execution gain), matching the policy's action scale.
+        return target_pos, target_rot, np.asarray(raw_step, dtype=np.float32)
         
 
 
@@ -937,6 +949,7 @@ class ScriptRobot(DroidRobot):
         plug_canonical_depth, plug_canonical_center_xy, socket_canonical_depth = self._canonical_observation(
             insert_meta_data, pre_action_eef_pose
         )
+        self._agos_vis_frames_count = getattr(self, "_agos_vis_frames_count", 0) + 1
         pre_action_wrist_extrinsics = self._wrist_camera_extrinsics(pre_action_eef_pose)
         current_forces = self._get_eef_internal_forces(
                 pre_action_eef_pose,
@@ -957,8 +970,8 @@ class ScriptRobot(DroidRobot):
                 pre_action_wrist_images,
                 self.cameras["cam_wrist"],
             )
-            wrist_depth_input = downsample_depth_with_top_padding(pre_action_wrist_depth,target_h=360,target_w=640).copy()
-            wrist_depth_input_tensor = torch.from_numpy(wrist_depth_input).unsqueeze(0).unsqueeze(0).float()
+            # 720 x 1280 -> 360 x 640 by sampling every 2nd pixel (checkpoint depth resolution).
+            wrist_depth_input = np.asarray(pre_action_wrist_depth, dtype=np.float32)[::2, ::2].copy()
         
         self.logs["read_follower_dt_s"] = time.perf_counter() - before_fread_t
 
@@ -967,39 +980,41 @@ class ScriptRobot(DroidRobot):
             dtype=torch.float32,
         )
         # Inference 
+        self._record_agos_visualization(
+            insert_meta_data,
+            pre_action_eef_pose,
+            pre_action_wrist_images["left"] if pre_action_wrist_images is not None else None,
+        )
         inference = not self.config.debug
-        if inference:
-            pre_action_eef_internal_forces_normalize = ((pre_action_eef_internal_forces - self.force_min) / (self.force_max - self.force_min + 1e-8)) * 2.0 -1.0
-            force_input_tensor = torch.from_numpy(pre_action_eef_internal_forces_normalize.numpy()).unsqueeze(0).float()
-            # AGOS CanonicalNormalizer: per-image min-max over finite pixels, NaN -> 1.0 (far).
-            init_plug_photo_depth_tensor = torch.from_numpy(canonical_normalize(plug_canonical_depth)).unsqueeze(0).float()
-            socket_depth_tensor = torch.from_numpy(canonical_normalize(socket_canonical_depth)).unsqueeze(0).float()
-            # init_plug_photo_depth_tensor[...] = 0
-            # socket_depth_tensor[...] = 0
-            raw_actions = self.policy(depth = wrist_depth_input_tensor.cuda(), force = force_input_tensor.cuda(), init_plug_photo_depth= init_plug_photo_depth_tensor.cuda(), socket_depth = socket_depth_tensor.cuda())
-            predict_actions=unnormalize_actions(raw_actions,self.pos_min,self.pos_max,self.rot_min,self.rot_max)[0].cpu()
+        # Socket contact force (world), AGOS force input: measured before this prediction, i.e. after
+        # the previous action (training time_offset = -1).
+        socket_force_world = self._socket_force_world(frame_index)
+        predict_actions = None
+        run_policy = self.policy is not None and (inference or self.config.agos_shadow_predict)
+        if run_policy and pre_action_wrist_depth is not None:
+            obs = self.policy.build_obs(
+                depth_m=wrist_depth_input,
+                plug_depth=plug_canonical_depth,
+                socket_depth=socket_canonical_depth,
+                socket_force_world=socket_force_world,
+            )
+            predict_actions = self.policy.predict(obs)  # [10, 9] training frame, rotation-limited
+        elif inference:
+            raise RuntimeError("Policy inference needs the AGOS checkpoint (agos_policy_ckpt) and the wrist depth.")
         
         for i in range(5):
             if inference:
-                init_eef_pose = insert_meta_data["init_EEF_pose"]
-                action = predict_actions[i].cpu().numpy()
-                current_pose = self._robot_ik_controller.eef_pose
+                # AGOS execution: map the step from the training frame (eef) to world with the *live*
+                # fingertip pose, then target = current + dp_w, R_target = R_w @ R_current.
+                action = predict_actions[i]
+                current_pose = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float64)
                 current_rot = current_pose[:3, :3]
                 current_pos = current_pose[:3, 3]
-                current_wrist_extrinsics = self._wrist_camera_extrinsics(np.asarray(current_pose, dtype=np.float32))
-                action_pos_world = self._isaacgym_wrist_camera_vector_to_world(
-                    action[:3],
-                    current_wrist_extrinsics,
-                )
-                target_pos = current_pos.copy()
-                target_pos[:2] = current_pos[:2] + action_pos_world[:2] * 5
-                target_pos[2] = current_pos[2] + 0.0005 + action_pos_world[2] * 5
-                # target_rot is rot6d -> rot mat @ current_rot
-                action_rot6d = action[3:9]
-                action_rot_mat = transforms.rotation_6d_to_matrix(torch.from_numpy(action_rot6d).float().unsqueeze(0)).squeeze(0).numpy()   
-                target_rot_candidate = action_rot_mat @ current_rot
-                target_rot = target_rot_candidate
-                action9d = action.copy()
+                world_action = self.policy.action_to_world(action, R.from_matrix(current_rot).as_quat())
+                target_pos = current_pos + self._cap_translation_step(world_action[:3]) * self.config.teleop_translation_gain
+                rot_world = transforms.rotation_6d_to_matrix(torch.as_tensor(world_action[3:9])[None])[0].numpy()
+                target_rot = rot_world @ current_rot
+                action9d = action.numpy().copy()
                 # Debug Mode
                 # if frame_index < 1:
                     # target_pos, target_rot, _ = self._scripted_action(insert_meta_data, pre_action_eef_internal_forces[2], isDisturb=False)
@@ -1014,6 +1029,16 @@ class ScriptRobot(DroidRobot):
 
             else:
                 target_pos, target_rot, insert_action = self._scripted_action(insert_meta_data, pre_action_eef_internal_forces[2], isDisturb=isDisturb)
+                if i == 0 and predict_actions is not None:
+                    # Shadow mode: what the AGOS policy would do now vs the scripted step (world frame).
+                    cur = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float64)
+                    w = self.policy.action_to_world(predict_actions[0], R.from_matrix(cur[:3, :3]).as_quat())
+                    pol_rot = np.rad2deg(R.from_matrix(
+                        transforms.rotation_6d_to_matrix(torch.as_tensor(w[3:9])[None])[0].numpy()).magnitude())
+                    scr_rot = np.rad2deg((R.from_matrix(target_rot) * R.from_matrix(cur[:3, :3]).inv()).magnitude())
+                    print(f"[agos shadow] policy dpos {np.round(w[:3] * 1e3, 3).tolist()} mm, rot {pol_rot:.2f} deg | "
+                          f"scripted dpos {np.round((target_pos - cur[:3, 3]) * 1e3, 3).tolist()} mm, rot {scr_rot:.2f} deg | "
+                          f"socket force {np.round(socket_force_world, 2).tolist()} N")
                 target_rot_for_action = torch.as_tensor(target_rot, dtype=torch.float32)
                 action_pos = torch.as_tensor(
                     self._world_vector_to_isaacgym_wrist_camera(insert_action, pre_action_wrist_extrinsics),
@@ -1024,8 +1049,22 @@ class ScriptRobot(DroidRobot):
                 action9d = torch.cat([action_pos, relative_rot6d], dim=-1)
 
             before_fwrite_t = time.perf_counter()
+            pose_before = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float64).copy()
             pybullet_control_success = self._control_feedforward(target_pos, target_rot)
-            self.logs["write_follower_dt_s"] = time.perf_counter() - before_fwrite_t
+            # Pace actions like AGOS (10 Hz: 6 sim steps of 1/60 s): 0.5 deg/action is 5 deg/s only at
+            # that rate; without it the next action starts as soon as the joints converge.
+            min_period = float(self.config.teleop_min_action_period_s)
+            remaining = min_period - (time.perf_counter() - before_fwrite_t)
+            if remaining > 0:
+                time.sleep(remaining)
+            action_dt = time.perf_counter() - before_fwrite_t
+            self.logs["write_follower_dt_s"] = action_dt
+            if i == 0:
+                pose_after = np.asarray(self._robot_ik_controller.eef_pose, dtype=np.float64)
+                rot_deg = np.rad2deg((R.from_matrix(pose_after[:3, :3]) * R.from_matrix(pose_before[:3, :3]).inv()).magnitude())
+                trans_mm = np.linalg.norm(pose_after[:3, 3] - pose_before[:3, 3]) * 1e3
+                print(f"[script] action pace: {1.0 / max(action_dt, 1e-6):.1f} actions/s, measured "
+                      f"{rot_deg / max(action_dt, 1e-6):.1f} deg/s, {trans_mm / max(action_dt, 1e-6):.1f} mm/s")
 
             if not record_data or isDisturb:
                 return

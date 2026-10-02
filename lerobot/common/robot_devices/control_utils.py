@@ -44,7 +44,10 @@ from lerobot.common.utils.utils import get_safe_torch_device, has_method
 from lerobot.common.utils.pointcloud_rgbd import render_top_down_custom, render_bottom_up_custom
 from lerobot.common.utils.agos_canonical import (
     green_mask,
-    overlay_profiles,
+    agos_figure,
+    canonical_normalize,
+    canonical_views,
+    paper_overlay,
     render_plug_canonical,
     render_socket_canonical,
     world_points_to_fingertip_frame,
@@ -533,13 +536,27 @@ def get_foundation_stereo_depth(
     from zed_cams.foundation_stereo_depth import FoundationStereoDepth
 
     original_torch_load = torch.load
+    original_hub_load = torch.hub.load
 
     def torch_load_with_pickle(*args, **kwargs):
         kwargs.setdefault("weights_only", False)
         return original_torch_load(*args, **kwargs)
 
+    def hub_load_prefer_cache(repo_or_dir, model, *args, **kwargs):
+        # FoundationStereo builds its DINOv2 backbone with torch.hub.load("facebookresearch/dinov2", ...).
+        # Even with the repo cached, torch.hub asks GitHub for the default branch first, so a GitHub
+        # outage (e.g. HTTP 504) crashes the run. Load the cached copy directly when it exists.
+        cached = os.path.join(torch.hub.get_dir(), "facebookresearch_dinov2_main")
+        if repo_or_dir == "facebookresearch/dinov2" and os.path.isfile(os.path.join(cached, "hubconf.py")):
+            kwargs.pop("source", None)
+            kwargs.pop("trust_repo", None)
+            kwargs.pop("force_reload", None)
+            return original_hub_load(cached, model, *args, source="local", **kwargs)
+        return original_hub_load(repo_or_dir, model, *args, **kwargs)
+
     try:
         torch.load = torch_load_with_pickle
+        torch.hub.load = hub_load_prefer_cache
         return FoundationStereoDepth(
             ckpt=ckpt,
             fs_dir=fs_dir,
@@ -549,6 +566,7 @@ def get_foundation_stereo_depth(
         )
     finally:
         torch.load = original_torch_load
+        torch.hub.load = original_hub_load
 
 
 def compute_foundation_stereo_depth(
@@ -1111,6 +1129,30 @@ def sample_agos_initial_pose(robot, aligned_pos, aligned_rot, max_attempts=200):
     return base_pos, aligned_rot.copy(), {"pos_offset": np.zeros(3), "rpy_deg": np.zeros(3), "axial_spin_deg": 0.0}
 
 
+def untilted_rotation(current_rot: np.ndarray, axis_world: np.ndarray) -> np.ndarray:
+    """Smallest rotation of ``current_rot`` that points its z axis (plug axis) along ``axis_world``.
+
+    Removes tilt only; the spin about the axis is kept (no extra joint-7 rotation).
+    """
+    current_rot = np.asarray(current_rot, dtype=np.float64)
+    z = current_rot[:, 2] / np.linalg.norm(current_rot[:, 2])
+    a = np.asarray(axis_world, dtype=np.float64) / np.linalg.norm(axis_world)
+    cross = np.cross(z, a)
+    sin, cos = np.linalg.norm(cross), float(np.dot(z, a))
+    if sin < 1e-9:
+        return current_rot.copy() if cos > 0 else (R.from_rotvec(np.pi * np.array([1.0, 0.0, 0.0])).as_matrix() @ current_rot)
+    swing = R.from_rotvec(cross / sin * np.arctan2(sin, cos)).as_matrix()
+    return swing @ current_rot
+
+
+def rotation_steps(robot, target_rot, min_steps: int) -> int:
+    """Interpolation steps needed to reach ``target_rot`` at script_rot_max_angle_step_deg per step."""
+    current_rot = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64)[:3, :3]
+    angle_deg = np.rad2deg((R.from_matrix(target_rot) * R.from_matrix(current_rot).inv()).magnitude())
+    max_step = float(getattr(robot.config, "script_rot_max_angle_step_deg", 2.0))
+    return max(int(min_steps), int(np.ceil(angle_deg / max(max_step, 1e-3))) + 2)
+
+
 def move_to_pose_interpolated(robot, target_pos, target_rot, num_steps=5):
     """Interpolate from the measured pose to the target in ``num_steps`` IK commands."""
     target_pos = np.asarray(target_pos, dtype=np.float64)
@@ -1322,6 +1364,99 @@ def tip_spread_mm(views_ft, band_m=0.002) -> float:
     return float(np.ptp(z) * 1e3) if z else float("nan")
 
 
+def carve_free_space(view_points, view_colors, view_depths, view_cam_poses, k, margin_m=0.004, window=5):
+    """Multi-view visibility check: drop points that another view saw through.
+
+    Fusing views by concatenation lets one view's false surface (e.g. stereo filling a dark,
+    textureless hole with a flat "lid") hide what the other views saw, because the top-down render
+    keeps the nearest point. For each point of view i, project it into every other view j: if view
+    j measured a depth clearly *behind* the point along that ray (its local minimum depth is more
+    than ``margin_m`` farther), view j looked through that spot, so the point is not a surface.
+    The local minimum (``window`` px) keeps silhouette edges from being carved by mistake.
+    """
+    from scipy.ndimage import minimum_filter
+
+    k = np.asarray(k, dtype=np.float64)
+    fx, fy, cx, cy = k[0, 0], k[1, 1], k[0, 2], k[1, 2]
+    local_min = []
+    for depth in view_depths:
+        d = np.asarray(depth, dtype=np.float32).copy()
+        d[~(d > 0)] = np.inf  # no measurement: no evidence either way
+        local_min.append(minimum_filter(d, size=window))
+    out_points, out_colors = [], []
+    for i, (points, colors) in enumerate(zip(view_points, view_colors)):
+        carved = np.zeros(len(points), dtype=bool)
+        for j, (d_min, cam_pose) in enumerate(zip(local_min, view_cam_poses)):
+            if i == j or not len(points):
+                continue
+            cam_from_world = np.linalg.inv(np.asarray(cam_pose, dtype=np.float64))
+            pc = points @ cam_from_world[:3, :3].T + cam_from_world[:3, 3]
+            z = pc[:, 2]
+            ok = z > 1e-3
+            u = np.round(fx * pc[:, 0] / np.where(ok, z, 1) + cx).astype(int)
+            v = np.round(fy * pc[:, 1] / np.where(ok, z, 1) + cy).astype(int)
+            h, w = d_min.shape
+            ok &= (u >= 0) & (u < w) & (v >= 0) & (v < h)
+            measured = np.full(len(points), np.inf)
+            measured[ok] = d_min[v[ok], u[ok]]
+            carved |= ok & np.isfinite(measured) & (measured > z + margin_m)
+        out_points.append(points[~carved])
+        out_colors.append(colors[~carved])
+        print(f"[script] Socket view {i + 1}: carved {int(carved.sum())} / {len(points)} points seen through by other views")
+    return out_points, out_colors
+
+
+def socket_hole_mask_from_color(points: np.ndarray, colors: np.ndarray, cfg) -> np.ndarray:
+    """Points of the socket hole, found by colour.
+
+    The socket is dark and its hole interior is textureless, so stereo fills the hole with depth
+    at the top-face height; the hole is still clearly darker in colour. Among the top-face points
+    (within ``socket_hole_top_band_m`` of the top), split the grey levels with Otsu and take the
+    largest dark cluster. Lower points (side walls, near-black edges) are left out of the split.
+    Returns an all-False mask if the split is not convincing.
+    """
+    points = np.asarray(points, dtype=np.float64)
+    gray = np.asarray(colors, dtype=np.float32)[:, :3].mean(axis=1)
+    none = np.zeros(len(points), dtype=bool)
+    if len(points) < 100:
+        return none
+    from scipy.ndimage import binary_erosion, binary_fill_holes
+
+    top_z = np.percentile(points[:, 2], 95)
+    top = points[:, 2] >= top_z - cfg.socket_hole_top_band_m
+    # Interior of the top face only: the outer rim is near-black too (grazing angle / shadow).
+    cell = 0.0005
+    lo = points[top, :2].min(axis=0)
+    ij = np.floor((points[:, :2] - lo) / cell).astype(int)
+    shape = tuple(np.maximum(ij[top].max(axis=0) + 1, 1))
+    occ = np.zeros(shape, dtype=bool)
+    occ[ij[top, 0], ij[top, 1]] = True
+    interior = binary_erosion(binary_fill_holes(occ), iterations=max(1, int(round(cfg.socket_hole_rim_m / cell))))
+    inside = (ij >= 0).all(axis=1) & (ij[:, 0] < shape[0]) & (ij[:, 1] < shape[1])
+    in_interior = np.zeros(len(points), dtype=bool)
+    in_interior[inside] = interior[ij[inside, 0], ij[inside, 1]]
+    top &= in_interior
+    if top.sum() < 50:
+        return none
+    g = gray[top]
+    hist, edges = np.histogram(g, bins=64, range=(float(g.min()), float(g.max()) + 1e-3))
+    centers = (edges[:-1] + edges[1:]) / 2
+    w0 = np.cumsum(hist); w1 = w0[-1] - w0
+    m0 = np.cumsum(hist * centers) / np.maximum(w0, 1)
+    m1 = (np.sum(hist * centers) - np.cumsum(hist * centers)) / np.maximum(w1, 1)
+    threshold = centers[np.argmax(w0 * w1 * (m0 - m1) ** 2)]
+    dark = top & (gray <= threshold)
+    frac = dark.sum() / max(top.sum(), 1)
+    contrast = g[g > threshold].mean() - g[g <= threshold].mean() if (g <= threshold).any() and (g > threshold).any() else 0.0
+    if not (cfg.socket_hole_min_fraction <= frac <= cfg.socket_hole_max_fraction) or contrast < cfg.socket_hole_min_contrast:
+        print(f"[script] No convincing socket hole by colour (dark fraction {frac:.2f}, contrast {contrast:.1f}).")
+        return none
+    hole = dark.copy()
+    hole[dark] = largest_cluster_mask(points[dark], cfg.plug_cluster_eps_m, cfg.plug_cluster_min_points,
+                                      cfg.plug_cluster_voxel_m)
+    return hole
+
+
 def estimate_aux_camera_rotation(plug_cam_views, fingertip_poses, fallback_rot, min_points=50):
     """Estimate world_from_aux rotation from the plug scan itself (no extrinsic calibration needed).
 
@@ -1365,6 +1500,13 @@ def prescan_plug(robot, record: dict) -> None:
     cfg = robot.config
     return_pose = np.asarray(robot._robot_ik_controller.eef_pose, dtype=np.float64).copy()
     photo_rot = return_pose[:3, :3].copy()
+    if cfg.plug_photo_vertical:
+        # Capture with the plug vertical (no tilt), then return to the tilted start pose. The cloud is
+        # stored in the fingertip frame, so it stays valid at any pose; views still only translate.
+        axis = np.asarray(record["aligned_rot"])[:, 2] if "aligned_rot" in record else np.array([0.0, 0.0, -1.0])
+        photo_rot = untilted_rotation(photo_rot, axis)
+        tilt_deg = np.rad2deg(np.arccos(np.clip(np.dot(return_pose[:3, 2], photo_rot[:, 2]), -1.0, 1.0)))
+        print(f"[script] Plug scan with the plug vertical (removing {tilt_deg:.1f} deg of tilt, keeping the spin)")
     auxiliary_camera_name, auxiliary_camera = get_auxiliary_zed_camera(robot)
     auxiliary_k, _ = get_zed_intrinsics_and_baseline(auxiliary_camera)
     world_from_aux = np.eye(4, dtype=np.float64)
@@ -1374,7 +1516,7 @@ def prescan_plug(robot, record: dict) -> None:
     plug_cam_views, plug_color_views, fingertip_poses = [], [], []
     for view_idx, offset in enumerate(cfg.plug_photo_views):
         view_pos = np.asarray(cfg.plug_photo_pos, dtype=np.float64) + np.asarray(offset, dtype=np.float64)
-        move_to_pose_interpolated(robot, view_pos, photo_rot, num_steps=5)
+        move_to_pose_interpolated(robot, view_pos, photo_rot, num_steps=rotation_steps(robot, photo_rot, 5))
         robot._control_refined(view_pos, photo_rot)
 
         auxiliary_images = read_zed_stereo_rgb(auxiliary_camera)
@@ -1485,7 +1627,8 @@ def prescan_plug(robot, record: dict) -> None:
     )
 
     # Back to the pose held before the photo.
-    move_to_pose_interpolated(robot, return_pose[:3, 3], return_pose[:3, :3], num_steps=5)
+    move_to_pose_interpolated(robot, return_pose[:3, 3], return_pose[:3, :3],
+                              num_steps=rotation_steps(robot, return_pose[:3, :3], 5))
     robot._control_refined(return_pose[:3, 3], return_pose[:3, :3])
 
     # Debug: canonical plug view at the start pose (+ overlay with the socket if scanned).
@@ -1493,8 +1636,82 @@ def prescan_plug(robot, record: dict) -> None:
         plug_points_fingertip, plug_colors, robot._robot_ik_controller.eef_pose
     )
     save_depth_vis(plug_view["depth"], "plug_canonical_depth")
-    if "socket_canonical_view" in record:
-        save_rgb(overlay_profiles(plug_view, record["socket_canonical_view"]), "canonical_overlay")
+    if "init_socket_points_world" in record:
+        socket_pcd = np.asarray(record["init_socket_points_world"])
+        views = canonical_views(
+            plug_points_fingertip, plug_colors, robot._robot_ik_controller.eef_pose,
+            socket_pcd[:, :3], socket_pcd[:, 3:6], shared_center=False,
+        )
+        save_rgb(views["overlay"], "canonical_overlay")
+        save_rgb(paper_overlay(views["plug"], views["socket"]), "canonical_overlay_paper")
+
+
+def show_socket_virtual_image(socket_view: dict) -> None:
+    """Show the socket virtual RGB and depth images (as in the May check figures).
+
+    Depth is shown exactly as the policy receives it (AGOS CanonicalNormalizer): nearest surface
+    black, farther lighter, empty pixels white. Saved to outputs/ and opened in the image viewer.
+    """
+    from PIL import Image, ImageDraw
+
+    h, w = socket_view["mask"].shape
+    depth_norm = canonical_normalize(socket_view["depth"])
+    depth_img = np.repeat((depth_norm * 255).astype(np.uint8)[..., None], 3, axis=-1)
+    rgb = np.asarray(socket_view["rgb"], dtype=np.float32)
+    rgb_img = (np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8)
+    gap = np.full((h, 8, 3), 255, dtype=np.uint8)
+    panel = np.concatenate([rgb_img, gap, depth_img], axis=1)
+    panel = np.repeat(np.repeat(panel, 2, axis=0), 2, axis=1)  # 2x for readability
+    canvas = Image.new("RGB", (panel.shape[1], panel.shape[0] + 28), "white")
+    canvas.paste(Image.fromarray(panel), (0, 28))
+    draw = ImageDraw.Draw(canvas)
+    draw.text((6, 8), "Socket virtual RGB image", fill="black")
+    draw.text((2 * w + 16 + 6, 8), "Socket virtual depth image (policy input: near = dark, empty = white)", fill="black")
+    path = "/home/yinongh/automate/lerobot/outputs/socket_virtual_image_check.png"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    canvas.save(path)
+    print(f"[script] Socket virtual images saved to {path}")
+    try:
+        canvas.show(title="Socket virtual images")
+    except Exception as exc:
+        print(f"[script] Could not open an image viewer ({exc}); open the file above to check.")
+
+
+def save_agos_episode_visualization(robot, episode_index) -> None:
+    """Write the episode's AGOS visualization (figure, mp4, per-frame PNGs) and clear the buffer."""
+    frames = getattr(robot, "_agos_vis_frames", None) or []
+    robot._agos_vis_frames = []
+    robot._agos_vis_frames_count = 0
+    if not frames:
+        return
+    from PIL import Image
+
+    out_dir = os.path.join(robot.config.agos_vis_dir, f"episode_{int(episode_index or 0):03d}")
+    os.makedirs(out_dir, exist_ok=True)
+    wrists = [f["wrist"] for f in frames]
+    overlays = [f["overlay"] for f in frames]
+    for i, (wrist, overlay) in enumerate(zip(wrists, overlays)):
+        Image.fromarray(overlay).save(os.path.join(out_dir, f"overlay_{i:04d}.png"))
+        if wrist is not None:
+            Image.fromarray(np.asarray(wrist, dtype=np.uint8)).save(os.path.join(out_dir, f"wrist_{i:04d}.png"))
+    fig_path = agos_figure(wrists, overlays, os.path.join(out_dir, "agos_figure.png"),
+                           num_columns=robot.config.agos_vis_columns, title=f"Episode {episode_index}")
+    try:
+        import imageio.v2 as imageio
+
+        with imageio.get_writer(os.path.join(out_dir, "agos_rollout.mp4"), fps=5) as writer:
+            for wrist, overlay in zip(wrists, overlays):
+                h = overlay.shape[0]
+                if wrist is not None:
+                    scale_w = int(round(wrist.shape[1] * h / wrist.shape[0]))
+                    wrist_img = np.asarray(Image.fromarray(np.asarray(wrist, dtype=np.uint8)).resize((scale_w, h)))
+                    panel = np.concatenate([wrist_img, overlay], axis=1)
+                else:
+                    panel = overlay
+                writer.append_data(panel[: panel.shape[0] // 2 * 2, : panel.shape[1] // 2 * 2])
+    except Exception as exc:  # video is a convenience; the figure and PNGs are already written
+        print(f"[script] Could not write AGOS rollout video: {exc}")
+    print(f"[script] AGOS visualization ({len(frames)} frames) saved to {out_dir} ({os.path.basename(fig_path)})")
 
 
 def run_scripted_grasp_sequence(robot):
@@ -1605,41 +1822,12 @@ def run_scripted_grasp_sequence(robot):
         target_pos, target_rot, init_pose_sample = sample_agos_initial_pose(robot, aligned_pos, aligned_rot)
         record["init_pose_sample"] = init_pose_sample
         
-    skip_initialization = True
+    skip_initialization = False
     if not skip_initialization:
-        total_init_steps = 150
-        num_lift_steps = 25
-        for i in range(total_init_steps):
-            current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
-            current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
-            if i < num_lift_steps:
-                # Straight extraction along the socket axis, keeping the aligned orientation.
-                next_tgt_pos = record["aligned_pos"].copy()
-                next_tgt_pos[2] += robot.config.init_lift_height * (i + 1) / num_lift_steps
-                next_tgt_rot = record["aligned_rot"].copy()
-            else:
-                next_tgt_pos = (target_pos - current_pos) / (total_init_steps-i) + current_pos
-                next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-                    current_rot,
-                    target_rot,
-                    max_angle_step_deg=2.0,
-                )
-            robot._robot_ik_controller.control(
-                    target_pos=next_tgt_pos,
-                    target_rot=next_tgt_rot,
-                    grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
-                )
-        
-        # Compensate gravity-induced pose error at the sampled pose (full 6-DoF, no projection).
-        robot._control_refined(target_pos, target_rot)
-        init_pos = np.asarray(target_pos, dtype=np.float64).copy()
-        init_rot = np.asarray(target_rot, dtype=np.float64).copy()
-        # Multi-view socket pre-scan (AGOS socket_views): capture from each view pose while holding
-        # the plug, keep the start-pose orientation, and concatenate the world-frame clouds.
-        print("[script] Pre-scanning the socket from multiple wrist views...")
+        # Socket capture as in May: from just above the aligned pose with the aligned (vertical)
+        # orientation, during the straight lift; one wrist capture per view, clouds concatenated.
+        print("[script] Capturing the socket point cloud from above the aligned pose...")
+        capture_rot = np.asarray(record["aligned_rot"], dtype=np.float64).copy()
         wrist_camera = robot.cameras["cam_wrist"]
         wrist_k, _ = get_zed_intrinsics_and_baseline(wrist_camera)
         cam_to_gripper = np.array(
@@ -1656,16 +1844,20 @@ def run_scripted_grasp_sequence(robot):
         z_low, z_high = robot.config.socket_scan_z_range
         crop_radius = float(robot.config.socket_scan_crop_radius)
         move_steps = int(robot.config.socket_scan_move_steps)
-        view_points, view_colors = [], []
+        view_points, view_colors, view_depths, view_cam_poses = [], [], [], []
         for view_idx, offset in enumerate(robot.config.socket_scan_views):
+            # Translate to each view at the capture height, keeping the aligned orientation, so the
+            # socket is seen from different angles around the held plug.
             view_pos = socket_top + np.asarray(offset, dtype=np.float64)
-            for i in range(move_steps):
+            view_rot = capture_rot
+            view_steps = rotation_steps(robot, view_rot, move_steps)
+            for i in range(view_steps):
                 current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
                 current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-                next_tgt_pos = (view_pos - current_pos) / (move_steps - i) + current_pos
+                next_tgt_pos = (view_pos - current_pos) / (view_steps - i) + current_pos
                 next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
                     current_rot,
-                    init_rot,
+                    view_rot,
                     max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
                 )
                 robot._robot_ik_controller.control(
@@ -1676,13 +1868,18 @@ def run_scripted_grasp_sequence(robot):
                         joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
                     )
             # Settle at the view pose so the capture is not blurred and the pose is accurate.
-            robot._control_refined(view_pos, init_rot)
+            robot._control_refined(view_pos, view_rot)
 
             wrist_images = read_zed_stereo_rgb(wrist_camera)
             # Full-resolution stereo + every pixel: the socket covers a small part of the image.
             wrist_depth = compute_foundation_stereo_depth(
                 wrist_images, wrist_camera, scale=robot.config.socket_scan_stereo_scale
             )
+            # Same cleanup as the plug scan: drop stereo flying pixels at depth edges.
+            wrist_depth = np.asarray(wrist_depth, dtype=np.float32).copy()
+            if robot.config.socket_scan_edge_filter and robot.config.plug_depth_edge_rel_thresh > 0:
+                wrist_depth[~depth_edge_mask(wrist_depth, robot.config.plug_depth_edge_rel_thresh,
+                                             robot.config.plug_depth_edge_window)] = 0.0
             points_cam, colors = depth_rgb_to_camera_point_cloud(
                     wrist_depth,
                     wrist_images["left"],
@@ -1695,15 +1892,38 @@ def run_scripted_grasp_sequence(robot):
             keep = (points_world[:, 2] >= z_low) & (points_world[:, 2] <= z_high)
             if crop_radius > 0:
                 keep &= np.linalg.norm(points_world[:, :2] - socket_top[:2], axis=1) <= crop_radius
+            # Keep the socket body only (drops detached speckles that also skew the bbox centre).
+            in_band = int(keep.sum())
+            keep[keep] = largest_cluster_mask(
+                points_world[keep], robot.config.plug_cluster_eps_m, robot.config.plug_cluster_min_points,
+                robot.config.plug_cluster_voxel_m,
+            )
+            print(f"[script] Socket view {view_idx + 1}: largest cluster kept {int(keep.sum())} / {in_band} "
+                  f"points in the z band / crop")
             print(f"[script] Socket view {view_idx + 1}/{len(robot.config.socket_scan_views)} "
                   f"offset={list(offset)}: kept {int(keep.sum())} / {len(keep)} points")
             view_points.append(points_world[keep])
+            view_depths.append(wrist_depth)
+            view_cam_poses.append(world_from_gripper @ cam_to_gripper)
             view_colors.append(colors[keep])
 
+        if robot.config.socket_free_space_carving and len(view_points) > 1:
+            view_points, view_colors = carve_free_space(
+                view_points, view_colors, view_depths, view_cam_poses, wrist_k,
+                margin_m=robot.config.socket_carving_margin_m,
+            )
         wrist_points_world = np.concatenate(view_points, axis=0)
         wrist_colors = np.concatenate(view_colors, axis=0)
         if wrist_points_world.shape[0] == 0:
             raise RuntimeError("[script] Socket pre-scan produced no points; check socket_scan_* settings.")
+        if robot.config.socket_hole_from_color:
+            hole = socket_hole_mask_from_color(wrist_points_world, wrist_colors, robot.config)
+            if hole.any():
+                record["socket_hole_center_xy"] = np.median(wrist_points_world[hole, :2], axis=0)
+                print(f"[script] Socket hole from colour: removed {int(hole.sum())} dark points, centre "
+                      f"{np.round(record['socket_hole_center_xy'] * 1e3, 1).tolist()} mm")
+                wrist_points_world = wrist_points_world[~hole]
+                wrist_colors = wrist_colors[~hole]
         robot._initial_wrist_points_world = wrist_points_world.astype(np.float32)
         robot._initial_wrist_points_world_colored = np.concatenate(
             [wrist_points_world.astype(np.float32), wrist_colors.astype(np.float32)],
@@ -1735,25 +1955,43 @@ def run_scripted_grasp_sequence(robot):
         record["socket_canonical_depth"] = socket_view["depth"]
         record["socket_canonical_center_xy"] = np.asarray(socket_view["center_xy"], dtype=np.float32)
         save_depth_vis(socket_view["depth"], "socket_canonical_depth")
+        if robot.config.socket_check_pause:
+            show_socket_virtual_image(socket_view)
+            input("[script] Check the socket virtual image, then press Enter to continue initialization...")
 
-        # Return from the last socket-scan view to the sampled initial pose.
-        for i in range(10):
+
+        total_init_steps = 150
+        num_lift_steps = 25
+        lift_start = float(robot._robot_ik_controller.eef_pose[2, 3] - record["aligned_pos"][2])
+        for i in range(total_init_steps):
             current_rot = robot._robot_ik_controller.eef_pose[:3,:3]
             current_pos = robot._robot_ik_controller.eef_pose[:3,3]
-            next_tgt_pos = (init_pos - current_pos) / (10 - i) + current_pos
-            next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
-                current_rot,
-                init_rot,
-                max_angle_step_deg=float(getattr(robot.config, "script_rot_max_angle_step_deg", 0.3)),
-            )
+            # Next tgt pos is the interpolation between current pos and target pos, with a small step size to ensure smooth movement and better IK convergence
+            if i < num_lift_steps:
+                # Straight extraction along the socket axis, keeping the aligned orientation.
+                next_tgt_pos = record["aligned_pos"].copy()
+                # continue from the socket-capture height up to the extraction height
+                next_tgt_pos[2] += lift_start + (robot.config.init_lift_height - lift_start) * (i + 1) / num_lift_steps
+                next_tgt_rot = record["aligned_rot"].copy()
+            else:
+                next_tgt_pos = (target_pos - current_pos) / (total_init_steps-i) + current_pos
+                next_tgt_rot, _, _, _ = robot._interpolate_rotation_matrix(
+                    current_rot,
+                    target_rot,
+                    max_angle_step_deg=2.0,
+                )
             robot._robot_ik_controller.control(
                     target_pos=next_tgt_pos,
                     target_rot=next_tgt_rot,
                     grasping_action=getattr(robot, "_last_gripper_action", robot.config.gripper_open_action),
-                    wait_times=100,
-                    joint_threshold=float(getattr(robot.config, "script_joint_solution_threshold", 0.5)),
+                    wait_times=20,
+                    joint_threshold=0.0025,
                 )
-        robot._control_refined(init_pos, init_rot)
+        
+        # Compensate gravity-induced pose error at the sampled pose (full 6-DoF, no projection).
+        robot._control_refined(target_pos, target_rot)
+        init_pos = np.asarray(target_pos, dtype=np.float64).copy()
+        init_rot = np.asarray(target_rot, dtype=np.float64).copy()
         # save_rgb(init_socket_rgb, "initial_socket_rgb")
         # save_depth_vis(init_socket_depth, "initial_socket_depth")
         # print("Inspect the initial socket RGB and depth captures, then press Enter to continue...")
@@ -1889,6 +2127,7 @@ def init_keyboard_listener():
     events["exit_early"] = False
     events["rerecord_episode"] = False
     events["stop_recording"] = False
+    events["pause"] = False
 
     if is_headless():
         logging.warning(
@@ -1913,6 +2152,10 @@ def init_keyboard_listener():
                 print("Escape key pressed. Stopping data recording...")
                 events["stop_recording"] = True
                 events["exit_early"] = True
+            elif key == keyboard.Key.space:
+                events["pause"] = not events.get("pause", False)
+                print("Space pressed:", "PAUSE requested (robot will stop commanding)" if events["pause"]
+                      else "RESUME requested")
         except Exception as e:
             print(f"Error handling key press: {e}")
 
@@ -2102,6 +2345,23 @@ def control_loop(
             else:
                 episode_index = dataset.episode_buffer["episode_index"]
         print("Episode Index, Frame Index: ", episode_index, frame_index)
+        # Space toggles a manual pause (e.g. to hand-guide the arm and test recovery): no commands and no
+        # recorded frames while paused; on resume the robot re-syncs to its measured pose.
+        if events is not None and events.get("pause", False):
+            if not getattr(robot, "_manual_paused", False):
+                robot._manual_paused = True
+                if has_method(robot, "on_manual_pause"):
+                    robot.on_manual_pause()
+            if events.get("exit_early", False):  # arrow keys / Esc still work while paused
+                events["exit_early"] = False
+                break
+            time.sleep(0.05)
+            timestamp = time.perf_counter() - start_episode_t
+            continue
+        if getattr(robot, "_manual_paused", False):
+            robot._manual_paused = False
+            if has_method(robot, "on_manual_resume"):
+                robot.on_manual_resume()
         step_data = robot.teleop_step(record_data=True, insert_meta_data=insert_meta_data, episode_index=episode_index, frame_index=frame_index)
         if step_data is not None:
             observation, action = step_data

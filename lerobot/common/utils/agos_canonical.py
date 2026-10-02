@@ -171,14 +171,147 @@ def canonical_normalize(depth: np.ndarray, invalid_fill: float = 1.0) -> np.ndar
     return out
 
 
-def overlay_profiles(plug_view: dict, socket_view: dict) -> np.ndarray:
-    """Debug overlay in AGOS colours: socket green, plug body red, plug face orange, face∩socket yellow."""
-    plug_mask, socket_mask, plug_depth = plug_view["mask"], socket_view["mask"], plug_view["depth"]
-    img = np.full(plug_mask.shape + (3,), 255, dtype=np.uint8)
+def canonical_views(
+    plug_points_fingertip: np.ndarray,
+    plug_colors: np.ndarray,
+    fingertip_pose: np.ndarray,
+    socket_points_world: np.ndarray,
+    socket_colors: np.ndarray,
+    shared_center: bool = True,
+) -> dict:
+    """Port of AGOS ``AutoMateTaskAGOS.canonical_views``.
+
+    Plug cloud moved to the given fingertip pose and rendered bottom-up; socket rendered top-down.
+    With ``shared_center`` the plug is rendered about the socket centre (so the overlay shows where
+    the plug is relative to the hole); ``plug_own_center`` is the policy view (own xy-mean centre).
+    """
+    plug_world = fingertip_points_to_world(plug_points_fingertip, fingertip_pose)
+    socket_view = render_socket_canonical(socket_points_world, socket_colors)
+    center = socket_view["center_xy"] if shared_center else None
+    plug_view = render_world_canonical(
+        plug_world, plug_colors, +1, point_radius=PLUG_POINT_RADIUS, center_xy=center, center_mode="mean"
+    )
+    plug_own = (
+        plug_view
+        if not shared_center
+        else render_world_canonical(plug_world, plug_colors, +1, point_radius=PLUG_POINT_RADIUS, center_mode="mean")
+    )
+    overlay = overlay_profiles(plug_view["mask"], socket_view["mask"], plug_view["depth"])
+    return {"plug": plug_view, "plug_own_center": plug_own, "socket": socket_view, "overlay": overlay,
+            "plug_points_world": plug_world, "fingertip_pose": np.asarray(fingertip_pose)}
+
+
+def overlay_on_depth(plug_mask: np.ndarray, socket_depth: np.ndarray, alpha: float = 0.55) -> np.ndarray:
+    """Verbatim AGOS ``overlay_on_depth``: plug mask over the socket depth (grey, nearer = brighter),
+    red where it covers socket material, yellow where it covers the hole / background."""
+    d = np.asarray(socket_depth, dtype=np.float32)
+    valid = np.isfinite(d)
+    grey = np.zeros(d.shape, dtype=np.float32)
+    if valid.any():
+        x = d[valid]
+        grey[valid] = 255.0 * (1.0 - (x - x.min()) / max(float(x.max() - x.min()), 1e-9))
+    rgb = np.repeat(grey[..., None], 3, axis=-1)
+    plug = np.asarray(plug_mask, dtype=bool)
+    over = plug & valid
+    hole = plug & ~valid
+    for m, col in ((over, (220.0, 60.0, 40.0)), (hole, (240.0, 200.0, 40.0))):
+        rgb[m] = (1.0 - alpha) * rgb[m] + alpha * np.asarray(col, dtype=np.float32)
+    return rgb.astype(np.uint8)
+
+
+def overlay_profiles(plug_mask: np.ndarray, socket_mask: np.ndarray, plug_depth=None) -> np.ndarray:
+    """Verbatim AGOS ``overlay_profiles``: socket green, plug body dark red, plug face (within 2 mm
+    of its min depth) red, face over socket yellow, on black."""
+    h, w = socket_mask.shape
+    img = np.zeros((h, w, 3), dtype=np.uint8)
     img[socket_mask] = (40, 150, 90)
-    img[plug_mask] = (150, 40, 40)
-    if plug_mask.any():
-        face = plug_mask & (plug_depth <= np.nanmin(plug_depth) + 0.002)
+    if plug_depth is not None:
+        finite = np.isfinite(plug_depth)
+        face = finite & (plug_depth <= (np.nanmin(plug_depth) + 0.002 if finite.any() else 0))
+        body = plug_mask & ~face
+        img[body] = (150, 40, 40)
         img[face] = (235, 60, 40)
-        img[face & socket_mask] = (250, 220, 60)
+        both = face & socket_mask
+    else:
+        img[plug_mask] = (235, 60, 40)
+        both = plug_mask & socket_mask
+    img[both] = (250, 220, 60)
     return img
+
+
+PAPER_PLUG_RGB = np.array([232.0, 128.0, 120.0])  # salmon
+
+
+def paper_overlay(plug_view: dict, socket_view: dict, radius_frac: float | None = None,
+                  socket_grey_max: float = 0.85) -> np.ndarray:
+    """Paper-style AGOS overlay: white background, socket virtual image in grey levels by depth (top
+    face black, deeper lighter, as the policy sees it), plug virtual image in salmon on top, shaded by
+    depth (bottom face lightest, body darker). ``radius_frac`` optionally masks everything outside a
+    centred disk to black.
+    """
+    h, w = socket_view["mask"].shape
+    img = np.full((h, w, 3), 255.0, dtype=np.float32)
+    socket_depth = np.asarray(socket_view["depth"], dtype=np.float32)
+    socket_mask = np.isfinite(socket_depth)
+    if socket_mask.any():
+        # Same grey levels as the policy input (AGOS min-max): top face black, deeper (hole) lighter;
+        # capped below white so the deepest socket pixels stay distinct from the background.
+        norm = canonical_normalize(socket_depth)
+        img[socket_mask] = (socket_grey_max * 255.0 * norm[socket_mask])[:, None]
+    plug_mask = plug_view["mask"]
+    if plug_mask.any():
+        d = plug_view["depth"][plug_mask]
+        t = (d - d.min()) / max(float(d.max() - d.min()), 1e-9)  # 0 = nearest (tip face)
+        shade = 1.0 - 0.35 * t
+        img[plug_mask] = PAPER_PLUG_RGB[None, :] * shade[:, None]
+        # thin dark outline of the plug face profile for readability
+        from scipy.ndimage import binary_closing, binary_fill_holes
+
+        face = plug_mask & (np.nan_to_num(plug_view["depth"], nan=np.inf) <= d.min() + 0.002)
+        face = binary_fill_holes(binary_closing(face, iterations=2))  # splat gaps are not edges
+        edge = face & ~(np.roll(face, 1, 0) & np.roll(face, -1, 0) & np.roll(face, 1, 1) & np.roll(face, -1, 1))
+        img[edge] = PAPER_PLUG_RGB * 0.55
+    if radius_frac is not None:
+        yy, xx = np.mgrid[0:h, 0:w]
+        radius = radius_frac * min(h, w)
+        outside = (yy - (h - 1) / 2.0) ** 2 + (xx - (w - 1) / 2.0) ** 2 > radius ** 2
+        img[outside] = 0.0
+    return img.astype(np.uint8)
+
+
+def agos_figure(wrist_rgbs: list, overlays: list, path: str, num_columns: int = 6, title: str | None = None) -> str:
+    """Two-row figure like the AGOS paper: (a) wrist observations, (b) AGOS overlays, evenly sampled."""
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    n = len(overlays)
+    if n == 0:
+        return ""
+    idx = np.unique(np.linspace(0, n - 1, min(num_columns, n)).round().astype(int))
+    ref_wrist = next((w for w in wrist_rgbs if w is not None), None)
+    wrist_h, wrist_w = (ref_wrist.shape[:2] if ref_wrist is not None else (180, 320))
+    over_h, over_w = overlays[0].shape[:2]
+    col_w = 2.0  # inches per column
+    row_h = [col_w * wrist_h / wrist_w, col_w * over_h / over_w]
+    label_h = 0.28
+    fig = plt.figure(figsize=(col_w * len(idx), sum(row_h) + 2 * label_h + (0.3 if title else 0.0)))
+    grid = fig.add_gridspec(4, len(idx), height_ratios=[label_h, row_h[0], label_h, row_h[1]],
+                            hspace=0.0, wspace=0.04, left=0.005, right=0.995, top=0.93 if title else 0.995, bottom=0.005)
+    for col, i in enumerate(idx):
+        for row, img in ((1, wrist_rgbs[i]), (3, overlays[i])):
+            ax = fig.add_subplot(grid[row, col])
+            if img is not None:
+                ax.imshow(img)
+            ax.axis("off")
+    for row, text in ((0, "(a) Wrist Observation"),
+                      (2, "(b) AGOS Overlay:  plug virtual image (salmon) over socket virtual image (black)")):
+        ax = fig.add_subplot(grid[row, :])
+        ax.axis("off")
+        ax.text(0.0, 0.15, text, fontsize=10, ha="left", va="bottom", transform=ax.transAxes)
+    if title:
+        fig.suptitle(title, fontsize=9)
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    return path
